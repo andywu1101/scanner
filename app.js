@@ -524,8 +524,8 @@ $('#fileGallery').addEventListener('change', async (e) => {
 
 /* ---------- 即時掃描 ---------- */
 const live = { running: false };
-const STABLE_MS = 650;   // 大致不動多久就拍
-const STABLE_TOL = 0.035; // 容許的晃動（畫面比例）
+const STABLE_MS = 500;   // 鎖定後大致不動多久就拍
+const STABLE_TOL = 0.03;  // 容許的手抖（畫面比例）
 async function startLive(docId) {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     toast('此瀏覽器不支援即時相機，請改用「高畫質拍照」'); return;
@@ -535,6 +535,7 @@ async function startLive(docId) {
     hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0,
   });
   pauseQueue(); // 掃描期間暫停高解析度處理，讓抓邊保持流暢
+  resetLock();
   $('#liveThumb').style.visibility = 'hidden';
   $('#autoBtn').classList.toggle('on', settings.autoShutter);
   $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
@@ -595,60 +596,186 @@ function frameSig(v) {
 }
 function sigDiff(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / a.length; }
 
+// ---- 偵測結果的穩定化：先「鎖定」紙張才顯示框，框用中位數平滑 ----
+function medianQuad(list) {
+  const med = (arr) => { const a = arr.slice().sort((x, y) => x - y); return a[a.length >> 1]; };
+  return [0, 1, 2, 3].map((i) => [med(list.map((q) => q[i][0])), med(list.map((q) => q[i][1]))]);
+}
+function resetLock() {
+  Object.assign(live, { cand: [], acc: [], lockQ: null, outliers: 0, miss: 0, anchorQ: null, stableSince: 0, progress: 0, best: null, prevQs: null, lastQs: null });
+  live.lastQuad = null;
+}
+// 清晰度（梯度能量），用來從穩定期間挑最清楚的一格
+function sharpness(d) {
+  const { width: w, height: h, data } = d;
+  let s = 0, n = 0;
+  const x0 = w >> 3, x1 = w - x0, y0 = h >> 3, y1 = h - y0;
+  for (let y = y0; y < y1; y += 2) {
+    let i = (y * w + x0) * 4;
+    for (let x = x0; x < x1; x += 2, i += 8) {
+      const g = data[i + 1], gx = data[i + 9], gy = data[i + 1 + w * 4];
+      const dx = gx - g, dy = gy - g;
+      s += dx * dx + dy * dy; n++;
+    }
+  }
+  return s / n;
+}
+// 紙張「內部內容」指紋：依偵測到的四角取樣，所以手抖時不變；有手經過或換頁時才會變
+function grayThumb(d) {
+  const step = Math.max(1, Math.floor(d.width / 160));
+  const w = Math.floor(d.width / step), h = Math.floor(d.height / step);
+  const g = new Float32Array(w * h), src = d.data, W = d.width;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = ((y * step) * W + x * step) * 4;
+    g[y * w + x] = src[i] * 0.3 + src[i + 1] * 0.59 + src[i + 2] * 0.11;
+  }
+  // 模糊兩次，去掉五線譜這類細線造成的鋸齒
+  boxBlur(g, w, h, 3); boxBlur(g, w, h, 3);
+  return { w, h, g };
+}
+function boxBlur(g, w, h, r) {
+  const t = new Float32Array(g.length), n = 2 * r + 1;
+  for (let y = 0; y < h; y++) {
+    let acc = 0;
+    for (let x = -r; x <= r; x++) acc += g[y * w + Math.min(w - 1, Math.max(0, x))];
+    for (let x = 0; x < w; x++) {
+      t[y * w + x] = acc / n;
+      acc += g[y * w + Math.min(w - 1, x + r + 1)] - g[y * w + Math.max(0, x - r)];
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let acc = 0;
+    for (let y = -r; y <= r; y++) acc += t[Math.min(h - 1, Math.max(0, y)) * w + x];
+    for (let y = 0; y < h; y++) {
+      g[y * w + x] = acc / n;
+      acc += t[Math.min(h - 1, y + r + 1) * w + x] - t[Math.max(0, y - r) * w + x];
+    }
+  }
+}
+function quadSig(gt, q) {
+  const N = 12, M = 16, out = new Float32Array(N * M);
+  let sum = 0;
+  for (let j = 0; j < M; j++) for (let i = 0; i < N; i++) {
+    const u = 0.1 + 0.8 * (i + 0.5) / N, v = 0.1 + 0.8 * (j + 0.5) / M;
+    const x = ((1 - v) * ((1 - u) * q[0][0] + u * q[1][0]) + v * ((1 - u) * q[3][0] + u * q[2][0])) * (gt.w - 1);
+    const y = ((1 - v) * ((1 - u) * q[0][1] + u * q[1][1]) + v * ((1 - u) * q[3][1] + u * q[2][1])) * (gt.h - 1);
+    const x0 = Math.max(0, Math.min(gt.w - 2, Math.floor(x))), y0 = Math.max(0, Math.min(gt.h - 2, Math.floor(y)));
+    const fx = x - x0, fy = y - y0, g = gt.g, w = gt.w;
+    const val = g[y0 * w + x0] * (1 - fx) * (1 - fy) + g[y0 * w + x0 + 1] * fx * (1 - fy) + g[(y0 + 1) * w + x0] * (1 - fx) * fy + g[(y0 + 1) * w + x0 + 1] * fx * fy;
+    out[j * N + i] = val; sum += val;
+  }
+  const mean = sum / out.length;
+  let v2 = 0; for (const x of out) v2 += (x - mean) ** 2;
+  const sd = Math.sqrt(v2 / out.length) + 6; // +6 避免空白頁被雜訊放大
+  for (let k = 0; k < out.length; k++) out[k] = (out[k] - mean) / sd;
+  return out;
+}
+function qsDiff(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / a.length; }
+const MOTION_TOL = 0.35;  // 倒數期間紙內容的變化上限（超過代表有手或東西在動）
+const CHANGE_TOL = 0.45;  // 與上一張相比超過此值，代表換頁了
+
+// 兩張全解析度暫存畫布輪流使用：一張存目前最清楚的，一張給新的一格
+const fullCanvases = [document.createElement('canvas'), document.createElement('canvas')];
+function grabInto(c, v) {
+  if (c.width !== v.videoWidth || c.height !== v.videoHeight) { c.width = v.videoWidth; c.height = v.videoHeight; }
+  c.getContext('2d').drawImage(v, 0, 0);
+  return c;
+}
+function grabFull(v) { return grabInto(fullCanvases[0], v); }
+
 async function liveLoop() {
   if (!live.running) return;
   const v = $('#video');
   if (workerReady && !live.detecting && !live.capturing && v.videoWidth) {
     live.detecting = true;
     try {
-      // 快要穩定時，先把這一格全解析度畫面存起來；觸發快門時用的就是「判斷穩定的那一格」
-      const pre = settings.autoShutter && live.armed && live.progress >= 0.5 && !live.ic;
-      const full = pre ? grabFull(v) : null;
+      // 進入穩定倒數後，每一格都先存全解析度畫面（與偵測用的是同一瞬間）
+      const pre = settings.autoShutter && live.armed && live.lockQ && live.progress > 0 && !live.ic;
+      let full = null;
+      if (pre) {
+        const spare = live.best && live.best.canvas === fullCanvases[0] ? fullCanvases[1] : fullCanvases[0];
+        full = grabInto(spare, v);
+      }
       const sig = frameSig(v);
-      const d = smallFrame(v, 400);
+      const d = smallFrame(v, 480);
+      const sharp = sharpness(d);
+      const gt = grayThumb(d);
       const r = await wcall('detect', { buffer: d.data.buffer, width: d.width, height: d.height, fast: true }, [d.data.buffer]);
-      onDetect(r, sig, full);
+      onDetect(r, sig, full, sharp, gt);
     } catch (e) { console.warn(e); }
     live.detecting = false;
   }
-  if (live.running) setTimeout(liveLoop, 30);
+  if (live.running) setTimeout(liveLoop, 20);
 }
-const preCanvas = document.createElement('canvas');
-function grabFull(v) {
-  if (preCanvas.width !== v.videoWidth || preCanvas.height !== v.videoHeight) { preCanvas.width = v.videoWidth; preCanvas.height = v.videoHeight; }
-  preCanvas.getContext('2d').drawImage(v, 0, 0);
-  return preCanvas;
-}
-function onDetect(r, sig, full) {
+
+function onDetect(r, sig, full, sharp, gt) {
   if (!live.running || live.capturing) return;
   const now = performance.now();
-  if (r && r.area > 0.1) {
-    const q = r.corners;
-    live.miss = 0;
-    live.lastQuad = q;
-    live.hist.push({ t: now, q });
-    while (live.hist.length && now - live.hist[0].t > 1500) live.hist.shift();
-    // 從最新往回找：一直都在容許範圍內的起始時間
-    let since = now;
-    for (let i = live.hist.length - 1; i >= 0; i--) { if (maxDisp(live.hist[i].q, q) < STABLE_TOL) since = live.hist[i].t; else break; }
-    const progress = Math.min(1, (now - since) / STABLE_MS);
-    live.progress = progress;
-    // 拍完後：框移動、消失或畫面內容改變（翻頁）就重新待命
-    if (!live.armed) {
-      const moved = live.capturedQuad && maxDisp(q, live.capturedQuad) > 0.06;
-      const changed = live.capturedSig && sigDiff(sig, live.capturedSig) > 9;
-      if (moved || changed) live.armed = true;
-    }
-    if (!live.armed) { setHint('換下一頁，或按「完成」', true); setRing(0); return; }
-    if (settings.autoShutter) {
-      setRing(progress);
-      if (progress >= 1 && Date.now() - live.lastCapT > 900) { capture(sig, full, q); return; }
-      setHint(progress > 0.25 ? '保持穩定…' : '找到文件了', progress > 0.25);
-    } else setHint('按下快門拍攝', true);
-  } else {
+  const ok = r && r.area > 0.1;
+  const qs = ok ? quadSig(gt, r.corners) : null;
+  live.dbg = { motion: live.prevQs && qs ? qsDiff(qs, live.prevQs) : null, change: live.capturedQs && qs ? qsDiff(qs, live.capturedQs) : null };
+
+  // 拍完後：等換頁／移開才重新開始，期間不顯示框
+  if (!live.armed) {
+    const moved = ok && live.capturedQuad && maxDisp(r.corners, live.capturedQuad) > 0.08;
+    const changed = qs && live.capturedQs && qsDiff(qs, live.capturedQs) > CHANGE_TOL;
+    if (!ok) live.miss++; else live.miss = 0;
+    if (moved || changed || live.miss >= 3) { live.rearm = moved ? 'moved' : changed ? 'changed' : 'miss'; live.armed = true; resetLock(); }
+    else { setHint('已拍好，請換下一頁', true); return; }
+  }
+
+  if (!ok) {
     live.miss++;
-    if (live.miss >= 3) { live.lastQuad = null; live.hist = []; live.progress = 0; live.armed = true; setRing(0); }
-    if (live.miss >= 3) setHint(live.count ? '放入下一頁' : '將文件放進畫面中');
+    live.cand = [];
+    if (live.miss >= 4 && live.lockQ) resetLock();
+    if (!live.lockQ) { setRing(0); setHint(live.count ? '放入下一頁' : '將文件放進畫面中'); }
+    return;
+  }
+  live.miss = 0;
+  const q = r.corners;
+
+  if (!live.lockQ) {
+    // 尚未鎖定：需要連續 3 格位置一致，才確定是文件
+    if (live.cand.length && maxDisp(q, live.cand[live.cand.length - 1]) > 0.05) live.cand = [];
+    live.cand.push(q);
+    if (live.cand.length < 3) { setHint('尋找文件中…'); return; }
+    live.lockQ = medianQuad(live.cand);
+    live.acc = live.cand.slice();
+    live.cand = [];
+    live.anchorQ = live.lockQ; live.stableSince = now; live.best = null;
+  } else {
+    // 已鎖定：離群值忽略，連續 3 次離群才放棄鎖定（例如紙被拿走）
+    if (maxDisp(q, live.lockQ) > 0.12) {
+      if (++live.outliers >= 3) resetLock();
+      return;
+    }
+    live.outliers = 0;
+    live.acc.push(q);
+    if (live.acc.length > 5) live.acc.shift();
+    live.lockQ = medianQuad(live.acc);
+  }
+  live.lastQuad = live.lockQ;
+
+  // 紙內容在動（手經過、正在翻頁）→ 重新倒數
+  const motion = live.prevQs ? qsDiff(qs, live.prevQs) : 0; // qs 是依這一格實際四角取樣
+  live.prevQs = qs;
+  if (motion > MOTION_TOL) { live.anchorQ = live.lockQ; live.stableSince = now; live.best = null; live.lastQs = null; }
+  live.lastQs = live.prevQs;
+
+  // 穩定判斷：容許自然手抖（約 3%），超過就重新倒數
+  if (maxDisp(live.lockQ, live.anchorQ) > STABLE_TOL) { live.anchorQ = live.lockQ; live.stableSince = now; live.best = null; }
+  const progress = Math.min(1, (now - live.stableSince) / STABLE_MS);
+  live.progress = progress;
+
+  // 記錄倒數期間最清楚的一格
+  if (full && (!live.best || sharp > live.best.sharp)) live.best = { canvas: full, sharp, quad: q.map((p) => p.slice()) };
+
+  if (!settings.autoShutter) { setRing(0); setHint('按下快門拍攝', true); return; }
+  setRing(progress);
+  setHint('對準了，保持住…', true);
+  if (progress >= 1 && Date.now() - live.lastCapT > 800) {
+    const b = live.best;
+    capture(sig, b ? b.canvas : null, b ? b.quad : live.lockQ);
   }
 }
 function videoRect() {
@@ -667,22 +794,26 @@ function drawOverlay() {
   const ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, R.cw, R.ch);
-  const target = live.lastQuad;
+  const target = live.armed && !live.capturing ? live.lockQ : null;
   if (target) {
-    if (!live.shown || maxDisp(live.shown, target) > 0.15) live.shown = target.map((p) => p.slice());
-    else live.shown = live.shown.map((p, i) => [p[0] + (target[i][0] - p[0]) * 0.6, p[1] + (target[i][1] - p[1]) * 0.6]);
-  } else live.shown = null;
+    if (!live.shown) { live.shown = target.map((p) => p.slice()); live.fade = 0; }
+    else live.shown = live.shown.map((p, i) => [p[0] + (target[i][0] - p[0]) * 0.5, p[1] + (target[i][1] - p[1]) * 0.5]);
+    live.fade = Math.min(1, (live.fade || 0) + 0.2);
+  } else { live.shown = null; live.fade = 0; }
   if (live.shown) {
     const pts = live.shown.map((p) => [R.x + p[0] * R.w, R.y + p[1] * R.h]);
-    const good = settings.autoShutter ? live.progress > 0.25 && live.armed : true;
+    const pr = settings.autoShutter ? live.progress : 1;
+    ctx.globalAlpha = live.fade;
     ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))); ctx.closePath();
-    ctx.fillStyle = good ? 'rgba(143,179,138,.28)' : 'rgba(201,147,95,.22)';
+    // 綠色隨倒數逐漸變濃
+    ctx.fillStyle = `rgba(143,179,138,${0.12 + 0.3 * pr})`;
     ctx.fill();
-    ctx.lineWidth = 3; ctx.lineJoin = 'round';
-    ctx.strokeStyle = good ? '#9FCC98' : '#F2C48D';
+    ctx.lineWidth = 3 + pr; ctx.lineJoin = 'round';
+    ctx.strokeStyle = '#A8D4A1';
     ctx.stroke();
     ctx.fillStyle = '#fff';
     pts.forEach((p) => { ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, 7); ctx.fill(); });
+    ctx.globalAlpha = 1;
   }
   requestAnimationFrame(drawOverlay);
 }
@@ -693,33 +824,37 @@ function flash() {
 async function capture(sig, full, quadAt) {
   if (live.capturing || !live.running) return;
   live.capturing = true;
-  const quad = quadAt || live.lastQuad;
+  const quad = quadAt || live.lockQ;
   const v = $('#video');
   if (!sig) sig = frameSig(v);
   setRing(0);
   try {
-    let blob = null, fromPhoto = false;
+    let blob = null, fromPhoto = false, src = null;
     if (live.ic && !full) {
       // Android：全解析度拍照需要一點時間，拍好才閃光
       setHint('拍攝中，請勿移動…', true);
       try { blob = await live.ic.takePhoto(); fromPhoto = !!blob; } catch (e) { console.warn('takePhoto', e); }
     }
     if (!blob) {
-      const c = full || grabFull(v); // 畫面在這一刻已經固定
+      src = full || grabFull(v); // 畫面在這一刻已經固定
       flash();
-      blob = await toBlob(c, 'image/jpeg', 0.97);
-    } else flash();
+      setHint('已拍好，請換下一頁', true);
+      live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; // 立刻隱藏框
+      blob = await toBlob(src, 'image/jpeg', 0.97);
+    } else { flash(); setHint('已拍好，請換下一頁', true); live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; }
     let corners = quad ? quad.map((p) => p.slice()) : FULL.map((p) => p.slice());
-    if (fromPhoto) {
-      // 全解析度照片的長寬比可能與預覽不同，重新偵測
-      try {
+    // 用較高解析度重新精算四個角（只在結果相近時採用，避免抓錯）
+    try {
+      let r = null, sameAspect = true;
+      if (fromPhoto) {
         const { img, url } = await loadImg(blob);
-        const sameAspect = Math.abs(img.naturalWidth / img.naturalHeight - v.videoWidth / v.videoHeight) < 0.02;
-        const r = await detectOn(img);
+        sameAspect = Math.abs(img.naturalWidth / img.naturalHeight - v.videoWidth / v.videoHeight) < 0.02;
+        r = await detectOn(img);
         URL.revokeObjectURL(url);
-        if (r) corners = r.corners; else if (!sameAspect) corners = FULL.map((p) => p.slice());
-      } catch (_) {}
-    }
+      } else if (src) r = await detectOn(src);
+      if (r && (!quad || !sameAspect || maxDisp(r.corners, quad) < 0.06)) corners = r.corners;
+      else if (!r && !sameAspect) corners = FULL.map((p) => p.slice());
+    } catch (_) {}
     if (!live.docId) live.docId = (await createDoc()).id;
     const page = await addPage(live.docId, blob, corners);
     live.count++;
@@ -727,10 +862,11 @@ async function capture(sig, full, quadAt) {
     th.style.visibility = 'visible';
     th.querySelector('span').textContent = live.count;
     th.querySelector('img').src = blobUrl('live:last', blob, page.id);
-    live.capturedQuad = quad; live.capturedSig = sig; live.armed = !quad; live.hist = []; live.progress = 0; live.lastCapT = Date.now();
-    setHint(`已拍攝第 ${live.count} 頁`, true);
+    live.lastCapT = Date.now(); live.miss = 0; live.best = null;
+    if (!quad) { live.armed = true; resetLock(); }
   } catch (e) {
     console.error(e); toast('拍攝失敗：' + e.message);
+    live.armed = true; resetLock();
   }
   live.capturing = false;
 }
@@ -742,7 +878,7 @@ $('#autoBtn').onclick = () => {
   settings.autoShutter = !settings.autoShutter; saveSettings();
   $('#autoBtn').classList.toggle('on', settings.autoShutter);
   $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
-  live.hist = []; setRing(0);
+  resetLock(); setRing(0);
 };
 let torchOn = false;
 $('#torchBtn').onclick = async () => {
@@ -1057,13 +1193,21 @@ function fitView() {
   const s = Math.min((st.width - pad * 2) / img.naturalWidth, (st.height - pad * 2) / img.naturalHeight);
   const w = img.naturalWidth * s, h = img.naturalHeight * s;
   zoom.base = { x: (st.width - w) / 2, y: (st.height - h) / 2, w, h };
-  img.style.width = w + 'px'; img.style.height = h + 'px';
   applyZoom();
 }
-function applyZoom() {
+// 手勢進行中用 transform 縮放（流暢）；手勢結束後把圖片「實際尺寸」設成放大後的大小，
+// 瀏覽器才會用原圖細節重新繪製，放大後不會糊（iPhone 只用 transform 會把小圖拉大）
+function applyZoom(gesturing) {
   const b = zoom.base; if (!b) return;
-  if (zoom.s <= 1.001) { zoom.s = 1; zoom.x = 0; zoom.y = 0; }
-  $('#viewImg').style.transform = `translate(${b.x + zoom.x}px,${b.y + zoom.y}px) scale(${zoom.s})`;
+  const img = $('#viewImg');
+  if (!gesturing && zoom.s <= 1.001) { zoom.s = 1; zoom.x = 0; zoom.y = 0; }
+  // 實際尺寸最多放到「原圖 1 像素 = 螢幕 1 像素」，再大就只是放大像素，交給 transform
+  const capS = Math.max(1, img.naturalWidth / (b.w * (window.devicePixelRatio || 1)));
+  if (!gesturing || !zoom.cs) zoom.cs = Math.min(zoom.s, capS);
+  const cs = zoom.cs;
+  img.style.width = b.w * cs + 'px'; img.style.height = b.h * cs + 'px';
+  const k = zoom.s / cs;
+  img.style.transform = `translate(${b.x + zoom.x}px,${b.y + zoom.y}px)` + (Math.abs(k - 1) > 1e-4 ? ` scale(${k})` : '');
 }
 (() => {
   const stage = $('#viewStage');
@@ -1107,11 +1251,11 @@ function applyZoom() {
       const ns = Math.min(10, Math.max(1, g.s0 * d / g.d0));
       const ix = (g.m0[0] - B.x - g.x0) / g.s0, iy = (g.m0[1] - B.y - g.y0) / g.s0;
       zoom.s = ns; zoom.x = m[0] - B.x - ix * ns; zoom.y = m[1] - B.y - iy * ns;
-      applyZoom();
+      applyZoom(true);
     } else if (g.type === 'pan' && zoom.s > 1) {
       const p = pos(e);
       zoom.x = g.x0 + p[0] - g.start[0]; zoom.y = g.y0 + p[1] - g.start[1];
-      applyZoom();
+      applyZoom(true);
     }
   });
   const up = (e) => {
@@ -1122,7 +1266,7 @@ function applyZoom() {
       if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
     }
     swipeStart = null;
-    if (pts.size === 0) g = null;
+    if (pts.size === 0) { g = null; applyZoom(false); }
     else if (pts.size === 1) { const q = [...pts.values()][0]; g = { type: 'pan', start: q, x0: zoom.x, y0: zoom.y }; }
   };
   stage.addEventListener('pointerup', up);
