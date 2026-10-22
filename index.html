@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>可可掃描</title>
+<meta name="theme-color" content="#6B4632">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="可可掃描">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<style>
+:root{
+  --bg:#F6EFE6; --surface:#FFFCF8; --surface2:#EFE4D7; --line:#E3D5C4;
+  --cocoa:#6B4632; --cocoa-d:#4A2F22; --cocoa-l:#8A604A; --caramel:#C9935F; --cream:#FAF3E9;
+  --sage:#8FB38A; --sage-d:#5E8A59; --text:#3A281E; --muted:#8C7564; --danger:#B4533F;
+  --cam:#1C130E;
+  --st:env(safe-area-inset-top,0px); --sb:env(safe-area-inset-bottom,0px);
+  --font:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--font);overscroll-behavior:none}
+body{overflow:hidden;-webkit-user-select:none;user-select:none}
+button{font:inherit;color:inherit;border:0;background:none;padding:0;cursor:pointer}
+svg{display:block}
+.screen{position:fixed;inset:0;display:none;flex-direction:column;background:var(--bg)}
+.screen.active{display:flex}
+
+/* 頂列 */
+.bar{display:flex;align-items:center;gap:8px;padding:calc(var(--st) + 10px) 12px 10px;background:var(--cocoa);color:var(--cream);min-height:56px;flex:none}
+.bar h1{font-size:19px;margin:0 0 0 4px;font-weight:700;letter-spacing:.06em;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar .title-btn{flex:1;text-align:left;font-size:17px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:6px 4px}
+.ibtn{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;flex:none}
+.ibtn:active{background:rgba(255,255,255,.14)}
+.ibtn svg{width:24px;height:24px}
+.tbtn{padding:8px 12px;border-radius:10px;font-weight:600;font-size:15px}
+.tbtn:active{background:rgba(255,255,255,.14)}
+.tbtn.solid{background:var(--cream);color:var(--cocoa)}
+
+/* 首頁 */
+.scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px 20px}
+.doclist{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
+.doc{background:var(--surface);border-radius:14px;overflow:hidden;box-shadow:0 1px 0 var(--line),0 4px 14px rgba(74,47,34,.07);text-align:left;display:flex;flex-direction:column}
+.doc:active{transform:scale(.98)}
+.doc .th{aspect-ratio:3/4;background:var(--surface2);display:grid;place-items:center;overflow:hidden;position:relative}
+.doc .th img{width:100%;height:100%;object-fit:cover;object-position:top}
+.doc .th .n{position:absolute;right:8px;bottom:8px;background:rgba(58,40,30,.78);color:#fff;font-size:12px;padding:2px 8px;border-radius:20px}
+.doc .meta{padding:9px 11px 11px}
+.doc .t{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.doc .d{font-size:12px;color:var(--muted);margin-top:3px}
+.empty{min-height:62vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--muted);height:100%;gap:14px;padding:30px}
+.empty svg{width:96px;height:96px;opacity:.85}
+.empty b{color:var(--cocoa);font-size:17px}
+
+.actions{flex:none;display:flex;align-items:center;justify-content:space-around;padding:12px 20px calc(var(--sb) + 14px);background:var(--surface);border-top:1px solid var(--line)}
+.act{display:flex;flex-direction:column;align-items:center;gap:5px;font-size:12.5px;color:var(--cocoa);min-width:70px}
+.act .c{width:52px;height:52px;border-radius:50%;display:grid;place-items:center;background:var(--surface2)}
+.act .c svg{width:26px;height:26px}
+.act.main .c{width:70px;height:70px;background:var(--cocoa);color:var(--cream);box-shadow:0 6px 18px rgba(107,70,50,.35)}
+.act.main .c svg{width:32px;height:32px}
+.act:active .c{filter:brightness(.92)}
+
+/* 即時掃描 */
+#live{background:var(--cam);color:#fff}
+#live .stage{position:relative;flex:1;overflow:hidden}
+#video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+#overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+#live .top{position:absolute;left:0;right:0;top:0;padding:calc(var(--st) + 8px) 10px 8px;display:flex;align-items:center;gap:6px;background:linear-gradient(rgba(0,0,0,.55),transparent);z-index:2}
+#live .top .sp{flex:1}
+.pill{background:rgba(28,19,14,.6);border-radius:20px;padding:7px 13px;font-size:13.5px;font-weight:600;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.pill.on{background:var(--sage-d)}
+#hint{position:absolute;left:50%;top:calc(var(--st) + 66px);transform:translateX(-50%);z-index:2;white-space:nowrap;pointer-events:none;transition:background .2s}
+#resChip{position:absolute;left:12px;bottom:12px;font-size:11px;opacity:.75;z-index:2;font-weight:500;padding:4px 9px}
+#live .bottom{flex:none;display:flex;align-items:center;justify-content:space-between;padding:16px 22px calc(var(--sb) + 18px);background:var(--cam)}
+#liveThumb{width:56px;height:56px;border-radius:10px;overflow:hidden;background:#3a2b22;position:relative;border:2px solid rgba(255,255,255,.6);visibility:hidden}
+#liveThumb img{width:100%;height:100%;object-fit:cover}
+#liveThumb span{position:absolute;right:-1px;top:-1px;background:var(--caramel);color:#fff;font-size:12px;font-weight:700;min-width:20px;height:20px;border-radius:0 0 0 8px;display:grid;place-items:center;padding:0 4px}
+#shutter{width:76px;height:76px;border-radius:50%;border:4px solid #fff;display:grid;place-items:center;position:relative}
+#shutter::after{content:"";width:60px;height:60px;border-radius:50%;background:#fff;transition:transform .1s}
+#shutter:active::after{transform:scale(.88)}
+#shutter svg{position:absolute;inset:-4px;width:76px;height:76px;transform:rotate(-90deg)}
+#liveDone{min-width:56px;font-weight:700;color:var(--caramel);font-size:16px;text-align:right}
+#flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:3}
+#flash.go{animation:fl .35s ease-out}
+@keyframes fl{0%{opacity:.85}100%{opacity:0}}
+
+/* 裁切 */
+#crop{background:var(--cam);color:#fff}
+#crop .bar{background:var(--cam)}
+#cropStage{position:relative;flex:1;overflow:hidden;touch-action:none}
+#cropImg{position:absolute;pointer-events:none}
+#cropSvg{position:absolute;overflow:visible}
+#loupe{position:absolute;width:132px;height:132px;border-radius:50%;border:3px solid #fff;box-shadow:0 4px 18px rgba(0,0,0,.5);display:none;top:calc(12px);pointer-events:none;background:#000}
+.tools{flex:none;display:flex;justify-content:space-around;padding:10px 8px calc(var(--sb) + 12px)}
+.tool{display:flex;flex-direction:column;align-items:center;gap:4px;font-size:12px;min-width:64px;padding:6px 4px;border-radius:12px;opacity:.95}
+.tool svg{width:25px;height:25px}
+.tool:active{background:rgba(255,255,255,.12)}
+.tool[disabled]{opacity:.35;pointer-events:none}
+
+/* 文件頁 */
+.pagegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:14px}
+.pg{position:relative;background:var(--surface);border-radius:10px;overflow:hidden;box-shadow:0 1px 0 var(--line),0 3px 12px rgba(74,47,34,.08);aspect-ratio:3/4;display:grid;place-items:center}
+.pg img{width:100%;height:100%;object-fit:contain;background:#fff}
+.pg .no{position:absolute;left:7px;top:7px;background:var(--cocoa);color:var(--cream);font-size:12px;font-weight:700;border-radius:20px;min-width:22px;height:22px;display:grid;place-items:center;padding:0 6px}
+.pg .wait{position:absolute;inset:0;display:grid;place-items:center;background:rgba(246,239,230,.7)}
+.pg.add{background:transparent;border:2px dashed var(--line);box-shadow:none;color:var(--cocoa-l);font-size:13px;gap:6px;align-content:center}
+.pg.add svg{width:30px;height:30px;margin:0 auto}
+.dock{flex:none;display:flex;justify-content:space-around;padding:8px 8px calc(var(--sb) + 10px);background:var(--surface);border-top:1px solid var(--line);color:var(--cocoa)}
+.dock .tool{color:var(--cocoa)}
+.dock .tool:active{background:var(--surface2)}
+
+/* 單頁檢視 */
+#page{background:#E9DFD3}
+#viewStage{position:relative;flex:1;overflow:hidden;touch-action:none}
+#viewImg{position:absolute;left:0;top:0;transform-origin:0 0;box-shadow:0 4px 22px rgba(58,40,30,.25);background:#fff;will-change:transform}
+.navarrow{position:absolute;top:50%;transform:translateY(-50%);width:40px;height:56px;display:grid;place-items:center;color:var(--cocoa);background:rgba(255,252,248,.75);border-radius:12px;z-index:2}
+.navarrow svg{width:22px;height:22px}
+#prevBtn{left:6px}#nextBtn{right:6px}
+.modes{flex:none;display:flex;gap:8px;justify-content:center;padding:10px 10px 4px;background:var(--surface);flex-wrap:wrap}
+.chip{padding:8px 15px;border-radius:20px;background:var(--surface2);color:var(--cocoa);font-size:14px;font-weight:600}
+.chip.on{background:var(--cocoa);color:var(--cream)}
+#viewBusy{position:absolute;right:12px;top:12px;display:none;z-index:3}
+
+/* 底部選單 */
+#sheetWrap{position:fixed;inset:0;background:rgba(40,26,18,.42);display:none;z-index:20;align-items:flex-end}
+#sheetWrap.show{display:flex}
+#sheet{width:100%;background:var(--surface);border-radius:20px 20px 0 0;padding:8px 16px calc(var(--sb) + 16px);max-height:85vh;overflow-y:auto;animation:up .22s ease-out}
+@keyframes up{from{transform:translateY(40px);opacity:.4}}
+#sheet .grab{width:40px;height:5px;border-radius:3px;background:var(--line);margin:4px auto 10px}
+#sheet h3{margin:4px 4px 12px;font-size:17px;color:var(--cocoa-d)}
+.srow{display:flex;align-items:center;gap:12px;width:100%;padding:13px 12px;border-radius:12px;text-align:left;font-size:16px}
+.srow:active{background:var(--surface2)}
+.srow svg{width:24px;height:24px;color:var(--cocoa);flex:none}
+.srow .sub{font-size:12.5px;color:var(--muted);display:block;margin-top:2px}
+.srow.danger,.srow.danger svg{color:var(--danger)}
+.seg{display:flex;background:var(--surface2);border-radius:12px;padding:3px;gap:3px;margin:0 0 14px}
+.seg button{flex:1;padding:9px 4px;border-radius:9px;font-size:14px;font-weight:600;color:var(--cocoa)}
+.seg button.on{background:var(--surface);box-shadow:0 1px 4px rgba(74,47,34,.15)}
+.lbl{font-size:13px;color:var(--muted);margin:6px 4px 7px}
+.switch{display:flex;align-items:center;justify-content:space-between;padding:12px 4px;font-size:15.5px;border-top:1px solid var(--line)}
+.switch small{display:block;color:var(--muted);font-size:12.5px;margin-top:2px}
+.tg{width:50px;height:30px;border-radius:15px;background:var(--line);position:relative;flex:none;transition:background .2s}
+.tg::after{content:"";position:absolute;left:3px;top:3px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:left .2s}
+.tg.on{background:var(--sage-d)}
+.tg.on::after{left:23px}
+.bigbtn{display:block;width:100%;padding:14px;border-radius:14px;background:var(--cocoa);color:var(--cream);font-size:16px;font-weight:700;margin-top:10px}
+.bigbtn.alt{background:var(--surface2);color:var(--cocoa)}
+.note{font-size:12.5px;color:var(--muted);line-height:1.6;margin:12px 4px 0}
+
+/* 忙碌、提示 */
+#busy{position:fixed;inset:0;background:rgba(40,26,18,.5);display:none;place-items:center;z-index:30}
+#busy.show{display:grid}
+#busy .box{background:var(--surface);border-radius:16px;padding:22px 26px;display:flex;flex-direction:column;align-items:center;gap:14px;min-width:170px;color:var(--cocoa-d);font-weight:600;font-size:15px}
+.spin{width:34px;height:34px;border-radius:50%;border:3.5px solid var(--surface2);border-top-color:var(--cocoa);animation:sp .8s linear infinite}
+.spin.sm{width:22px;height:22px;border-width:3px}
+@keyframes sp{to{transform:rotate(360deg)}}
+#toast{position:fixed;left:50%;bottom:calc(var(--sb) + 100px);transform:translateX(-50%) translateY(20px);background:rgba(58,40,30,.92);color:#fff;padding:10px 18px;border-radius:22px;font-size:14px;opacity:0;transition:all .25s;z-index:40;pointer-events:none;max-width:86vw;text-align:center}
+#toast.show{opacity:1;transform:translateX(-50%)}
+input[type=file]{display:none}
+</style>
+</head>
+<body>
+
+<!-- 首頁 -->
+<section class="screen active" id="home">
+  <header class="bar">
+    <h1>可可掃描</h1>
+    <button class="ibtn" id="btnSettings" aria-label="設定"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+  </header>
+  <div class="scroll" id="homeScroll"><div class="doclist" id="docList"></div></div>
+  <nav class="actions">
+    <button class="act" data-src="gallery"><span class="c"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="M21 15l-5-5L5 21"/></svg></span>相簿匯入</button>
+    <button class="act main" data-src="live"><span class="c"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M7 12h10"/></svg></span>即時掃描</button>
+    <button class="act" data-src="camera"><span class="c"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></span>高畫質拍照</button>
+  </nav>
+</section>
+
+<!-- 即時掃描 -->
+<section class="screen" id="live">
+  <div class="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+    <div id="flash"></div>
+    <div class="top">
+      <button class="ibtn" id="liveClose" aria-label="關閉"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <span class="sp"></span>
+      <button class="pill" id="torchBtn" style="display:none">閃光燈</button>
+      <button class="pill" id="autoBtn">自動</button>
+    </div>
+    <div class="pill" id="hint">影像引擎載入中…</div>
+    <div class="pill" id="resChip"></div>
+  </div>
+  <div class="bottom">
+    <button id="liveThumb"><img alt=""><span>0</span></button>
+    <button id="shutter" aria-label="拍攝"><svg viewBox="0 0 76 76"><circle id="ring" cx="38" cy="38" r="36" fill="none" stroke="#8FB38A" stroke-width="4" stroke-dasharray="226.2" stroke-dashoffset="226.2" stroke-linecap="round"/></svg></button>
+    <button id="liveDone">完成</button>
+  </div>
+</section>
+
+<!-- 裁切 -->
+<section class="screen" id="crop">
+  <header class="bar">
+    <button class="tbtn" id="cropCancel">取消</button>
+    <h1 style="text-align:center;font-size:16px">調整掃描範圍</h1>
+    <button class="tbtn solid" id="cropOk">確定</button>
+  </header>
+  <div id="cropStage">
+    <img id="cropImg" alt="">
+    <svg id="cropSvg"></svg>
+    <canvas id="loupe" width="264" height="264"></canvas>
+  </div>
+  <div class="tools">
+    <button class="tool" id="cropRetake"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>重拍</button>
+    <button class="tool" id="cropFull"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 3v3M16 3v3M8 21v-3M16 21v-3M3 8h3M3 16h3M21 8h-3M21 16h-3"/></svg>全頁</button>
+    <button class="tool" id="cropAuto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M12 8l1.2 2.8L16 12l-2.8 1.2L12 16l-1.2-2.8L8 12l2.8-1.2z"/></svg>自動偵測</button>
+  </div>
+</section>
+
+<!-- 文件 -->
+<section class="screen" id="doc">
+  <header class="bar">
+    <button class="ibtn" id="docBack" aria-label="返回"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <button class="title-btn" id="docTitle"></button>
+    <button class="ibtn" id="docMore" aria-label="更多"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg></button>
+  </header>
+  <div class="scroll"><div class="pagegrid" id="pageGrid"></div></div>
+  <div class="dock">
+    <button class="tool" id="docAdd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新增頁面</button>
+    <button class="tool" id="docMode"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v18" /><path d="M12 3a9 9 0 0 1 0 18" fill="currentColor"/></svg>全部模式</button>
+    <button class="tool" id="docPdf"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>匯出 PDF</button>
+    <button class="tool" id="docImg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="M21 15l-5-5L5 21"/></svg>匯出圖片</button>
+  </div>
+</section>
+
+<!-- 單頁 -->
+<section class="screen" id="page">
+  <header class="bar">
+    <button class="ibtn" id="pageBack" aria-label="返回"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <h1 id="pageTitle" style="text-align:center;font-size:16px"></h1>
+    <button class="ibtn" id="pageDel" aria-label="刪除此頁"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></svg></button>
+  </header>
+  <div id="viewStage">
+    <img id="viewImg" alt="">
+    <button class="navarrow" id="prevBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <button class="navarrow" id="nextBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
+    <div id="viewBusy"><div class="spin"></div></div>
+  </div>
+  <div class="modes" id="modeChips"></div>
+  <div class="dock" style="border-top:0">
+    <button class="tool" id="pgCrop"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/></svg>裁切</button>
+    <button class="tool" id="pgRotL"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 2v6h6"/><path d="M2.7 15.6A9 9 0 1 0 5 6.5L2.5 8"/></svg>向左轉</button>
+    <button class="tool" id="pgRotR"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6"/><path d="M21.3 15.6A9 9 0 1 1 19 6.5L21.5 8"/></svg>向右轉</button>
+    <button class="tool" id="pgMoveL"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 17l-5-5 5-5M18 17l-5-5 5-5"/></svg>往前移</button>
+    <button class="tool" id="pgMoveR"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 17l5-5-5-5M6 17l5-5-5-5"/></svg>往後移</button>
+  </div>
+</section>
+
+<div id="sheetWrap"><div id="sheet"></div></div>
+<div id="busy"><div class="box"><div class="spin"></div><div id="busyMsg">處理中…</div></div></div>
+<div id="toast"></div>
+<input type="file" id="fileCamera" accept="image/*" capture="environment">
+<input type="file" id="fileGallery" accept="image/*" multiple>
+
+<script src="app.js"></script>
+</body>
+</html>
