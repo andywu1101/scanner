@@ -94,7 +94,7 @@ function bestQuadFromEdges(cv, edges, w, h) {
   return best ? { quad: best, area: bestArea / frame } : null;
 }
 
-function detectQuad(cv, rgba, w, h) {
+function detectQuad(cv, rgba, w, h, fast) {
   const src = new cv.Mat(h, w, cv.CV_8UC4);
   src.data.set(rgba);
   const gray = new cv.Mat();
@@ -111,11 +111,14 @@ function detectQuad(cv, rgba, w, h) {
     cv.dilate(edges, edges, k);
     const r = bestQuadFromEdges(cv, edges, w, h);
     if (r) candidates.push(r);
+    if (fast && r && r.area > 0.15) break; // 即時模式：找到就停，省時間也讓框更穩定
   }
   // 策略 3：Otsu 二值化（白紙在深色桌面）
+  if (!(fast && candidates.length)) {
   cv.threshold(blur, edges, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
   cv.morphologyEx(edges, edges, cv.MORPH_CLOSE, k);
   { const r = bestQuadFromEdges(cv, edges, w, h); if (r) candidates.push(r); }
+  }
   // 策略 4：飽和度通道（白紙在有色桌面）
   if (!candidates.length) {
     const rgb = new cv.Mat(); cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
@@ -285,8 +288,8 @@ self.onmessage = async (e) => {
   try {
     const { cv } = await getCv();
     if (type === 'detect') {
-      const { buffer, width, height } = e.data;
-      const r = detectQuad(cv, new Uint8Array(buffer), width, height);
+      const { buffer, width, height, fast } = e.data;
+      const r = detectQuad(cv, new Uint8Array(buffer), width, height, !!fast);
       self.postMessage({ id, ok: true, result: r });
     } else if (type === 'process') {
       const r = processPage(cv, e.data);

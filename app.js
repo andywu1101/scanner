@@ -11,10 +11,11 @@ const MODES = [
 const MAX_PIXELS = 16000000; // iOS canvas 上限約 16.7M 像素
 
 /* ---------- 設定 ---------- */
-const DEFAULTS = { mode: 'color', pdfSize: 'a4', autoShutter: true, confirmCrop: true };
+const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, confirmCrop: true, v: 2 };
 const settings = (() => {
   let s = {};
   try { s = JSON.parse(localStorage.getItem('cocoscan-settings') || '{}'); } catch (_) {}
+  if (s.v !== 2) { s.mode = 'bw'; s.v = 2; } // 1.1 起預設黑白
   return Object.assign({}, DEFAULTS, s);
 })();
 function saveSettings() { try { localStorage.setItem('cocoscan-settings', JSON.stringify(settings)); } catch (_) {} }
@@ -49,11 +50,23 @@ const DB = {
       t.onabort = () => rej(t.error);
     });
   },
-  get(store, id) { return this.tx(store, 'readonly', (s) => s.get(id)); },
-  put(store, v) { return this.tx(store, 'readwrite', (s) => s.put(v)); },
+  // iPhone Safari 存進 IndexedDB 的 Blob 日後可能讀不出來，所以一律存成 ArrayBuffer
+  async get(store, id) { return unpackRec(await this.tx(store, 'readonly', (s) => s.get(id))); },
+  async put(store, v) { const r = await packRec(v); return this.tx(store, 'readwrite', (s) => s.put(r)); },
   del(store, id) { return this.tx(store, 'readwrite', (s) => s.delete(id)); },
-  all(store) { return this.tx(store, 'readonly', (s) => s.getAll()); },
+  async all(store) { return (await this.tx(store, 'readonly', (s) => s.getAll())).map(unpackRec); },
 };
+const BLOB_FIELDS = ['original', 'processed', 'thumb'];
+async function packRec(v) {
+  const o = Object.assign({}, v);
+  for (const f of BLOB_FIELDS) if (o[f] instanceof Blob) o[f] = { __ab: await o[f].arrayBuffer(), type: o[f].type || 'image/jpeg' };
+  return o;
+}
+function unpackRec(v) {
+  if (!v) return v;
+  for (const f of BLOB_FIELDS) if (v[f] && v[f].__ab) v[f] = new Blob([v[f].__ab], { type: v[f].type });
+  return v;
+}
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
 /* ---------- Worker ---------- */
@@ -130,14 +143,15 @@ async function detectBlob(blob) {
 
 /* ---------- 物件網址快取 ---------- */
 const urlCache = new Map();
-function blobUrl(key, blob) {
+function blobUrl(key, blob, ver) {
   const old = urlCache.get(key);
-  if (old && old.blob === blob) return old.url;
+  if (old && old.ver === ver) return old.url;
   if (old) URL.revokeObjectURL(old.url);
   const url = URL.createObjectURL(blob);
-  urlCache.set(key, { blob, url });
+  urlCache.set(key, { ver, url });
   return url;
 }
+const verOf = (p, field) => (p[field] ? field + (p.ver || 0) : 'o');
 function dropUrls(prefix) {
   for (const [k, v] of urlCache) if (k.startsWith(prefix)) { URL.revokeObjectURL(v.url); urlCache.delete(k); }
 }
@@ -146,9 +160,12 @@ function dropUrls(prefix) {
 let queue = Promise.resolve();
 const procCount = new Map();
 const processing = { has: (id) => (procCount.get(id) || 0) > 0 };
+let queueGate = null;
+function pauseQueue() { if (!queueGate) { let r; queueGate = new Promise((x) => { r = x; }); queueGate.release = r; } }
+function resumeQueue() { if (queueGate) { const g = queueGate; queueGate = null; g.release(); } }
 function enqueue(pageId) {
   procCount.set(pageId, (procCount.get(pageId) || 0) + 1);
-  queue = queue.then(() => processPageNow(pageId)).catch((e) => { console.error(e); toast('處理失敗：' + e.message); })
+  queue = queue.then(() => queueGate).then(() => processPageNow(pageId)).catch((e) => { console.error(e); toast('處理失敗：' + e.message); })
     .finally(() => { procCount.set(pageId, procCount.get(pageId) - 1); onPageUpdated(pageId); });
   return queue;
 }
@@ -174,7 +191,7 @@ async function processPageNow(pageId) {
   const latest = await DB.get('pages', pageId);
   if (!latest) return;
   if (latest.mode !== page.mode || latest.rotation !== page.rotation || JSON.stringify(latest.corners) !== JSON.stringify(page.corners)) return;
-  latest.processed = processed; latest.thumb = thumb; latest.outW = r.width; latest.outH = r.height;
+  latest.processed = processed; latest.thumb = thumb; latest.ver = (latest.ver || 0) + 1; latest.outW = r.width; latest.outH = r.height;
   await DB.put('pages', latest);
 }
 async function waitQueue() { await queue; }
@@ -218,6 +235,7 @@ window.addEventListener('popstate', (e) => {
   closeSheet();
   if (s === 'home') { renderHome(); show('home'); }
   else if (s === 'doc') { state.docId = e.state.doc; renderDoc(); show('doc'); }
+  else if (s === 'burst') { renderBurst(); show('burst'); }
   else if (s === 'page') { state.docId = e.state.doc; state.pageIndex = e.state.i; renderPage(); show('page'); }
   else { renderHome(); show('home'); }
 });
@@ -269,7 +287,7 @@ async function renderHome() {
     const b = document.createElement('button');
     b.className = 'doc';
     const th = first && (first.thumb || first.original);
-    b.innerHTML = `<div class="th">${th ? `<img src="${blobUrl('home:' + first.id, th)}" alt="">` : ''}<span class="n">${doc.pageIds.length} 頁</span></div><div class="meta"><div class="t"></div><div class="d">${fmtDate(doc.updated)}</div></div>`;
+    b.innerHTML = `<div class="th">${th ? `<img src="${blobUrl('home:' + first.id, th, verOf(first, 'thumb'))}" alt="">` : ''}<span class="n">${doc.pageIds.length} 頁</span></div><div class="meta"><div class="t"></div><div class="d">${fmtDate(doc.updated)}</div></div>`;
     b.querySelector('.t').textContent = doc.title;
     b.onclick = () => openDoc(doc.id);
     list.appendChild(b);
@@ -278,41 +296,89 @@ async function renderHome() {
 
 /* ---------- 來源選擇 ---------- */
 let cameraTarget = null; // docId 或 null（新文件）
+function openCamera() { const i = $('#fileCamera'); i.value = ''; i.click(); }
 function startSource(src, docId) {
   if (src === 'live') return startLive(docId);
   cameraTarget = docId;
-  if (src === 'camera') { $('#fileCamera').value = ''; $('#fileCamera').click(); }
+  if (src === 'camera') { startBurst(docId); openCamera(); }
   else { $('#fileGallery').value = ''; $('#fileGallery').click(); }
 }
 document.querySelectorAll('#home .act').forEach((b) => b.onclick = () => startSource(b.dataset.src, null));
 
+// iPhone：相機／相簿傳回的 File 是暫存檔，稍後可能失效，立刻讀進記憶體
+async function stableBlob(file) {
+  return new Blob([await file.arrayBuffer()], { type: file.type || 'image/jpeg' });
+}
+
+/* ---------- 高畫質連拍 ---------- */
+const burst = { docId: null, fromDoc: false, onStack: false, count: 0, lastPageId: null };
+function startBurst(docId) {
+  Object.assign(burst, { docId, fromDoc: !!docId, onStack: false, count: 0, lastPageId: null });
+}
+async function burstAdd(blob, corners) {
+  if (!burst.docId) burst.docId = (await createDoc()).id;
+  const page = await addPage(burst.docId, blob, corners);
+  burst.count++; burst.lastPageId = page.id;
+  return page;
+}
+function toBurst() {
+  renderBurst();
+  if (current === 'burst') return;
+  if (current === 'crop' && burst.onStack) { history.back(); return; }
+  if (current === 'crop') history.replaceState({ s: 'burst' }, ''); else history.pushState({ s: 'burst' }, '');
+  burst.onStack = true;
+  show('burst');
+}
+async function renderBurst() {
+  $('#burstCount').textContent = burst.count ? `已拍 ${burst.count} 張` : '尚未拍攝';
+  $('#burstConfirm').classList.toggle('on', settings.confirmCrop);
+  $('#burstRetake').disabled = !burst.lastPageId;
+  const img = $('#burstImg');
+  if (burst.lastPageId) {
+    const p = await DB.get('pages', burst.lastPageId);
+    if (p) { img.src = blobUrl('burst', p.original, p.id); img.style.visibility = 'visible'; }
+  } else img.style.visibility = 'hidden';
+}
+$('#burstNext').onclick = () => openCamera();
+$('#burstConfirm').onclick = () => { settings.confirmCrop = !settings.confirmCrop; saveSettings(); renderBurst(); };
+$('#burstRetake').onclick = async () => {
+  openCamera();
+  if (!burst.lastPageId) return;
+  const doc = await DB.get('docs', burst.docId);
+  doc.pageIds = doc.pageIds.filter((id) => id !== burst.lastPageId);
+  await DB.put('docs', doc);
+  await DB.del('pages', burst.lastPageId);
+  burst.count--; burst.lastPageId = doc.pageIds.length && burst.count ? doc.pageIds[doc.pageIds.length - 1] : null;
+  renderBurst();
+};
+async function finishBurst() {
+  const id = burst.docId;
+  if (!id || !burst.count) { history.back(); return; }
+  if (burst.fromDoc) { history.back(); setTimeout(renderDoc, 60); return; }
+  state.docId = id;
+  history.replaceState({ s: 'doc', doc: id }, '');
+  await renderDoc(); show('doc');
+}
+$('#burstDone').onclick = finishBurst;
+
 $('#fileCamera').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
-  const fromDoc = !!cameraTarget && current === 'doc';
   busy('偵測文件邊框…');
-  let corners;
-  try { corners = await detectBlob(file); } catch (err) { unbusy(); toast(err.message); return; }
+  let blob, corners;
+  try { blob = await stableBlob(file); corners = await detectBlob(blob); }
+  catch (err) { unbusy(); toast(err.message); return; }
   unbusy();
-  const commit = async (c) => {
-    let docId = cameraTarget;
-    if (!docId) { docId = (await createDoc()).id; cameraTarget = docId; }
-    await addPage(docId, file, c);
-    return docId;
-  };
   if (settings.confirmCrop) {
     openCrop({
-      blob: file, corners, retake: true,
-      onConfirm: async (c) => {
-        const id = await commit(c);
-        if (fromDoc) { history.back(); setTimeout(renderDoc, 50); } else openDoc(id, true);
-      },
-      onRetake: () => { $('#fileCamera').value = ''; $('#fileCamera').click(); },
+      blob, corners, retake: true, burst: true,
+      onConfirm: async (c) => { await burstAdd(blob, c); toBurst(); },
+      onRetake: () => openCamera(),
     });
   } else {
-    const id = await commit(corners);
-    openDoc(id, current !== 'doc');
-    toast('已加入一頁');
+    await burstAdd(blob, corners);
+    toBurst();
+    toast(`已加入第 ${burst.count} 張`);
   }
 });
 
@@ -324,8 +390,9 @@ $('#fileGallery').addEventListener('change', async (e) => {
   for (let i = 0; i < files.length; i++) {
     busy(`匯入中 ${i + 1} / ${files.length}`);
     try {
-      const c = await detectBlob(files[i]);
-      await addPage(docId, files[i], c);
+      const blob = await stableBlob(files[i]);
+      const c = await detectBlob(blob);
+      await addPage(docId, blob, c);
     } catch (err) { toast(err.message); }
   }
   unbusy();
@@ -334,15 +401,17 @@ $('#fileGallery').addEventListener('change', async (e) => {
 
 /* ---------- 即時掃描 ---------- */
 const live = { running: false };
-const STABLE_N = 9;
+const STABLE_MS = 650;   // 大致不動多久就拍
+const STABLE_TOL = 0.035; // 容許的晃動（畫面比例）
 async function startLive(docId) {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     toast('此瀏覽器不支援即時相機，請改用「高畫質拍照」'); return;
   }
   Object.assign(live, {
     running: true, docId, fromDoc: !!docId, count: 0, stream: null, track: null, ic: null, lastQuad: null, shown: null,
-    stable: 0, miss: 0, armed: true, capturedQuad: null, capturing: false, detecting: false, lastCapT: 0,
+    hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0,
   });
+  pauseQueue(); // 掃描期間暫停高解析度處理，讓抓邊保持流暢
   $('#liveThumb').style.visibility = 'hidden';
   $('#autoBtn').classList.toggle('on', settings.autoShutter);
   $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
@@ -385,10 +454,23 @@ function stopLive() {
   if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
   live.stream = null;
   $('#video').srcObject = null;
+  resumeQueue();
 }
-function setHint(t, good) { const h = $('#hint'); h.textContent = t; h.classList.toggle('on', !!good); }
+function setHint(t, good) { const h = $('#hint'); if (h.textContent !== t) h.textContent = t; h.classList.toggle('on', !!good); }
 function setRing(p) { $('#ring').setAttribute('stroke-dashoffset', String(226.2 * (1 - p))); }
 const maxDisp = (a, b) => Math.max(...a.map((p, i) => Math.hypot(p[0] - b[i][0], p[1] - b[i][1])));
+
+// 畫面內容指紋（判斷是否換頁）
+const sigCanvas = canvasOf(24, 32);
+function frameSig(v) {
+  const ctx = sigCanvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(v, 0, 0, 24, 32);
+  const d = ctx.getImageData(0, 0, 24, 32).data;
+  const g = new Uint8Array(24 * 32);
+  for (let i = 0; i < g.length; i++) g[i] = (d[i * 4] + d[i * 4 + 1] * 2 + d[i * 4 + 2]) >> 2;
+  return g;
+}
+function sigDiff(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / a.length; }
 
 async function liveLoop() {
   if (!live.running) return;
@@ -396,35 +478,45 @@ async function liveLoop() {
   if (workerReady && !live.detecting && !live.capturing && v.videoWidth) {
     live.detecting = true;
     try {
-      const d = smallFrame(v, 480);
-      const r = await wcall('detect', { buffer: d.data.buffer, width: d.width, height: d.height }, [d.data.buffer]);
-      onDetect(r);
+      const sig = frameSig(v);
+      const d = smallFrame(v, 400);
+      const r = await wcall('detect', { buffer: d.data.buffer, width: d.width, height: d.height, fast: true }, [d.data.buffer]);
+      onDetect(r, sig);
     } catch (e) { console.warn(e); }
     live.detecting = false;
   }
-  if (live.running) setTimeout(liveLoop, 70);
+  if (live.running) setTimeout(liveLoop, 30);
 }
-function onDetect(r) {
+function onDetect(r, sig) {
   if (!live.running || live.capturing) return;
-  if (r && r.area > 0.12) {
+  const now = performance.now();
+  if (r && r.area > 0.1) {
     const q = r.corners;
     live.miss = 0;
-    if (live.lastQuad && maxDisp(q, live.lastQuad) < 0.02) live.stable++;
-    else live.stable = 0;
     live.lastQuad = q;
-    if (!live.armed && live.capturedQuad && maxDisp(q, live.capturedQuad) > 0.12) live.armed = true;
+    live.hist.push({ t: now, q });
+    while (live.hist.length && now - live.hist[0].t > 1500) live.hist.shift();
+    // 從最新往回找：一直都在容許範圍內的起始時間
+    let since = now;
+    for (let i = live.hist.length - 1; i >= 0; i--) { if (maxDisp(live.hist[i].q, q) < STABLE_TOL) since = live.hist[i].t; else break; }
+    const progress = Math.min(1, (now - since) / STABLE_MS);
+    live.progress = progress;
+    // 拍完後：框移動、消失或畫面內容改變（翻頁）就重新待命
+    if (!live.armed) {
+      const moved = live.capturedQuad && maxDisp(q, live.capturedQuad) > 0.06;
+      const changed = live.capturedSig && sigDiff(sig, live.capturedSig) > 9;
+      if (moved || changed) live.armed = true;
+    }
     if (!live.armed) { setHint('換下一頁，或按「完成」', true); setRing(0); return; }
     if (settings.autoShutter) {
-      setRing(Math.min(1, live.stable / STABLE_N));
-      if (live.stable >= STABLE_N && Date.now() - live.lastCapT > 1200) { capture(); return; }
-      setHint(live.stable > 2 ? '保持穩定…' : '找到文件了', live.stable > 2);
-    } else {
-      setHint('按下快門拍攝', true);
-    }
+      setRing(progress);
+      if (progress >= 1 && Date.now() - live.lastCapT > 900) { capture(sig); return; }
+      setHint(progress > 0.25 ? '保持穩定…' : '找到文件了', progress > 0.25);
+    } else setHint('按下快門拍攝', true);
   } else {
     live.miss++;
-    if (live.miss >= 4) { live.lastQuad = null; live.stable = 0; live.armed = true; setRing(0); }
-    if (live.miss >= 2) setHint(live.count ? '放入下一頁' : '將文件放進畫面中');
+    if (live.miss >= 3) { live.lastQuad = null; live.hist = []; live.progress = 0; live.armed = true; setRing(0); }
+    if (live.miss >= 3) setHint(live.count ? '放入下一頁' : '將文件放進畫面中');
   }
 }
 function videoRect() {
@@ -445,12 +537,12 @@ function drawOverlay() {
   ctx.clearRect(0, 0, R.cw, R.ch);
   const target = live.lastQuad;
   if (target) {
-    if (!live.shown) live.shown = target.map((p) => p.slice());
-    live.shown = live.shown.map((p, i) => [p[0] + (target[i][0] - p[0]) * 0.45, p[1] + (target[i][1] - p[1]) * 0.45]);
+    if (!live.shown || maxDisp(live.shown, target) > 0.15) live.shown = target.map((p) => p.slice());
+    else live.shown = live.shown.map((p, i) => [p[0] + (target[i][0] - p[0]) * 0.6, p[1] + (target[i][1] - p[1]) * 0.6]);
   } else live.shown = null;
   if (live.shown) {
     const pts = live.shown.map((p) => [R.x + p[0] * R.w, R.y + p[1] * R.h]);
-    const good = settings.autoShutter ? live.stable > 2 && live.armed : true;
+    const good = settings.autoShutter ? live.progress > 0.25 && live.armed : true;
     ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))); ctx.closePath();
     ctx.fillStyle = good ? 'rgba(143,179,138,.28)' : 'rgba(201,147,95,.22)';
     ctx.fill();
@@ -462,11 +554,12 @@ function drawOverlay() {
   }
   requestAnimationFrame(drawOverlay);
 }
-async function capture() {
+async function capture(sig) {
   if (live.capturing || !live.running) return;
   live.capturing = true;
   const quad = live.lastQuad;
   const v = $('#video');
+  if (!sig) sig = frameSig(v);
   const f = $('#flash'); f.classList.remove('go'); void f.offsetWidth; f.classList.add('go');
   if (navigator.vibrate) navigator.vibrate(30);
   setRing(0);
@@ -498,8 +591,8 @@ async function capture() {
     const th = $('#liveThumb');
     th.style.visibility = 'visible';
     th.querySelector('span').textContent = live.count;
-    th.querySelector('img').src = blobUrl('live:last', page.original);
-    live.capturedQuad = quad; live.armed = !quad; live.stable = 0; live.lastCapT = Date.now();
+    th.querySelector('img').src = blobUrl('live:last', blob, page.id);
+    live.capturedQuad = quad; live.capturedSig = sig; live.armed = !quad; live.hist = []; live.progress = 0; live.lastCapT = Date.now();
     setHint(`已拍攝第 ${live.count} 頁`, true);
   } catch (e) {
     console.error(e); toast('拍攝失敗：' + e.message);
@@ -514,7 +607,7 @@ $('#autoBtn').onclick = () => {
   settings.autoShutter = !settings.autoShutter; saveSettings();
   $('#autoBtn').classList.toggle('on', settings.autoShutter);
   $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
-  live.stable = 0; setRing(0);
+  live.hist = []; setRing(0);
 };
 let torchOn = false;
 $('#torchBtn').onclick = async () => {
@@ -544,6 +637,7 @@ async function openCrop(opts) {
   cropCtx = Object.assign({ url, nat: [img.naturalWidth, img.naturalHeight], corners: opts.corners.map((p) => p.slice()) }, opts);
   const ci = $('#cropImg'); ci.src = url;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
+  $('#cropNext').style.display = opts.burst ? '' : 'none';
   go('crop');
   requestAnimationFrame(layoutCrop);
 }
@@ -636,6 +730,7 @@ $('#cropOk').onclick = async () => {
   await c.onConfirm(q);
 };
 $('#cropCancel').onclick = () => history.back();
+$('#cropNext').onclick = () => { if (!cropCtx) return; openCamera(); $('#cropOk').onclick(); };
 $('#cropRetake').onclick = () => { const c = cropCtx; cropCtx = null; if (c && c.onRetake) c.onRetake(); history.back(); };
 
 /* ---------- 文件頁 ---------- */
@@ -661,7 +756,11 @@ async function renderDoc() {
     const b = document.createElement('button');
     b.className = 'pg'; b.dataset.id = p.id;
     fillPageThumb(b, p, i);
-    b.onclick = () => { state.pageIndex = i; renderPage(); go('page'); };
+    b.onclick = () => {
+      if (Date.now() - lastDragEnd < 300) return;
+      state.pageIndex = [...g.querySelectorAll('.pg:not(.add)')].indexOf(b);
+      renderPage(); go('page');
+    };
     g.appendChild(b);
   });
   const add = document.createElement('button');
@@ -669,11 +768,38 @@ async function renderDoc() {
   add.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新增頁面';
   add.onclick = addSheet;
   g.appendChild(add);
+  setupSort(g);
+}
+// 長按拖曳排序
+let sorter = null, lastDragEnd = 0;
+function setupSort(g) {
+  if (sorter) { sorter.destroy(); sorter = null; }
+  if (typeof Sortable === 'undefined') return;
+  sorter = Sortable.create(g, {
+    draggable: '.pg:not(.add)',
+    filter: '.add',
+    animation: 160,
+    delay: 220, delayOnTouchOnly: true, touchStartThreshold: 6,
+    ghostClass: 'pg-ghost', chosenClass: 'pg-chosen', dragClass: 'pg-drag',
+    forceFallback: true, fallbackTolerance: 4,
+    scroll: true, scrollSensitivity: 80, scrollSpeed: 12, bubbleScroll: true,
+    onMove: (evt) => !evt.related.classList.contains('add'),
+    onChoose: () => { if (navigator.vibrate) navigator.vibrate(15); },
+    onEnd: async () => {
+      lastDragEnd = Date.now();
+      const ids = [...g.querySelectorAll('.pg:not(.add)')].map((el) => el.dataset.id);
+      g.querySelectorAll('.pg:not(.add) .no').forEach((el, i) => { el.textContent = i + 1; });
+      const doc = await DB.get('docs', state.docId);
+      if (doc.pageIds.join() === ids.join()) return;
+      doc.pageIds = ids; doc.updated = Date.now();
+      await DB.put('docs', doc);
+    },
+  });
 }
 function fillPageThumb(el, p, i) {
   const src = p.thumb || p.original;
   const wait = !p.thumb || processing.has(p.id);
-  el.innerHTML = `<img src="${blobUrl('t:' + p.id, src)}" alt=""><span class="no">${i + 1}</span>${wait ? '<span class="wait"><span class="spin sm"></span></span>' : ''}`;
+  el.innerHTML = `<img src="${blobUrl('t:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span class="no">${i + 1}</span>${wait ? '<span class="wait"><span class="spin sm"></span></span>' : ''}`;
 }
 async function onPageUpdated(pageId) {
   if (current === 'doc') {
@@ -696,7 +822,7 @@ $('#docTitle').onclick = renameDoc;
 async function renameDoc() {
   const doc = await DB.get('docs', state.docId);
   const t = prompt('文件名稱', doc.title);
-  if (t && t.trim()) { doc.title = t.trim(); doc.updated = Date.now(); await DB.put('docs', doc); $('#docTitle').textContent = doc.title; }
+  if (t && t.trim()) { doc.title = t.trim(); delete doc.exportName; doc.updated = Date.now(); await DB.put('docs', doc); $('#docTitle').textContent = doc.title; }
 }
 $('#docMore').onclick = () => openSheet(`<h3>文件</h3>
   <button class="srow" data-a="rename">${ICON.edit}<span>重新命名</span></button>
@@ -737,7 +863,7 @@ async function renderPage(keepZoom) {
   $('#nextBtn').style.visibility = state.pageIndex < pages.length - 1 ? 'visible' : 'hidden';
   const img = $('#viewImg');
   const src = p.processed || p.original;
-  const url = blobUrl('v:' + p.id, src);
+  const url = blobUrl('v:' + p.id, src, verOf(p, 'processed'));
   if (img.getAttribute('src') !== url) {
     img.onload = () => {
       const nat = img.naturalWidth + 'x' + img.naturalHeight;
@@ -991,7 +1117,9 @@ function deliverSheet(files, label) {
 }
 $('#docPdf').onclick = () => {
   const sizes = [['a4', 'A4'], ['letter', 'Letter'], ['fit', '依原圖尺寸']];
-  openSheet(`<h3>匯出 PDF</h3><div class="lbl">頁面尺寸</div>
+  openSheet(`<h3>匯出 PDF</h3><div class="lbl">檔案名稱</div>
+    <div class="fname"><input id="fname" type="text" enterkeyhint="done" autocomplete="off"><span>.pdf</span></div>
+    <div class="lbl">頁面尺寸</div>
     <div class="seg" id="pdfSeg">${sizes.map(([k, n]) => `<button data-k="${k}" class="${settings.pdfSize === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     <button class="bigbtn" id="pdfGo">產生 PDF</button>
     <div class="note">彩色、灰階、原圖頁以全解析度 JPEG 原檔嵌入（不再壓縮）；黑白頁以 1-bit 無損嵌入，字跡與五線譜邊緣最銳利。</div>`, (s) => {
@@ -999,7 +1127,9 @@ $('#docPdf').onclick = () => {
       settings.pdfSize = b.dataset.k; saveSettings();
       s.querySelectorAll('#pdfSeg button').forEach((x) => x.classList.toggle('on', x === b));
     });
+    fillName(s);
     s.querySelector('#pdfGo').onclick = async () => {
+      const name = readName(s);
       closeSheet(); busy('等待頁面處理…');
       try {
         await waitQueue();
@@ -1007,24 +1137,43 @@ $('#docPdf').onclick = () => {
         const ready = pages.filter((p) => p.processed);
         const pdf = await buildPdf(doc.title, ready, settings.pdfSize, (i, n) => busy(`產生 PDF ${i} / ${n}`));
         unbusy();
-        deliverSheet([new File([pdf], safeName(doc.title) + '.pdf', { type: 'application/pdf' })], 'PDF ');
+        deliverSheet([new File([pdf], name + '.pdf', { type: 'application/pdf' })], 'PDF ');
       } catch (e) { unbusy(); console.error(e); toast('產生失敗：' + e.message); }
     };
   });
 };
-$('#docImg').onclick = async () => {
-  busy('等待頁面處理…');
-  try {
-    await waitQueue();
-    const { doc, pages } = await getDocPages(state.docId);
-    const files = pages.filter((p) => p.processed).map((p, i) => {
-      const ext = p.processed.type === 'image/png' ? 'png' : 'jpg';
-      return new File([p.processed], `${safeName(doc.title)}_${String(i + 1).padStart(2, '0')}.${ext}`, { type: p.processed.type });
-    });
-    unbusy();
-    deliverSheet(files, '圖片');
-  } catch (e) { unbusy(); toast('匯出失敗：' + e.message); }
-};
+$('#docImg').onclick = () => openSheet(`<h3>匯出圖片</h3><div class="lbl">檔案名稱</div>
+  <div class="fname"><input id="fname" type="text" enterkeyhint="done" autocomplete="off"><span>_01、_02…</span></div>
+  <button class="bigbtn" id="imgGo">產生圖片</button>
+  <div class="note">黑白頁存成 PNG（無損），其他模式存成高品質 JPEG，都是全解析度。</div>`, (s) => {
+  fillName(s);
+  s.querySelector('#imgGo').onclick = async () => {
+    const name = readName(s);
+    closeSheet(); busy('等待頁面處理…');
+    try {
+      await waitQueue();
+      const { pages } = await getDocPages(state.docId);
+      const ready = pages.filter((p) => p.processed);
+      const files = ready.map((p, i) => {
+        const ext = p.processed.type === 'image/png' ? 'png' : 'jpg';
+        const suffix = ready.length > 1 ? '_' + String(i + 1).padStart(2, '0') : '';
+        return new File([p.processed], `${name}${suffix}.${ext}`, { type: p.processed.type });
+      });
+      unbusy();
+      deliverSheet(files, '圖片');
+    } catch (e) { unbusy(); toast('匯出失敗：' + e.message); }
+  };
+});
+async function fillName(s) {
+  const doc = await DB.get('docs', state.docId);
+  const i = s.querySelector('#fname');
+  i.value = doc.exportName || doc.title;
+}
+function readName(s) {
+  const v = safeName(s.querySelector('#fname').value);
+  DB.get('docs', state.docId).then((doc) => { if (doc && doc.exportName !== v) { doc.exportName = v; DB.put('docs', doc); } });
+  return v;
+}
 
 /* ---------- 設定 ---------- */
 $('#btnSettings').onclick = () => {
