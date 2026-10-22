@@ -235,6 +235,7 @@ window.addEventListener('popstate', (e) => {
   closeSheet();
   if (s === 'home') { renderHome(); show('home'); }
   else if (s === 'doc') { state.docId = e.state.doc; renderDoc(); show('doc'); }
+  else if (s === 'library') { renderLibrary(); show('library'); }
   else if (s === 'burst') { renderBurst(); show('burst'); }
   else if (s === 'page') { state.docId = e.state.doc; state.pageIndex = e.state.i; renderPage(); show('page'); }
   else { renderHome(); show('home'); }
@@ -263,6 +264,7 @@ const ICON = {
   share: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v13"/></svg>',
   down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>',
   edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
+  folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>',
 };
 
@@ -271,28 +273,149 @@ function fmtDate(t) {
   const d = new Date(t); const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
+async function deleteDocs(ids) {
+  for (const id of ids) {
+    const doc = await DB.get('docs', id);
+    if (!doc) continue;
+    for (const pid of doc.pageIds) { await DB.del('pages', pid); dropUrls('t:' + pid); dropUrls('v:' + pid); dropUrls('home:' + pid); dropUrls('lib:' + pid); dropUrls('strip:' + pid); }
+    await DB.del('docs', id);
+  }
+}
+const EMPTY_HTML = `<div class="empty"><svg viewBox="0 0 96 96" fill="none"><rect x="22" y="12" width="52" height="68" rx="6" fill="#EFE4D7"/><path d="M32 34h32M32 44h32M32 54h22" stroke="#C9935F" stroke-width="4" stroke-linecap="round"/><path d="M10 26V14a4 4 0 0 1 4-4h12M70 10h12a4 4 0 0 1 4 4v12M86 70v12a4 4 0 0 1-4 4H70M26 86H14a4 4 0 0 1-4-4V70" stroke="#6B4632" stroke-width="4" stroke-linecap="round"/></svg><b>還沒有掃描文件</b><div>按下方「即時掃描」對準文件自動拍攝，<br>或用「高畫質拍照」取得最清晰的原圖。</div></div>`;
+let homeTimer = null;
+function renderHomeSoon() { clearTimeout(homeTimer); homeTimer = setTimeout(renderHome, 250); }
 async function renderHome() {
   const docs = (await DB.all('docs')).sort((a, b) => b.updated - a.updated);
-  const list = $('#docList');
-  if (!docs.length) {
-    list.style.display = 'block';
-    list.innerHTML = `<div class="empty"><svg viewBox="0 0 96 96" fill="none"><rect x="22" y="12" width="52" height="68" rx="6" fill="#EFE4D7"/><path d="M32 34h32M32 44h32M32 54h22" stroke="#C9935F" stroke-width="4" stroke-linecap="round"/><path d="M10 26V14a4 4 0 0 1 4-4h12M70 10h12a4 4 0 0 1 4 4v12M86 70v12a4 4 0 0 1-4 4H70M26 86H14a4 4 0 0 1-4-4V70" stroke="#6B4632" stroke-width="4" stroke-linecap="round"/></svg><b>還沒有掃描文件</b><div>按下方「即時掃描」對準文件自動拍攝，<br>或用「高畫質拍照」取得最清晰的原圖。</div></div>`;
-    return;
-  }
+  const body = $('#homeBody');
+  if (!docs.length) { body.innerHTML = EMPTY_HTML; return; }
+  const doc = docs[0];
+  const pages = (await Promise.all(doc.pageIds.map((id) => DB.get('pages', id)))).filter(Boolean);
+  // 正在改名時不要重畫，避免打斷輸入
+  const active = document.activeElement;
+  if (active && active.id === 'recentName' && body.dataset.doc === doc.id) { updateHomeStrip(pages); return; }
+  body.dataset.doc = doc.id;
+  body.innerHTML = `
+    <div class="sec">最近掃描</div>
+    <div class="recent">
+      <label class="rname">${ICON.edit}<input id="recentName" type="text" enterkeyhint="done" autocomplete="off" aria-label="文件名稱"></label>
+      <div class="rmeta">${pages.length} 頁・${fmtDate(doc.updated)}</div>
+      <div class="strip" id="homeStrip"></div>
+      <div class="rbtns">
+        <button class="bigbtn alt" id="recentOpen">開啟文件</button>
+        <button class="bigbtn" id="recentPdf">匯出 PDF</button>
+      </div>
+    </div>
+    <button class="allbtn" id="allDocs"><span>${ICON.folder}全部文件</span><span class="cnt">${docs.length} 份 ›</span></button>`;
+  const inp = $('#recentName');
+  inp.value = doc.title;
+  const save = async () => {
+    const v = inp.value.trim();
+    const d = await DB.get('docs', doc.id);
+    if (!d || !v || v === d.title) { if (!v) inp.value = d ? d.title : ''; return; }
+    d.title = v; delete d.exportName; await DB.put('docs', d);
+    toast('已重新命名');
+  };
+  inp.addEventListener('change', save);
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); });
+  updateHomeStrip(pages);
+  $('#recentOpen').onclick = () => openDoc(doc.id);
+  $('#recentPdf').onclick = () => { state.docId = doc.id; openPdfSheet(); };
+  $('#allDocs').onclick = () => { renderLibrary(); go('library'); };
+}
+function updateHomeStrip(pages) {
+  const strip = $('#homeStrip');
+  if (!strip) return;
+  const docId = $('#homeBody').dataset.doc;
+  strip.innerHTML = '';
+  pages.forEach((p, i) => {
+    const b = document.createElement('button');
+    b.className = 'sth';
+    const src = p.thumb || p.original;
+    b.innerHTML = `<img src="${blobUrl('strip:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span>${i + 1}</span>${!p.thumb || processing.has(p.id) ? '<i class="spin sm"></i>' : ''}`;
+    b.onclick = async () => {
+      state.docId = docId; await renderDoc();
+      history.pushState({ s: 'doc', doc: docId }, '');
+      state.pageIndex = i; renderPage(); go('page');
+    };
+    strip.appendChild(b);
+  });
+}
+
+/* ---------- 全部文件（多選、合併、刪除） ---------- */
+const lib = { selecting: false, order: [] };
+async function renderLibrary() {
+  const docs = (await DB.all('docs')).sort((a, b) => b.updated - a.updated);
+  const list = $('#libList');
+  lib.order = lib.order.filter((id) => docs.some((d) => d.id === id));
+  $('#libSelect').textContent = lib.selecting ? '取消' : '選取';
+  $('#libTitle').textContent = lib.selecting ? `已選 ${lib.order.length} 份` : '全部文件';
+  $('#libDock').style.display = lib.selecting ? '' : 'none';
+  $('#libAll').querySelector('span').textContent = lib.order.length === docs.length && docs.length ? '取消全選' : '全選';
+  $('#libMerge').disabled = lib.order.length < 2;
+  $('#libDel').disabled = lib.order.length < 1;
+  if (!docs.length) { list.style.display = 'block'; list.innerHTML = EMPTY_HTML; $('#libSelect').style.visibility = 'hidden'; return; }
+  $('#libSelect').style.visibility = '';
   list.style.display = '';
   const pages = new Map((await DB.all('pages')).map((p) => [p.id, p]));
   list.innerHTML = '';
+  list.classList.toggle('selecting', lib.selecting);
   for (const doc of docs) {
     const first = pages.get(doc.pageIds[0]);
     const b = document.createElement('button');
-    b.className = 'doc';
+    const n = lib.order.indexOf(doc.id);
+    b.className = 'doc' + (n >= 0 ? ' sel' : '');
     const th = first && (first.thumb || first.original);
-    b.innerHTML = `<div class="th">${th ? `<img src="${blobUrl('home:' + first.id, th, verOf(first, 'thumb'))}" alt="">` : ''}<span class="n">${doc.pageIds.length} 頁</span></div><div class="meta"><div class="t"></div><div class="d">${fmtDate(doc.updated)}</div></div>`;
+    b.innerHTML = `<div class="th">${th ? `<img src="${blobUrl('lib:' + first.id, th, verOf(first, 'thumb'))}" alt="">` : ''}<span class="n">${doc.pageIds.length} 頁</span><span class="ck">${n >= 0 ? n + 1 : ''}</span></div><div class="meta"><div class="t"></div><div class="d">${fmtDate(doc.updated)}</div></div>`;
     b.querySelector('.t').textContent = doc.title;
-    b.onclick = () => openDoc(doc.id);
+    b.onclick = () => {
+      if (!lib.selecting) { openDoc(doc.id); return; }
+      const i = lib.order.indexOf(doc.id);
+      if (i >= 0) lib.order.splice(i, 1); else lib.order.push(doc.id);
+      renderLibrary();
+    };
     list.appendChild(b);
   }
 }
+$('#libBack').onclick = () => history.back();
+$('#libSelect').onclick = () => { lib.selecting = !lib.selecting; lib.order = []; renderLibrary(); };
+$('#libAll').onclick = async () => {
+  const docs = (await DB.all('docs')).sort((a, b) => b.updated - a.updated);
+  lib.order = lib.order.length === docs.length ? [] : docs.map((d) => d.id);
+  renderLibrary();
+};
+$('#libDel').onclick = async () => {
+  const n = lib.order.length; if (!n) return;
+  if (!confirm(`確定要刪除這 ${n} 份文件？刪除後無法復原。`)) return;
+  busy('刪除中…');
+  await deleteDocs(lib.order);
+  unbusy();
+  lib.selecting = false; lib.order = [];
+  renderLibrary(); toast(`已刪除 ${n} 份文件`);
+};
+$('#libMerge').onclick = async () => {
+  if (lib.order.length < 2) return;
+  busy('合併中…');
+  try {
+    const docs = (await Promise.all(lib.order.map((id) => DB.get('docs', id)))).filter(Boolean);
+    const merged = await createDoc();
+    merged.title = docs[0].title + '（合併）';
+    for (const d of docs) {
+      for (const pid of d.pageIds) {
+        const p = await DB.get('pages', pid);
+        if (!p) continue;
+        const copy = Object.assign({}, p, { id: uid(), docId: merged.id, created: Date.now() });
+        await DB.put('pages', copy);
+        merged.pageIds.push(copy.id);
+      }
+    }
+    merged.updated = Date.now();
+    await DB.put('docs', merged);
+    unbusy();
+    lib.selecting = false; lib.order = [];
+    renderLibrary();
+    toast(`已合併為「${merged.title}」，原檔保留`);
+  } catch (e) { unbusy(); toast('合併失敗：' + e.message); }
+};
 
 /* ---------- 來源選擇 ---------- */
 let cameraTarget = null; // docId 或 null（新文件）
@@ -478,16 +601,25 @@ async function liveLoop() {
   if (workerReady && !live.detecting && !live.capturing && v.videoWidth) {
     live.detecting = true;
     try {
+      // 快要穩定時，先把這一格全解析度畫面存起來；觸發快門時用的就是「判斷穩定的那一格」
+      const pre = settings.autoShutter && live.armed && live.progress >= 0.5 && !live.ic;
+      const full = pre ? grabFull(v) : null;
       const sig = frameSig(v);
       const d = smallFrame(v, 400);
       const r = await wcall('detect', { buffer: d.data.buffer, width: d.width, height: d.height, fast: true }, [d.data.buffer]);
-      onDetect(r, sig);
+      onDetect(r, sig, full);
     } catch (e) { console.warn(e); }
     live.detecting = false;
   }
   if (live.running) setTimeout(liveLoop, 30);
 }
-function onDetect(r, sig) {
+const preCanvas = document.createElement('canvas');
+function grabFull(v) {
+  if (preCanvas.width !== v.videoWidth || preCanvas.height !== v.videoHeight) { preCanvas.width = v.videoWidth; preCanvas.height = v.videoHeight; }
+  preCanvas.getContext('2d').drawImage(v, 0, 0);
+  return preCanvas;
+}
+function onDetect(r, sig, full) {
   if (!live.running || live.capturing) return;
   const now = performance.now();
   if (r && r.area > 0.1) {
@@ -510,7 +642,7 @@ function onDetect(r, sig) {
     if (!live.armed) { setHint('換下一頁，或按「完成」', true); setRing(0); return; }
     if (settings.autoShutter) {
       setRing(progress);
-      if (progress >= 1 && Date.now() - live.lastCapT > 900) { capture(sig); return; }
+      if (progress >= 1 && Date.now() - live.lastCapT > 900) { capture(sig, full, q); return; }
       setHint(progress > 0.25 ? '保持穩定…' : '找到文件了', progress > 0.25);
     } else setHint('按下快門拍攝', true);
   } else {
@@ -554,26 +686,29 @@ function drawOverlay() {
   }
   requestAnimationFrame(drawOverlay);
 }
-async function capture(sig) {
-  if (live.capturing || !live.running) return;
-  live.capturing = true;
-  const quad = live.lastQuad;
-  const v = $('#video');
-  if (!sig) sig = frameSig(v);
+function flash() {
   const f = $('#flash'); f.classList.remove('go'); void f.offsetWidth; f.classList.add('go');
   if (navigator.vibrate) navigator.vibrate(30);
+}
+async function capture(sig, full, quadAt) {
+  if (live.capturing || !live.running) return;
+  live.capturing = true;
+  const quad = quadAt || live.lastQuad;
+  const v = $('#video');
+  if (!sig) sig = frameSig(v);
   setRing(0);
   try {
     let blob = null, fromPhoto = false;
-    if (live.ic) {
+    if (live.ic && !full) {
+      // Android：全解析度拍照需要一點時間，拍好才閃光
+      setHint('拍攝中，請勿移動…', true);
       try { blob = await live.ic.takePhoto(); fromPhoto = !!blob; } catch (e) { console.warn('takePhoto', e); }
     }
     if (!blob) {
-      const c = canvasOf(v.videoWidth, v.videoHeight);
-      c.getContext('2d').drawImage(v, 0, 0);
+      const c = full || grabFull(v); // 畫面在這一刻已經固定
+      flash();
       blob = await toBlob(c, 'image/jpeg', 0.97);
-      c.width = c.height = 0;
-    }
+    } else flash();
     let corners = quad ? quad.map((p) => p.slice()) : FULL.map((p) => p.slice());
     if (fromPhoto) {
       // 全解析度照片的長寬比可能與預覽不同，重新偵測
@@ -747,9 +882,22 @@ async function getDocPages(docId) {
   const pages = await Promise.all(doc.pageIds.map((pid) => DB.get('pages', pid)));
   return { doc, pages: pages.filter(Boolean) };
 }
+const docSel = { on: false, ids: new Set(), docId: null };
+function updateDocSelUI(total) {
+  $('#docSelect').textContent = docSel.on ? '取消' : '選取';
+  $('#docDock').style.display = docSel.on ? 'none' : '';
+  $('#docSelDock').style.display = docSel.on ? '' : 'none';
+  $('#docSelCount').textContent = `已選 ${docSel.ids.size} 頁`;
+  $('#docSelAll').querySelector('span').textContent = docSel.ids.size === total && total ? '取消全選' : '全選';
+  $('#docSelDel').disabled = !docSel.ids.size;
+  $('#pageGrid').classList.toggle('selecting', docSel.on);
+  $('#docHint').textContent = docSel.on ? '點選要刪除的頁面' : '長按頁面可拖曳調整順序';
+  document.querySelectorAll('#pageGrid .pg:not(.add)').forEach((el) => el.classList.toggle('sel', docSel.ids.has(el.dataset.id)));
+}
 async function renderDoc() {
   const { doc, pages } = await getDocPages(state.docId);
   if (!doc) return;
+  if (docSel.docId !== doc.id) { docSel.on = false; docSel.ids.clear(); docSel.docId = doc.id; }
   $('#docTitle').textContent = doc.title;
   const g = $('#pageGrid'); g.innerHTML = '';
   pages.forEach((p, i) => {
@@ -757,6 +905,10 @@ async function renderDoc() {
     b.className = 'pg'; b.dataset.id = p.id;
     fillPageThumb(b, p, i);
     b.onclick = () => {
+      if (docSel.on) {
+        if (docSel.ids.has(p.id)) docSel.ids.delete(p.id); else docSel.ids.add(p.id);
+        updateDocSelUI(pages.length); return;
+      }
       if (Date.now() - lastDragEnd < 300) return;
       state.pageIndex = [...g.querySelectorAll('.pg:not(.add)')].indexOf(b);
       renderPage(); go('page');
@@ -769,7 +921,29 @@ async function renderDoc() {
   add.onclick = addSheet;
   g.appendChild(add);
   setupSort(g);
+  if (sorter) sorter.option('disabled', docSel.on);
+  add.style.display = docSel.on ? 'none' : '';
+  updateDocSelUI(pages.length);
 }
+$('#docSelect').onclick = () => { docSel.on = !docSel.on; docSel.ids.clear(); renderDoc(); };
+$('#docSelAll').onclick = async () => {
+  const doc = await DB.get('docs', state.docId);
+  if (docSel.ids.size === doc.pageIds.length) docSel.ids.clear(); else doc.pageIds.forEach((id) => docSel.ids.add(id));
+  updateDocSelUI(doc.pageIds.length);
+};
+$('#docSelDel').onclick = async () => {
+  const n = docSel.ids.size; if (!n) return;
+  const doc = await DB.get('docs', state.docId);
+  const all = n === doc.pageIds.length;
+  if (!confirm(all ? `要刪除全部 ${n} 頁嗎？整份文件也會一起刪除。` : `確定要刪除選取的 ${n} 頁？`)) return;
+  if (all) { await deleteDocs([doc.id]); docSel.on = false; history.back(); return; }
+  for (const id of docSel.ids) { await DB.del('pages', id); dropUrls('t:' + id); dropUrls('v:' + id); dropUrls('home:' + id); dropUrls('lib:' + id); dropUrls('strip:' + id); }
+  doc.pageIds = doc.pageIds.filter((id) => !docSel.ids.has(id));
+  doc.updated = Date.now();
+  await DB.put('docs', doc);
+  docSel.on = false; docSel.ids.clear();
+  renderDoc(); toast(`已刪除 ${n} 頁`);
+};
 // 長按拖曳排序
 let sorter = null, lastDragEnd = 0;
 function setupSort(g) {
@@ -807,6 +981,7 @@ async function onPageUpdated(pageId) {
     if (el) { const p = await DB.get('pages', pageId); const idx = [...el.parentNode.children].indexOf(el); if (p) fillPageThumb(el, p, idx); }
   }
   if (current === 'page' && viewPage && viewPage.id === pageId) renderPage(true);
+  if (current === 'home') renderHomeSoon();
 }
 function addSheet() {
   openSheet(`<h3>新增頁面</h3>
@@ -831,9 +1006,7 @@ $('#docMore').onclick = () => openSheet(`<h3>文件</h3>
   s.querySelector('[data-a=del]').onclick = async () => {
     closeSheet();
     if (!confirm('確定要刪除這份文件與所有頁面？')) return;
-    const doc = await DB.get('docs', state.docId);
-    for (const pid of doc.pageIds) { await DB.del('pages', pid); dropUrls('t:' + pid); dropUrls('v:' + pid); dropUrls('home:' + pid); }
-    await DB.del('docs', doc.id);
+    await deleteDocs([state.docId]);
     history.back();
   };
 });
@@ -1115,7 +1288,8 @@ function deliverSheet(files, label) {
     };
   });
 }
-$('#docPdf').onclick = () => {
+$('#docPdf').onclick = () => openPdfSheet();
+function openPdfSheet() {
   const sizes = [['a4', 'A4'], ['letter', 'Letter'], ['fit', '依原圖尺寸']];
   openSheet(`<h3>匯出 PDF</h3><div class="lbl">檔案名稱</div>
     <div class="fname"><input id="fname" type="text" enterkeyhint="done" autocomplete="off"><span>.pdf</span></div>
