@@ -616,8 +616,8 @@ $('#fileGallery').addEventListener('change', async (e) => {
 /* ---------- 即時掃描 ---------- */
 const live = { running: false };
 const STABLE_MS = 500;   // 鎖定後大致不動多久就拍
-const STABLE_TOL = 0.03;
-const EDGE_MARGIN = 0.03; // 紙張四角至少離畫面邊緣 3%  // 容許的手抖（畫面比例）
+const STABLE_TOL = 0.03;  // 容許的手抖（畫面比例）
+const EDGE_MARGIN = 0.01; // 紙張四角至少離畫面邊緣 1%（1.4～1.15 是 3%，作者覺得要拿太遠，1.16 放寬）
 async function startLive(docId) {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     toast('此瀏覽器不支援即時相機，請改用「高畫質拍照」'); return;
@@ -2351,7 +2351,7 @@ $('#btnSettings').onclick = () => {
     <button class="srow" id="setDefAdj" style="margin-top:6px"><span>預設調整數值 ›<span class="sub">新文件一開始用的曝光、濃淡、銳利度等數值</span></span></button>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會另外拍一張照片（最高 1500 萬畫素）；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.15</div>`, (s) => {
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.16</div>`, (s) => {
     s.querySelector('#setDefAdj').onclick = () => openDefAdj('bw');
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
