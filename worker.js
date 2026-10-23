@@ -76,9 +76,10 @@ function bestQuadFromEdges(cv, edges, w, h) {
     for (const eps of [0.02, 0.03, 0.04, 0.06, 0.08]) {
       const approx = new cv.Mat();
       cv.approxPolyDP(hull, approx, eps * peri, true);
-      if (approx.rows === 4) { quad = matToPts(approx); approx.delete(); break; }
+      const n = approx.rows; // 先讀出點數，再釋放
+      if (n === 4) quad = matToPts(approx);
       approx.delete();
-      if (approx.rows < 4) break;
+      if (n <= 4) break;
     }
     hull.delete(); c.delete();
     if (!quad) continue;
@@ -229,7 +230,7 @@ function normalizeLight(cv, img, ctx) {
    sharp / despeckle：0 ~ 100
    空間相關的數值（模糊半徑、雜點面積）依頁面短邊等比例換算，預覽與全解析度效果一致 */
 const ADJ_DEFAULTS = {
-  bw: { exposure: 0, contrast: 0, density: 0, sharp: 35, despeckle: 20 },
+  bw: { exposure: 0, contrast: 0, density: 0, sharp: 35, despeckle: 20, smooth: 50 },
   gray: { exposure: 0, contrast: 0, sharp: 50 },
   color: { exposure: 0, contrast: 0, sharp: 50, saturation: 0, temp: 0 },
   original: { exposure: 0, contrast: 0, sharp: 0, saturation: 0, temp: 0 },
@@ -348,14 +349,64 @@ function enhance(cv, warped, mode, params, ctx) {
   cv.threshold(sm, dark, 110 + d * 0.5, 255, cv.THRESH_BINARY); // 很暗的地方一定是黑（填滿符頭）
   cv.bitwise_and(bw, dark, bw);
   dark.delete(); sm.delete();
-  if (s <= 50) cv.medianBlur(bw, bw, 3); // 修掉鋸齒與單點雜訊
+  // 修掉鋸齒與單點雜訊；只在接近全解析度時做（縮小預覽的線條只有 1 像素寬，會被誤刪）
+  if (s <= 50 && k >= 0.75) cv.medianBlur(bw, bw, 3);
   const area = Math.pow((p.despeckle || 0) / 100, 1.5) * 90 * k * k;
   despeckle(cv, bw, area);
+  // 邊緣平滑：在已去雜點的黑白結果上，只讓線條與文字邊緣留 1~2 像素灰階過渡（反鋸齒），紙面仍是純白
+  const sm2 = p.smooth || 0;
+  if (sm2 > 0) {
+    cv.GaussianBlur(bw, bw, new cv.Size(0, 0), sig(0.25 + (sm2 / 100) * 0.9));
+    const lut = new cv.Mat(1, 256, cv.CV_8UC1);
+    for (let x = 0; x < 256; x++) { const v = (x - 128) * 1.4 + 128; lut.data[x] = v < 0 ? 0 : v > 255 ? 255 : Math.round(v); }
+    cv.LUT(bw, lut, bw);
+    lut.delete();
+  }
   return bw;
 }
 
-// 透視校正；maxSide 有值時（預覽）以較小尺寸輸出
-function warpPage(cv, rgb, width, height, corners, maxSide) {
+/* ---------- 曲線工具（與 app.js 的同名函式相同） ---------- */
+function crPt(p0, p1, p2, p3, t) {
+  const t2 = t * t, t3 = t2 * t;
+  return [0, 1].map((k) => 0.5 * (2 * p1[k] + (-p0[k] + p2[k]) * t + (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2 + (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * t3));
+}
+// 通過 a、p1、p2、b 四點的平滑曲線（Catmull-Rom），回傳折線
+function edgePath(a, p1, p2, b, n) {
+  const P = [[2 * a[0] - p1[0], 2 * a[1] - p1[1]], a, p1, p2, b, [2 * b[0] - p2[0], 2 * b[1] - p2[1]]];
+  const out = [];
+  for (let s = 1; s <= 3; s++) for (let i = 0; i < n; i++) out.push(crPt(P[s - 1], P[s], P[s + 1], P[s + 2], i / n));
+  out.push(b.slice());
+  return out;
+}
+function polyLen(pts) { let L = 0; for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); return L; }
+// 依弧長平均取 m+1 個點
+function resample(pts, m) {
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  const L = cum[cum.length - 1] || 1, out = [];
+  let j = 1;
+  for (let k = 0; k <= m; k++) {
+    const target = (k / m) * L;
+    while (j < pts.length - 1 && cum[j] < target) j++;
+    const seg = cum[j] - cum[j - 1] || 1, f = Math.min(1, Math.max(0, (target - cum[j - 1]) / seg));
+    out.push([pts[j - 1][0] + (pts[j][0] - pts[j - 1][0]) * f, pts[j - 1][1] + (pts[j][1] - pts[j - 1][1]) * f]);
+  }
+  return out;
+}
+function homog(cv, from, to) {
+  const a = cv.matFromArray(4, 1, cv.CV_32FC2, from.flat()), b = cv.matFromArray(4, 1, cv.CV_32FC2, to.flat());
+  const M = cv.getPerspectiveTransform(a, b);
+  const h = Array.from(M.data64F);
+  a.delete(); b.delete(); M.delete();
+  return h;
+}
+const applyH = (h, p) => { const w = h[6] * p[0] + h[7] * p[1] + h[8]; return [(h[0] * p[0] + h[1] * p[1] + h[2]) / w, (h[3] * p[0] + h[4] * p[1] + h[5]) / w]; };
+const isCurved = (curve) => Array.isArray(curve) && curve.length === 4;
+
+// 透視校正（直線）或曲面攤平（曲線）
+// opts: { maxSide（預覽縮小）, curve（四條邊各兩個彎曲點，0~1）, upscale: 'auto'|'always'|'off' }
+function warpPage(cv, rgb, width, height, corners, opts) {
+  opts = opts || {};
   const P = corners.map((c) => [c[0] * width, c[1] * height]);
   const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
   let outW = Math.round(Math.max(dist(P[0], P[1]), dist(P[3], P[2])));
@@ -365,18 +416,162 @@ function warpPage(cv, rgb, width, height, corners, maxSide) {
     // 以較長邊的像素數為準，依真實長寬比重算另一邊，避免透視造成頁面被壓扁
     if (outW / outH > ar) outH = Math.round(outW / ar); else outW = Math.round(outH * ar);
   }
+  // 曲線：先用四角做透視校正，在校正後的平面上量曲線的弧長，當作紙張真正的寬高
+  let curves = null;
+  if (isCurved(opts.curve)) {
+    const C = opts.curve.map((e) => e.map((p) => [p[0] * width, p[1] * height]));
+    const H = homog(cv, P, [[0, 0], [outW, 0], [outW, outH], [0, outH]]);
+    const ed = (i) => edgePath(P[i], C[i][0], C[i][1], P[(i + 1) % 4], 24).map((p) => applyH(H, p));
+    const top = ed(0), right = ed(1), bottom = ed(2).reverse(), left = ed(3).reverse();
+    const rw = Math.max(polyLen(top), polyLen(bottom)) / outW, rh = Math.max(polyLen(left), polyLen(right)) / outH;
+    curves = { top, right, bottom, left, rw: outW, rh: outH, Hinv: homog(cv, [[0, 0], [outW, 0], [outW, outH], [0, outH]], P) };
+    outW = Math.round(outW * rw); outH = Math.round(outH * rh);
+  }
+  // 小圖平滑放大
+  const up = opts.upscale || 'auto';
+  const minS = Math.min(outW, outH);
+  let f = 1;
+  if (up === 'auto' && minS < 1600) f = Math.min(3, 2400 / minS);
+  else if (up === 'always') f = 3;
   const cap = 16000000;
+  f = Math.min(f, Math.sqrt(cap / (outW * outH)));
+  if (f > 1) { outW = Math.round(outW * f); outH = Math.round(outH * f); }
   if (outW * outH > cap) { const s = Math.sqrt(cap / (outW * outH)); outW = Math.floor(outW * s); outH = Math.floor(outH * s); }
-  if (maxSide && Math.max(outW, outH) > maxSide) { const s = maxSide / Math.max(outW, outH); outW = Math.round(outW * s); outH = Math.round(outH * s); }
+  if (opts.maxSide && Math.max(outW, outH) > opts.maxSide) { const s = opts.maxSide / Math.max(outW, outH); outW = Math.round(outW * s); outH = Math.round(outH * s); }
   outW = Math.max(outW, 16); outH = Math.max(outH, 16);
-  const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, P.flat());
-  const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, outW, 0, outW, outH, 0, outH]);
-  const M = cv.getPerspectiveTransform(srcTri, dstTri);
-  const warped = new cv.Mat();
-  cv.warpPerspective(rgb, warped, M, new cv.Size(outW, outH), maxSide ? cv.INTER_AREA : cv.INTER_CUBIC, cv.BORDER_REPLICATE);
-  srcTri.delete(); dstTri.delete(); M.delete();
-  return warped;
+  const interp = opts.maxSide ? cv.INTER_AREA : cv.INTER_CUBIC;
+
+  if (!curves) {
+    const M = cv.matFromArray(3, 3, cv.CV_64F, homog(cv, P, [[0, 0], [outW, 0], [outW, outH], [0, outH]]));
+    const warped = new cv.Mat();
+    cv.warpPerspective(rgb, warped, M, new cv.Size(outW, outH), interp, cv.BORDER_REPLICATE);
+    M.delete();
+    return warped;
+  }
+  return coonsWarp(cv, rgb, curves, outW, outH, opts.maxSide ? cv.INTER_LINEAR : cv.INTER_CUBIC);
 }
+
+// Coons 曲面：用四條邊界曲線在（透視校正後的）平面上內插出整頁的網格，再對應回原圖取樣
+function coonsWarp(cv, rgb, c, outW, outH, interp) {
+  const step = 8;
+  const GW = Math.ceil(outW / step), GH = Math.ceil(outH / step);
+  const T = resample(c.top, GW), B = resample(c.bottom, GW), L = resample(c.left, GH), R = resample(c.right, GH);
+  const p00 = T[0], p10 = T[GW], p01 = B[0], p11 = B[GW];
+  const gx = new Float32Array((GW + 1) * (GH + 1)), gy = new Float32Array((GW + 1) * (GH + 1));
+  for (let j = 0; j <= GH; j++) {
+    const v = j / GH;
+    for (let i = 0; i <= GW; i++) {
+      const u = i / GW;
+      const q = [0, 1].map((k) =>
+        (1 - v) * T[i][k] + v * B[i][k] + (1 - u) * L[j][k] + u * R[j][k]
+        - ((1 - u) * (1 - v) * p00[k] + u * (1 - v) * p10[k] + (1 - u) * v * p01[k] + u * v * p11[k]));
+      const im = applyH(c.Hinv, q);
+      gx[j * (GW + 1) + i] = im[0]; gy[j * (GW + 1) + i] = im[1];
+    }
+  }
+  const out = new cv.Mat(outH, outW, cv.CV_8UC3);
+  const ci = new Int32Array(outW), ct = new Float32Array(outW);
+  for (let x = 0; x < outW; x++) { const fx = (x / outW) * GW; ci[x] = Math.min(GW - 1, Math.floor(fx)); ct[x] = fx - ci[x]; }
+  const rx = new Float32Array(GW + 1), ry = new Float32Array(GW + 1);
+  const strip = 256;
+  for (let y0 = 0; y0 < outH; y0 += strip) {
+    const sh = Math.min(strip, outH - y0);
+    const mx = new cv.Mat(sh, outW, cv.CV_32FC1), my = new cv.Mat(sh, outW, cv.CV_32FC1);
+    const X = mx.data32F, Y = my.data32F;
+    for (let y = 0; y < sh; y++) {
+      const fy = ((y0 + y) / outH) * GH, j = Math.min(GH - 1, Math.floor(fy)), ty = fy - j;
+      // 先在這一列把上下兩排網格內插好，再沿 x 內插
+      const a0 = j * (GW + 1), b0 = a0 + GW + 1;
+      for (let i = 0; i <= GW; i++) { rx[i] = gx[a0 + i] + (gx[b0 + i] - gx[a0 + i]) * ty; ry[i] = gy[a0 + i] + (gy[b0 + i] - gy[a0 + i]) * ty; }
+      const o = y * outW;
+      for (let x = 0; x < outW; x++) {
+        const i = ci[x], tx = ct[x];
+        X[o + x] = rx[i] + (rx[i + 1] - rx[i]) * tx;
+        Y[o + x] = ry[i] + (ry[i + 1] - ry[i]) * tx;
+      }
+    }
+    const part = new cv.Mat();
+    cv.remap(rgb, part, mx, my, interp, cv.BORDER_REPLICATE);
+    const roi = out.roi(new cv.Rect(0, y0, outW, sh));
+    part.copyTo(roi);
+    roi.delete(); part.delete(); mx.delete(); my.delete();
+  }
+  return out;
+}
+
+// 自動偵測四條邊的彎曲：沿著每條直邊，往垂直方向找「紙（亮）→ 背景（暗）」的交界，
+// 擬合成平滑曲線，回傳每條邊 1/3、2/3 處的彎曲點（0~1）；彎曲太小或找不到時回傳 null
+function detectCurve(cv, msg) {
+  const { buffer, width: w, height: h, corners } = msg;
+  const src = new cv.Mat(h, w, cv.CV_8UC4);
+  src.data.set(new Uint8Array(buffer));
+  const g = new cv.Mat();
+  cv.cvtColor(src, g, cv.COLOR_RGBA2GRAY);
+  src.delete();
+  cv.GaussianBlur(g, g, new cv.Size(5, 5), 0);
+  const D = g.data;
+  const at = (x, y) => {
+    if (x < 0 || y < 0 || x >= w - 1 || y >= h - 1) return -1;
+    const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0, i = y0 * w + x0;
+    return (D[i] * (1 - fx) + D[i + 1] * fx) * (1 - fy) + (D[i + w] * (1 - fx) + D[i + w + 1] * fx) * fy;
+  };
+  const P = corners.map((c) => [c[0] * w, c[1] * h]);
+  const R = Math.round(0.07 * Math.max(w, h));
+  const result = [];
+  let maxBulge = 0;
+  for (let e = 0; e < 4; e++) {
+    const A = P[e], Bp = P[(e + 1) % 4];
+    const ex = Bp[0] - A[0], ey = Bp[1] - A[1], len = Math.hypot(ex, ey) || 1;
+    const nx = ey / len, ny = -ex / len; // 往紙張外側
+    const ts = [], ds = [];
+    for (let k = 0; k <= 24; k++) {
+      const t = 0.06 + (0.88 * k) / 24;
+      const bx = A[0] + ex * t, by = A[1] + ey * t;
+      let best = 0, bestD = 0;
+      for (let d = -R; d <= R; d++) {
+        const inn = at(bx + nx * (d - 2), by + ny * (d - 2)), out = at(bx + nx * (d + 2), by + ny * (d + 2));
+        if (inn < 0 || out < 0) continue;
+        const c = inn - out; // 內亮外暗
+        if (c > best) { best = c; bestD = d; }
+      }
+      if (best >= 14) { ts.push(t); ds.push(bestD); }
+    }
+    // 擬合 f(t) = c + t(1-t)(a + b t)，c 是整條邊的固定偏移（四角本來就略往內縮），只取彎曲部分
+    let fit = null;
+    let idx = ts.map((_, i) => i);
+    for (let iter = 0; iter < 3 && idx.length >= 8; iter++) {
+      fit = lsq(idx.map((i) => [1, ts[i] * (1 - ts[i]), ts[i] * ts[i] * (1 - ts[i])]), idx.map((i) => ds[i]));
+      if (!fit) break;
+      const res = idx.map((i) => Math.abs(ds[i] - (fit[0] + ts[i] * (1 - ts[i]) * (fit[1] + fit[2] * ts[i]))));
+      const mad = res.slice().sort((a, b) => a - b)[res.length >> 1] || 1;
+      const keep = idx.filter((_, k) => res[k] <= Math.max(2, 3 * mad));
+      if (keep.length === idx.length) break;
+      idx = keep;
+    }
+    const bulge = (t) => (fit && idx.length >= 8 ? t * (1 - t) * (fit[1] + fit[2] * t) : 0);
+    const pts = [1 / 3, 2 / 3].map((t) => {
+      const b = Math.max(-R, Math.min(R, bulge(t)));
+      maxBulge = Math.max(maxBulge, Math.abs(b) / Math.max(w, h));
+      return [(A[0] + ex * t + nx * b) / w, (A[1] + ey * t + ny * b) / h];
+    });
+    result.push(pts);
+  }
+  g.delete();
+  return { curve: result, bulge: maxBulge };
+}
+// 最小平方法（3 個參數）
+function lsq(rows, ys) {
+  const n = rows[0].length, M = Array.from({ length: n }, () => new Array(n + 1).fill(0));
+  rows.forEach((r, k) => { for (let i = 0; i < n; i++) { for (let j = 0; j < n; j++) M[i][j] += r[i] * r[j]; M[i][n] += r[i] * ys[k]; } });
+  for (let i = 0; i < n; i++) {
+    let p = i; for (let r = i + 1; r < n; r++) if (Math.abs(M[r][i]) > Math.abs(M[p][i])) p = r;
+    [M[i], M[p]] = [M[p], M[i]];
+    if (Math.abs(M[i][i]) < 1e-9) return null;
+    for (let r = 0; r < n; r++) if (r !== i) { const f = M[r][i] / M[i][i]; for (let c = i; c <= n; c++) M[r][c] -= f * M[i][c]; }
+  }
+  return M.map((r, i) => r[n] / r[i]);
+}
+
 function rgbFromBuffer(cv, buffer, width, height) {
   const src = new cv.Mat(height, width, cv.CV_8UC4);
   src.data.set(new Uint8Array(buffer));
@@ -405,7 +600,7 @@ function finish(cv, result, rotation) {
 function processPage(cv, msg) {
   const { buffer, width, height, corners, rotation, mode, params } = msg;
   const rgb = rgbFromBuffer(cv, buffer, width, height);
-  const warped = warpPage(cv, rgb, width, height, corners);
+  const warped = warpPage(cv, rgb, width, height, corners, { curve: msg.curve, upscale: msg.upscale });
   rgb.delete();
   return finish(cv, enhance(cv, warped, mode, params), rotation);
 }
@@ -425,7 +620,7 @@ function prepare(cv, msg) {
   releaseCache();
   const { key, buffer, width, height, corners, maxSide } = msg;
   const rgb = rgbFromBuffer(cv, buffer, width, height);
-  const full = warpPage(cv, rgb, width, height, corners);
+  const full = warpPage(cv, rgb, width, height, corners, { curve: msg.curve, upscale: msg.upscale });
   rgb.delete();
   const s = Math.min(1, maxSide / Math.max(full.cols, full.rows));
   const small = new cv.Mat();
@@ -506,6 +701,8 @@ self.onmessage = async (e) => {
     } else if (type === 'render') {
       const r = renderPreview(cv, e.data);
       self.postMessage({ id, ok: true, result: r }, [r.buffer]);
+    } else if (type === 'detectCurve') {
+      self.postMessage({ id, ok: true, result: detectCurve(cv, e.data) });
     } else if (type === 'region') {
       const r = renderRegion(cv, e.data);
       self.postMessage({ id, ok: true, result: r }, [r.buffer]);

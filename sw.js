@@ -1,5 +1,5 @@
 /* 可可掃描 — Service Worker（離線可用） */
-const VERSION = 'cocoscan-v6';
+const VERSION = 'cocoscan-v7';
 const ASSETS = [
   './', 'index.html', 'app.js', 'worker.js', 'lib/opencv.js', 'lib/Sortable.min.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png',

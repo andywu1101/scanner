@@ -15,7 +15,8 @@ const S_SAT = { k: 'saturation', name: '飽和度', min: -100, max: 100, def: 0,
 const S_TMP = { k: 'temp', name: '色溫', min: -100, max: 100, def: 0, lo: '冷', hi: '暖' };
 const ADJ = {
   bw: [S_EXP, S_CON, { k: 'density', name: '濃淡', min: -100, max: 100, def: 0, lo: '淡', hi: '濃' },
-    { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 35, lo: '柔', hi: '銳' }, { k: 'despeckle', name: '去雜點', min: 0, max: 100, def: 20, lo: '少', hi: '多' }],
+    { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 35, lo: '柔', hi: '銳' }, { k: 'despeckle', name: '去雜點', min: 0, max: 100, def: 20, lo: '少', hi: '多' },
+    { k: 'smooth', name: '邊緣平滑', min: 0, max: 100, def: 50, lo: '關', hi: '強' }],
   gray: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50, lo: '柔', hi: '銳' }],
   color: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50, lo: '柔', hi: '銳' }, S_SAT, S_TMP],
   original: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 0, lo: '柔', hi: '銳' }, S_SAT, S_TMP],
@@ -23,7 +24,7 @@ const ADJ = {
 const MAX_PIXELS = 16000000; // iOS canvas 上限約 16.7M 像素
 
 /* ---------- 設定 ---------- */
-const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, confirmCrop: true, v: 2 };
+const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, confirmCrop: true, upscale: 'auto', v: 2 };
 const settings = (() => {
   let s = {};
   try { s = JSON.parse(localStorage.getItem('cocoscan-settings') || '{}'); } catch (_) {}
@@ -37,7 +38,7 @@ function adjOf(mode) {
   return o;
 }
 // 處理結果的「身分」：模式、旋轉、四角、該模式的調整數值，任何一項變了就要重算
-function procKey(p) { return JSON.stringify([p.mode, p.rotation || 0, p.corners, adjOf(p.mode)]); }
+function procKey(p) { return JSON.stringify([p.mode, p.rotation || 0, p.corners, p.curve || null, adjOf(p.mode), settings.upscale]); }
 function isStale(p) { return !p.processed || p.pkey !== procKey(p); }
 function saveSettings() { try { localStorage.setItem('cocoscan-settings', JSON.stringify(settings)); } catch (_) {} }
 
@@ -150,11 +151,13 @@ async function decodeFull(blob) {
   URL.revokeObjectURL(url);
   return data;
 }
+// 自動偵測紙張四角；任何錯誤都只當作「沒偵測到」，不影響照片匯入
 async function detectOn(src) {
-  await whenReady();
-  const d = smallFrame(src, 900);
-  const r = await wcall('detect', { buffer: d.data.buffer, width: d.width, height: d.height }, [d.data.buffer]);
-  return r;
+  try {
+    await whenReady();
+    const d = smallFrame(src, 900);
+    return await wcall('detect', { buffer: d.data.buffer, width: d.width, height: d.height }, [d.data.buffer]);
+  } catch (e) { console.warn('detect failed', e); return null; }
 }
 async function detectBlob(blob) {
   const { img, url } = await loadImg(blob);
@@ -198,7 +201,8 @@ async function processPageNow(pageId) {
   const d = await decodeFull(page.original);
   const r = await wcall('process', {
     buffer: d.data.buffer, width: d.width, height: d.height,
-    corners: page.corners, rotation: page.rotation || 0, mode: page.mode, params: adjOf(page.mode),
+    corners: page.corners, curve: page.curve || null, upscale: settings.upscale,
+    rotation: page.rotation || 0, mode: page.mode, params: adjOf(page.mode),
   }, [d.data.buffer]);
   const c = canvasOf(r.width, r.height);
   c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
@@ -233,8 +237,8 @@ async function createDoc() {
   await DB.put('docs', doc);
   return doc;
 }
-async function addPage(docId, blob, corners) {
-  const page = { id: uid(), docId, original: blob, corners, rotation: 0, mode: settings.mode, created: Date.now() };
+async function addPage(docId, blob, corners, curve) {
+  const page = { id: uid(), docId, original: blob, corners, curve: curve || null, rotation: 0, mode: settings.mode, created: Date.now() };
   await DB.put('pages', page);
   const doc = await DB.get('docs', docId);
   doc.pageIds.push(page.id); doc.updated = Date.now();
@@ -249,6 +253,9 @@ const state = { docId: null, pageIndex: 0 };
 function show(name) {
   document.querySelectorAll('.screen').forEach((s) => s.classList.toggle('active', s.id === name));
   current = name;
+  // 狀態列顏色跟著畫面：相機類畫面深色，其他米白
+  const tc = document.querySelector('meta[name="theme-color"]');
+  if (tc) tc.setAttribute('content', ['live', 'crop', 'burst'].includes(name) ? '#1C130E' : '#FFFCF8');
 }
 function go(name, push = true) {
   if (push) history.pushState({ s: name, doc: state.docId, i: state.pageIndex }, '');
@@ -468,9 +475,9 @@ const burst = { docId: null, fromDoc: false, onStack: false, count: 0, lastPageI
 function startBurst(docId) {
   Object.assign(burst, { docId, fromDoc: !!docId, onStack: false, count: 0, lastPageId: null });
 }
-async function burstAdd(blob, corners) {
+async function burstAdd(blob, corners, curve) {
   if (!burst.docId) burst.docId = (await createDoc()).id;
-  const page = await addPage(burst.docId, blob, corners);
+  const page = await addPage(burst.docId, blob, corners, curve);
   burst.count++; burst.lastPageId = page.id;
   return page;
 }
@@ -525,7 +532,7 @@ $('#fileCamera').addEventListener('change', async (e) => {
   if (settings.confirmCrop) {
     openCrop({
       blob, corners, retake: true, burst: true,
-      onConfirm: async (c) => { await burstAdd(blob, c); toBurst(); },
+      onConfirm: async (c, cv) => { await burstAdd(blob, c, cv); toBurst(); },
       onRetake: () => openCamera(),
     });
   } else {
@@ -938,17 +945,55 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden && current === 'live') finishLive();
 });
 
-/* ---------- 裁切 ---------- */
+/* ---------- 裁切（直線：四角＋拖邊平移；曲線：每條邊兩個彎曲點，可把彎曲的書頁拉平） ---------- */
 let cropCtx = null;
+// 曲線工具（與 worker.js 相同）
+function crPt(p0, p1, p2, p3, t) {
+  const t2 = t * t, t3 = t2 * t;
+  return [0, 1].map((k) => 0.5 * (2 * p1[k] + (-p0[k] + p2[k]) * t + (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2 + (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * t3));
+}
+function edgePath(a, p1, p2, b, n) {
+  const P = [[2 * a[0] - p1[0], 2 * a[1] - p1[1]], a, p1, p2, b, [2 * b[0] - p2[0], 2 * b[1] - p2[1]]];
+  const out = [];
+  for (let s = 1; s <= 3; s++) for (let i = 0; i < n; i++) out.push(crPt(P[s - 1], P[s], P[s + 1], P[s + 2], i / n));
+  out.push(b.slice());
+  return out;
+}
+function straightCurve(C) {
+  return [0, 1, 2, 3].map((i) => { const a = C[i], b = C[(i + 1) % 4]; return [1 / 3, 2 / 3].map((t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]); });
+}
+// 外框折線（0~1 座標）；曲線模式依彎曲點畫平滑曲線
+function cropOutline(C, curve) {
+  if (!curve) return C.map((p) => p.slice());
+  const pts = [];
+  for (let i = 0; i < 4; i++) { const seg = edgePath(C[i], curve[i][0], curve[i][1], C[(i + 1) % 4], 10); seg.pop(); pts.push(...seg); }
+  return pts;
+}
+async function detectCurveOn(img, corners) {
+  try {
+    await whenReady();
+    const d = smallFrame(img, 1000);
+    const r = await wcall('detectCurve', { buffer: d.data.buffer, width: d.width, height: d.height, corners }, [d.data.buffer]);
+    return r && r.bulge > 0.003 ? r.curve : null;
+  } catch (e) { console.warn('detectCurve', e); return null; }
+}
+
 async function openCrop(opts) {
   if (cropCtx && cropCtx.url) URL.revokeObjectURL(cropCtx.url);
   const { img, url } = await loadImg(opts.blob);
-  cropCtx = Object.assign({}, opts, { url, nat: [img.naturalWidth, img.naturalHeight], corners: opts.corners.map((p) => p.slice()), drag: null });
+  const curve = opts.curve ? opts.curve.map((e) => e.map((p) => p.slice())) : null;
+  cropCtx = Object.assign({}, opts, { url, nat: [img.naturalWidth, img.naturalHeight], corners: opts.corners.map((p) => p.slice()), curve, curveMode: !!curve, drag: null });
   const ci = $('#cropImg'); ci.src = url;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
   $('#cropNext').style.display = opts.burst ? '' : 'none';
+  updateCurveBtn();
   go('crop');
   requestAnimationFrame(layoutCrop);
+}
+function updateCurveBtn() {
+  const b = $('#cropCurve');
+  b.classList.toggle('on', !!(cropCtx && cropCtx.curveMode));
+  b.querySelector('span').textContent = cropCtx && cropCtx.curveMode ? '曲線' : '直線';
 }
 function layoutCrop() {
   if (!cropCtx) return;
@@ -967,21 +1012,31 @@ function layoutCrop() {
 }
 function drawCrop() {
   const { w, h } = cropCtx.rect;
-  const P = cropCtx.corners.map((p) => [p[0] * w, p[1] * h]);
-  const poly = P.map((p) => p.join(',')).join(' ');
+  const C = cropCtx.corners, curve = cropCtx.curveMode ? cropCtx.curve : null;
+  const P = C.map((p) => [p[0] * w, p[1] * h]);
+  const poly = cropOutline(C, curve).map((p) => (p[0] * w).toFixed(1) + ',' + (p[1] * h).toFixed(1)).join(' ');
+  const g = cropCtx.drag;
   let html = `<defs><mask id="m"><rect x="-40" y="-40" width="${w + 80}" height="${h + 80}" fill="#fff"/><polygon points="${poly}" fill="#000"/></mask></defs>`;
   html += `<rect x="0" y="0" width="${w}" height="${h}" fill="rgba(28,19,14,.55)" mask="url(#m)"/>`;
   html += `<polygon points="${poly}" fill="none" stroke="#F2C48D" stroke-width="2.5" stroke-linejoin="round"/>`;
-  // 四條邊的中點把手（拖動只移動那一條邊）
-  for (let i = 0; i < 4; i++) {
-    const a = P[i], b = P[(i + 1) % 4];
-    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
-    const ang = Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI;
-    const on = cropCtx.drag && cropCtx.drag.type === 'edge' && cropCtx.drag.i === i;
-    html += `<rect x="${mx - 15}" y="${my - 4.5}" width="30" height="9" rx="4.5" transform="rotate(${ang} ${mx} ${my})" fill="${on ? '#F2C48D' : '#fff'}" stroke="rgba(28,19,14,.35)" stroke-width="1"/>`;
+  if (curve) {
+    // 彎曲點
+    curve.forEach((e, i) => e.forEach((p, j) => {
+      const on = g && g.type === 'ctrl' && g.i === i && g.j === j;
+      html += `<circle cx="${p[0] * w}" cy="${p[1] * h}" r="9" fill="${on ? '#F2C48D' : 'rgba(255,255,255,.92)'}" stroke="#C9935F" stroke-width="2.5"/>`;
+    }));
+  } else {
+    // 四條邊的中點把手（拖動只移動那一條邊）
+    for (let i = 0; i < 4; i++) {
+      const a = P[i], b = P[(i + 1) % 4];
+      const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+      const ang = Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI;
+      const on = g && g.type === 'edge' && g.i === i;
+      html += `<rect x="${mx - 15}" y="${my - 4.5}" width="30" height="9" rx="4.5" transform="rotate(${ang} ${mx} ${my})" fill="${on ? '#F2C48D' : '#fff'}" stroke="rgba(28,19,14,.35)" stroke-width="1"/>`;
+    }
   }
   P.forEach((p, i) => {
-    const on = cropCtx.drag && cropCtx.drag.type === 'corner' && cropCtx.drag.i === i;
+    const on = g && g.type === 'corner' && g.i === i;
     html += `<circle cx="${p[0]}" cy="${p[1]}" r="13" fill="${on ? 'rgba(242,196,141,.55)' : 'rgba(242,196,141,.25)'}" stroke="#fff" stroke-width="2.5"/><circle cx="${p[0]}" cy="${p[1]}" r="3.5" fill="#fff"/>`;
   });
   $('#cropSvg').innerHTML = html;
@@ -989,17 +1044,21 @@ function drawCrop() {
 (() => {
   const stage = $('#cropStage');
   const clamp = (v) => Math.min(1, Math.max(0, v));
-  // 畫面座標（相對於圖片左上角）
   const local = (e) => { const b = stage.getBoundingClientRect(); return [e.clientX - b.left - cropCtx.rect.x, e.clientY - b.top - cropCtx.rect.y]; };
   stage.addEventListener('pointerdown', (e) => {
     if (!cropCtx || cropCtx.drag) return;
     const [lx, ly] = local(e);
     const { w, h } = cropCtx.rect;
     const P = cropCtx.corners.map((p) => [p[0] * w, p[1] * h]);
-    // 角優先，其次是邊的中點把手
-    let best = null, bd = 44;
+    const curveOn = cropCtx.curveMode && cropCtx.curve;
+    // 優先順序：角 → 彎曲點（曲線模式）→ 邊的中點把手（直線模式）
+    let best = null, bd = 40;
     P.forEach((p, i) => { const d = Math.hypot(p[0] - lx, p[1] - ly); if (d < bd) { bd = d; best = { type: 'corner', i }; } });
-    if (!best) {
+    if (!best && curveOn) {
+      bd = 34;
+      cropCtx.curve.forEach((e, i) => e.forEach((p, j) => { const d = Math.hypot(p[0] * w - lx, p[1] * h - ly); if (d < bd) { bd = d; best = { type: 'ctrl', i, j }; } }));
+    }
+    if (!best && !curveOn) {
       bd = 34;
       for (let i = 0; i < 4; i++) {
         const a = P[i], b = P[(i + 1) % 4];
@@ -1010,6 +1069,7 @@ function drawCrop() {
     if (!best) return;
     best.start = [lx, ly];
     best.c0 = cropCtx.corners.map((p) => p.slice());
+    best.k0 = cropCtx.curve ? cropCtx.curve.map((e) => e.map((p) => p.slice())) : null;
     cropCtx.drag = best;
     stage.setPointerCapture(e.pointerId);
     e.preventDefault();
@@ -1023,7 +1083,18 @@ function drawCrop() {
     const dx = lx - g.start[0], dy = ly - g.start[1];
     if (g.type === 'corner') {
       const c = g.c0[g.i];
-      cropCtx.corners[g.i] = [clamp(c[0] + dx / w), clamp(c[1] + dy / h)];
+      const n = [clamp(c[0] + dx / w), clamp(c[1] + dy / h)];
+      cropCtx.corners[g.i] = n;
+      // 曲線模式：相鄰兩條邊的彎曲點跟著按比例移動，保持原本的彎度
+      if (g.k0 && cropCtx.curveMode) {
+        const ddx = n[0] - c[0], ddy = n[1] - c[1];
+        const prev = (g.i + 3) % 4;
+        const mv = (ei, j, f) => { const p = g.k0[ei][j]; cropCtx.curve[ei][j] = [clamp(p[0] + ddx * f), clamp(p[1] + ddy * f)]; };
+        mv(g.i, 0, 2 / 3); mv(g.i, 1, 1 / 3); mv(prev, 0, 1 / 3); mv(prev, 1, 2 / 3);
+      }
+    } else if (g.type === 'ctrl') {
+      const p = g.k0[g.i][g.j];
+      cropCtx.curve[g.i][g.j] = [clamp(p[0] + dx / w), clamp(p[1] + dy / h)];
     } else {
       // 邊：沿著與這條邊垂直的方向平移，兩端的角一起移動
       const i = g.i, j = (i + 1) % 4;
@@ -1040,7 +1111,7 @@ function drawCrop() {
   stage.addEventListener('pointerup', end);
   stage.addEventListener('pointercancel', end);
 
-  // 放大鏡：顯示正在拖的角（或邊的中點）附近，直接畫出裁切邊、框外變暗；跟著手指，顯示在手指上方
+  // 放大鏡：顯示正在拖的點附近，直接畫出裁切邊、框外變暗；跟著手指，顯示在手指上方
   function loupe(fx, fy) {
     const g = cropCtx.drag;
     const L = $('#loupe');
@@ -1050,9 +1121,10 @@ function drawCrop() {
     const C = cropCtx.corners;
     let fxN, fyN;
     if (g.type === 'corner') [fxN, fyN] = C[g.i];
+    else if (g.type === 'ctrl') [fxN, fyN] = cropCtx.curve[g.i][g.j];
     else { const a = C[g.i], b = C[(g.i + 1) % 4]; fxN = (a[0] + b[0]) / 2; fyN = (a[1] + b[1]) / 2; }
-    const R = 264, half = R / 2;           // 畫布像素（CSS 132px，2 倍）
-    const scale = 2.6 * 2 * (w / nw);       // 原圖像素 → 放大鏡畫布像素
+    const R = 264, half = R / 2;
+    const scale = 2.6 * 2 * (w / nw);
     const cx = fxN * nw, cy = fyN * nh;
     ctx.save();
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, R, R);
@@ -1060,20 +1132,13 @@ function drawCrop() {
     const sw = R / scale;
     ctx.drawImage($('#cropImg'), cx - sw / 2, cy - sw / 2, sw, sw, 0, 0, R, R);
     const toL = (p) => [(p[0] * nw - cx) * scale + half, (p[1] * nh - cy) * scale + half];
-    const Q = C.map(toL);
-    // 框外變暗
-    ctx.beginPath();
-    ctx.rect(-10, -10, R + 20, R + 20);
-    ctx.moveTo(Q[0][0], Q[0][1]); for (let k = 1; k < 4; k++) ctx.lineTo(Q[k][0], Q[k][1]); ctx.closePath();
-    ctx.fillStyle = 'rgba(28,19,14,.5)';
-    ctx.fill('evenodd');
-    // 裁切邊
-    ctx.beginPath();
-    ctx.moveTo(Q[0][0], Q[0][1]); for (let k = 1; k < 4; k++) ctx.lineTo(Q[k][0], Q[k][1]); ctx.closePath();
-    ctx.strokeStyle = '#F2C48D'; ctx.lineWidth = 4; ctx.lineJoin = 'miter';
-    ctx.stroke();
+    const Q = cropOutline(C, cropCtx.curveMode ? cropCtx.curve : null).map(toL);
+    const path = () => { ctx.moveTo(Q[0][0], Q[0][1]); for (let k = 1; k < Q.length; k++) ctx.lineTo(Q[k][0], Q[k][1]); ctx.closePath(); };
+    ctx.beginPath(); ctx.rect(-10, -10, R + 20, R + 20); path();
+    ctx.fillStyle = 'rgba(28,19,14,.5)'; ctx.fill('evenodd');
+    ctx.beginPath(); path();
+    ctx.strokeStyle = '#F2C48D'; ctx.lineWidth = 4; ctx.lineJoin = 'round'; ctx.stroke();
     ctx.restore();
-    // 位置：手指上方約 95px；太靠上就放到手指下方
     const st = $('#cropStage').getBoundingClientRect();
     const sx = rx + fx, sy = ry + fy, size = 132, gap = 95;
     let top = sy - gap - size / 2;
@@ -1083,13 +1148,45 @@ function drawCrop() {
   }
 })();
 window.addEventListener('resize', () => { if (current === 'crop') layoutCrop(); if (current === 'page') { if (adj.open) { fitAdj(); scheduleRegion(); } else fitView(); } });
-$('#cropFull').onclick = () => { cropCtx.corners = FULL.map((p) => p.slice()); drawCrop(); };
+$('#cropFull').onclick = () => {
+  cropCtx.corners = FULL.map((p) => p.slice());
+  if (cropCtx.curveMode) cropCtx.curve = straightCurve(cropCtx.corners);
+  drawCrop();
+};
 $('#cropAuto').onclick = async () => {
+  const c = cropCtx; if (!c) return;
   busy('偵測中…');
   try {
     const r = await detectOn($('#cropImg'));
-    if (r) { cropCtx.corners = r.corners; drawCrop(); } else toast('找不到文件邊框，請手動調整');
+    if (!r) { toast('找不到文件邊框，請手動調整'); return; }
+    c.corners = r.corners;
+    if (c.curveMode) {
+      const cv = await detectCurveOn($('#cropImg'), c.corners);
+      c.curve = cv || straightCurve(c.corners);
+      if (!cv) toast('沒有偵測到明顯彎曲，可以手動拖彎曲點');
+    }
+    if (cropCtx === c) drawCrop();
   } finally { unbusy(); }
+};
+// 直線／曲線切換：第一次切到曲線時自動偵測彎曲
+$('#cropCurve').onclick = async () => {
+  const c = cropCtx; if (!c) return;
+  if (c.curveMode) {
+    c.savedCurve = c.curve; c.curveMode = false;
+  } else {
+    c.curveMode = true;
+    if (!c.curve) {
+      c.curve = c.savedCurve || null;
+      if (!c.curve) {
+        busy('偵測彎曲…');
+        const cv = await detectCurveOn($('#cropImg'), c.corners);
+        unbusy();
+        c.curve = cv || straightCurve(c.corners);
+        toast(cv ? '已依紙張邊緣擺好曲線，可再微調' : '沒有偵測到明顯彎曲，可以手動拖彎曲點');
+      }
+    }
+  }
+  if (cropCtx === c) { updateCurveBtn(); drawCrop(); }
 };
 $('#cropOk').onclick = async () => {
   const c = cropCtx; if (!c) return;
@@ -1098,7 +1195,7 @@ $('#cropOk').onclick = async () => {
   if (area < 0.01) { toast('範圍太小了'); return; }
   cropCtx = null;
   URL.revokeObjectURL(c.url);
-  await c.onConfirm(q);
+  await c.onConfirm(q, c.curveMode && c.curve ? c.curve : null);
 };
 $('#cropCancel').onclick = () => history.back();
 $('#cropNext').onclick = () => { if (!cropCtx) return; openCamera(); $('#cropOk').onclick(); };
@@ -1402,8 +1499,8 @@ $('#pgRotR').onclick = () => updatePage({ rotation: ((viewPage.rotation || 0) + 
 $('#pgCrop').onclick = () => {
   const p = viewPage;
   openCrop({
-    blob: p.original, corners: p.corners,
-    onConfirm: async (c) => { history.back(); await updatePage({ corners: c }); },
+    blob: p.original, corners: p.corners, curve: p.curve || null,
+    onConfirm: async (c, cv) => { history.back(); await updatePage({ corners: c, curve: cv }); },
   });
 };
 async function movePage(d) {
@@ -1465,7 +1562,7 @@ async function openAdjust() {
     const maxSide = Math.min(1800, Math.ceil(Math.max(st.width, st.height) * dpr));
     const d = await decodeFull(p.original);
     if (!adj.open) return;
-    const info = await wcall('prepare', { key: adj.key, buffer: d.data.buffer, width: d.width, height: d.height, corners: p.corners, maxSide }, [d.data.buffer]);
+    const info = await wcall('prepare', { key: adj.key, buffer: d.data.buffer, width: d.width, height: d.height, corners: p.corners, curve: p.curve || null, upscale: settings.upscale, maxSide }, [d.data.buffer]);
     if (!adj.open) return;
     const sw = rotSwap(adj.rotation);
     adj.pw = sw ? info.height : info.width; adj.ph = sw ? info.width : info.height;
@@ -1645,6 +1742,25 @@ async function pageImageForPdf(p) {
   if (p.mode === 'bw' && canDeflate) {
     const d = await decodeFull(p.processed);
     const { width: w, height: h, data } = d;
+    // 有邊緣平滑（邊緣帶灰階）時用 4 階灰（2-bit）無損嵌入，否則用純黑白（1-bit）
+    let hasGray = false;
+    for (let i = 0; i < data.length; i += 4) { const v = data[i]; if (v > 24 && v < 231) { hasGray = true; break; } }
+    if (hasGray) {
+      const rb = Math.ceil(w / 4), out = new Uint8Array(rb * h);
+      for (let y = 0; y < h; y++) {
+        let o = y * rb, src = y * w * 4;
+        for (let x = 0; x < w; x += 4) {
+          let byte = 0;
+          for (let b = 0; b < 4; b++) {
+            const xx = x + b;
+            const q = xx < w ? Math.round(data[src + xx * 4] / 85) : 3;
+            byte = (byte << 2) | q;
+          }
+          out[o++] = byte;
+        }
+      }
+      return { w, h, bytes: await deflate(out), dict: `/ColorSpace /DeviceGray /BitsPerComponent 2 /Filter /FlateDecode` };
+    }
     const rowBytes = Math.ceil(w / 8);
     const bits = new Uint8Array(rowBytes * h);
     for (let y = 0; y < h; y++) {
@@ -1804,12 +1920,20 @@ $('#btnSettings').onclick = () => {
     <div class="seg" id="setMode">${MODES.map((m) => `<button data-k="${m.id}" class="${settings.mode === m.id ? 'on' : ''}">${m.name}</button>`).join('')}</div>
     <div class="switch"><span>即時掃描自動拍攝<small>文件穩定約 1 秒後自動按快門</small></span><button class="tg ${settings.autoShutter ? 'on' : ''}" data-k="autoShutter"></button></div>
     <div class="switch"><span>拍照後先確認裁切<small>高畫質拍照後進入四角微調畫面</small></span><button class="tg ${settings.confirmCrop ? 'on' : ''}" data-k="confirmCrop"></button></div>
+    <div class="lbl" style="margin-top:12px">小圖平滑放大<small style="display:block;font-size:12px;margin-top:2px">讓解析度低的圖片（例如別人傳來的照片）轉黑白時邊緣更平順</small></div>
+    <div class="seg" id="setUp">${[['auto', '自動'], ['always', '一律'], ['off', '關閉']].map(([k, n]) => `<button data-k="${k}" class="${settings.upscale === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會以相機全解析度拍攝；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.5</div>`, (s) => {
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.6</div>`, (s) => {
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));
+    });
+    s.querySelectorAll('#setUp button').forEach((b) => b.onclick = () => {
+      settings.upscale = b.dataset.k; saveSettings();
+      s.querySelectorAll('#setUp button').forEach((x) => x.classList.toggle('on', x === b));
+      // 目前打開的文件立即更新，其他文件打開時才更新
+      if (state.docId && (current === 'doc' || current === 'page')) getDocPages(state.docId).then(({ pages }) => ensureFresh(pages));
     });
     s.querySelectorAll('.tg').forEach((b) => b.onclick = () => { settings[b.dataset.k] = !settings[b.dataset.k]; saveSettings(); b.classList.toggle('on', settings[b.dataset.k]); });
     if (navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then((e) => {
