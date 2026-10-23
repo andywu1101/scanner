@@ -322,6 +322,29 @@ input[type=file]{display:none}
 .set-links{display:flex;gap:10px;margin:16px 0 4px}
 .set-links button{flex:1;padding:12px 8px;border-radius:12px;font-weight:700;font-size:15px;border:1px solid var(--line);background:var(--surface2);color:var(--cocoa)}
 .set-links .donate{background:var(--danger);border-color:var(--danger);color:#fff}
+
+/* v1.9 拍攝中／拍好了 提示 */
+#freeze{position:absolute;inset:0;width:100%;height:100%;display:none;z-index:1;pointer-events:none}
+#overlay{z-index:2}
+#shotBusy,#shotOk{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:4;pointer-events:none;display:none;flex-direction:column;align-items:center;gap:12px;color:#fff;text-shadow:0 1px 6px rgba(0,0,0,.6)}
+#shotBusy{background:rgba(28,19,14,.62);padding:20px 26px;border-radius:18px}
+#shotBusy b,#shotOk b{white-space:nowrap;font-size:19px;font-weight:700;letter-spacing:.04em}
+#shotBusy .spin{border-color:rgba(255,255,255,.3);border-top-color:#fff}
+#shotBusy.show{display:flex}
+#shotOk.show{display:flex;animation:okpop .75s ease-out forwards}
+#shotOk .ok-c{width:96px;height:96px;border-radius:50%;background:rgba(94,138,89,.92);display:grid;place-items:center;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+#shotOk .ok-c svg{width:58px;height:58px}
+@keyframes okpop{0%{opacity:0;transform:translate(-50%,-50%) scale(.6)}15%{opacity:1;transform:translate(-50%,-50%) scale(1.08)}25%{transform:translate(-50%,-50%) scale(1)}80%{opacity:1}100%{opacity:0;transform:translate(-50%,-50%) scale(1)}}
+#liveThumb.bump{animation:bump .45s ease-out}
+@keyframes bump{0%{transform:scale(1)}35%{transform:scale(1.22)}100%{transform:scale(1)}}
+.sponsor-empty{font-size:15px;color:var(--muted);padding:6px 4px;line-height:1.7}
+/* 使用教學 */
+.help h4{font-size:15.5px;color:var(--cocoa-d);margin:16px 4px 6px}
+.help ul{margin:0;padding:0 4px 0 22px}
+.help li{font-size:14.5px;line-height:1.75;color:var(--text);margin:2px 0}
+.help .warn{background:#FBEDE6;border:1px solid #EBC3B5;border-radius:12px;padding:4px 10px 10px;margin-top:16px}
+.help .warn h4{color:var(--danger)}
+.help .close-help{display:block;width:100%;margin:18px 0 4px;padding:13px;border-radius:12px;background:var(--cocoa);color:#fff;font-weight:700;font-size:15.5px}
 </style>
 </head>
 <body>
@@ -354,6 +377,7 @@ input[type=file]{display:none}
 <section class="screen" id="home">
   <header class="bar">
     <h1>伍敵樂譜掃描</h1>
+    <button class="ibtn" id="btnHelp" aria-label="使用教學"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M9.3 9.2a2.8 2.8 0 0 1 5.4 1c0 1.9-2.7 2.4-2.7 4"/><circle cx="12" cy="17.4" r=".6" fill="currentColor"/></svg></button>
     <button class="ibtn" id="btnSettings" aria-label="設定"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
   </header>
   <div class="scroll" id="homeScroll"><div id="homeBody"></div></div>
@@ -369,7 +393,10 @@ input[type=file]{display:none}
   <div class="stage">
     <video id="video" playsinline muted autoplay></video>
     <canvas id="overlay"></canvas>
+    <canvas id="freeze"></canvas>
     <div id="flash"></div>
+    <div id="shotBusy"><div class="spin"></div><b>拍攝中，請勿移動</b></div>
+    <div id="shotOk"><span class="ok-c"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><b>已拍好</b></div>
     <div class="top">
       <button class="ibtn" id="liveClose" aria-label="關閉"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       <span class="sp"></span>
@@ -513,7 +540,7 @@ input[type=file]{display:none}
       <a class="ditem" href="https://portaly.cc/heng-heng.music/support" target="_blank" rel="noopener"><span class="ico">❤</span> Portaly 小額贊助</a>
       <button type="button" class="ditem" data-panel="Jko"><span class="ico">📱</span> 街口支付贊助</button>
       <button type="button" class="ditem" data-panel="Bank"><span class="ico">🏦</span> 銀行轉帳贊助</button>
-      <button type="button" class="ditem" id="sponsorEntry" data-panel="Sponsors" style="display:none"><span class="ico">💛</span> 贊助者名單</button>
+      <button type="button" class="ditem" id="sponsorEntry" data-panel="Sponsors"><span class="ico">💛</span> 贊助者名單</button>
     </div>
     <div class="dlinks" id="donateJko" style="display:none">
       <a class="jko-card" href="https://service.jkopay.com/r/transfer?j=Transfer:902103863" target="_blank" rel="noopener">
@@ -522,7 +549,7 @@ input[type=file]{display:none}
       </a>
       <div class="jko-acct">街口帳號 <b>902103863</b><button class="copy-btn" type="button" data-copy="902103863">複製</button></div>
       <p class="pay-note">此 QR 為 <b>TWQR 共通碼</b>，可用街口支付，或<b>任一家銀行的網銀 App</b> 掃描付款。</p>
-      <a class="form-link" href="https://forms.gle/72e7fguVdx6RT3RZ9" target="_blank" rel="noopener">請填寫贊助者表單，讓我將您放上贊助者名單 ❤</a>
+      <a class="form-link" href="https://forms.gle/ZwXgCHkD8gwYbmseA" target="_blank" rel="noopener">👉 請點此填寫贊助者表單，讓我將您放上名單</a>
       <a class="ditem" href="https://line.me/ti/p/LF15Mk2vef" target="_blank" rel="noopener"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="#06C755" d="M12 2.6c-5.5 0-10 3.6-10 8.1 0 3.9 3.6 7.2 8.4 7.9.33.07.78.22.89.5.1.26.07.66.03.92 0 0-.12.72-.14.87-.05.26-.21 1 .88.55 1.1-.46 5.9-3.48 8.05-5.96 1.48-1.63 2.19-3.28 2.19-5.11 0-4.5-4.5-8.1-10-8.1z"/></svg></span> 祐恆的 LINE</a>
       <button type="button" class="ditem" data-panel="">← 返回贊助管道</button>
     </div>
@@ -531,7 +558,7 @@ input[type=file]{display:none}
       <div class="bank-row"><span class="bk">帳號</span><b>163540424795</b><button class="copy-btn" type="button" data-copy="163540424795">複製</button></div>
       <div class="bank-row"><span class="bk">戶名</span><b>伍○恆</b></div>
       <p class="pay-note">轉帳僅需銀行代號與帳號；戶名供核對用。</p>
-      <a class="form-link" href="https://forms.gle/72e7fguVdx6RT3RZ9" target="_blank" rel="noopener">請填寫贊助者表單，讓我將您放上贊助者名單 ❤</a>
+      <a class="form-link" href="https://forms.gle/ZwXgCHkD8gwYbmseA" target="_blank" rel="noopener">👉 請點此填寫贊助者表單，讓我將您放上名單</a>
       <a class="ditem" href="https://line.me/ti/p/LF15Mk2vef" target="_blank" rel="noopener"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="#06C755" d="M12 2.6c-5.5 0-10 3.6-10 8.1 0 3.9 3.6 7.2 8.4 7.9.33.07.78.22.89.5.1.26.07.66.03.92 0 0-.12.72-.14.87-.05.26-.21 1 .88.55 1.1-.46 5.9-3.48 8.05-5.96 1.48-1.63 2.19-3.28 2.19-5.11 0-4.5-4.5-8.1-10-8.1z"/></svg></span> 祐恆的 LINE</a>
       <button type="button" class="ditem" data-panel="">← 返回贊助管道</button>
     </div>

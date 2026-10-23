@@ -617,6 +617,7 @@ function stopLive() {
   if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
   live.stream = null;
   $('#video').srcObject = null;
+  shotFx('');
   resumeQueue();
 }
 function setHint(t, good) { const h = $('#hint'); if (h.textContent !== t) h.textContent = t; h.classList.toggle('on', !!good); }
@@ -840,7 +841,7 @@ function drawOverlay() {
   const ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, R.cw, R.ch);
-  const target = live.armed && !live.capturing ? live.lockQ : null;
+  const target = live.armed && (!live.capturing || live.holdBox) ? live.lockQ : null;
   if (target) {
     if (!live.shown) { live.shown = target.map((p) => p.slice()); live.fade = 0; }
     else live.shown = live.shown.map((p, i) => [p[0] + (target[i][0] - p[0]) * 0.5, p[1] + (target[i][1] - p[1]) * 0.5]);
@@ -863,6 +864,28 @@ function drawOverlay() {
   }
   requestAnimationFrame(drawOverlay);
 }
+/* 拍攝提示（v1.9）：'busy' 拍攝中（定格畫面＋轉圈，只有 Android 全解析度拍照會用到）、
+   'ok' 拍好了（大勾勾，在影像確定取得的那一刻顯示，之後手就可以移開）、'' 全部收起 */
+let okT;
+function shotFx(state) {
+  const fz = $('#freeze'), busyEl = $('#shotBusy'), ok = $('#shotOk');
+  if (state === 'busy') {
+    // 把當下畫面定格，讓使用者知道還在拍
+    const v = $('#video'), R = videoRect(), dpr = window.devicePixelRatio || 1;
+    fz.width = Math.round(R.cw * dpr); fz.height = Math.round(R.ch * dpr);
+    const c = fz.getContext('2d');
+    try { c.drawImage(v, R.x * dpr, R.y * dpr, R.w * dpr, R.h * dpr); } catch (_) {}
+    fz.style.display = 'block'; busyEl.classList.add('show');
+    return;
+  }
+  fz.style.display = 'none'; busyEl.classList.remove('show');
+  clearTimeout(okT);
+  ok.classList.remove('show');
+  if (state === 'ok') {
+    void ok.offsetWidth; ok.classList.add('show');
+    okT = setTimeout(() => ok.classList.remove('show'), 800);
+  }
+}
 function flash() {
   const f = $('#flash'); f.classList.remove('go'); void f.offsetWidth; f.classList.add('go');
   if (navigator.vibrate) navigator.vibrate(30);
@@ -879,15 +902,17 @@ async function capture(sig, full, quadAt) {
     if (live.ic && !full) {
       // Android：全解析度拍照需要一點時間，拍好才閃光
       setHint('拍攝中，請勿移動…', true);
+      live.holdBox = true; shotFx('busy');
       try { blob = await live.ic.takePhoto(); fromPhoto = !!blob; } catch (e) { console.warn('takePhoto', e); }
+      live.holdBox = false; shotFx('');
     }
     if (!blob) {
       src = full || grabFull(v); // 畫面在這一刻已經固定
-      flash();
+      flash(); shotFx('ok'); // 這一格已經固定下來，手可以移開了
       setHint('已拍好，請換下一頁', true);
       live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; // 立刻隱藏框
       blob = await toBlob(src, 'image/jpeg', 0.97);
-    } else { flash(); setHint('已拍好，請換下一頁', true); live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; }
+    } else { flash(); shotFx('ok'); setHint('已拍好，請換下一頁', true); live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; }
     let corners = quad ? quad.map((p) => p.slice()) : FULL.map((p) => p.slice());
     // 用較高解析度重新精算四個角（只在結果相近時採用，避免抓錯）
     try {
@@ -904,6 +929,7 @@ async function capture(sig, full, quadAt) {
     if (!live.docId) live.docId = (await createDoc()).id;
     const page = await addPage(live.docId, blob, corners);
     live.count++;
+    { const tb = $('#liveThumb'); tb.classList.remove('bump'); void tb.offsetWidth; tb.classList.add('bump'); }
     const th = $('#liveThumb');
     th.style.visibility = 'visible';
     th.querySelector('span').textContent = live.count;
@@ -911,7 +937,7 @@ async function capture(sig, full, quadAt) {
     live.lastCapT = Date.now(); live.miss = 0; live.best = null;
     if (!quad) { live.armed = true; resetLock(); }
   } catch (e) {
-    console.error(e); toast('拍攝失敗：' + e.message);
+    console.error(e); shotFx(''); toast('拍攝失敗：' + e.message);
     live.armed = true; resetLock();
   }
   live.capturing = false;
@@ -1978,7 +2004,7 @@ $('#btnSettings').onclick = () => {
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會以相機全解析度拍攝；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
     <div class="set-links"><button class="donate" id="setDonate">❤ 小額贊助</button><button id="setCover">← 回封面</button></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.8</div>`, (s) => {
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.9</div>`, (s) => {
     s.querySelector('#setDonate').onclick = () => { closeSheet(); openDonate(); };
     s.querySelector('#setCover').onclick = () => { closeSheet(); goCover(); };
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
@@ -2001,11 +2027,44 @@ $('#btnSettings').onclick = () => {
 /* ---------- 封面、小額贊助、作者主頁（v1.8） ----------
    封面不進瀏覽紀錄：開始掃描／回封面都用 replaceState，返回鍵行為和以前一樣 */
 function goCover() { history.replaceState({ s: 'cover' }, ''); show('cover'); }
-$('#cvStart').onclick = () => { history.replaceState({ s: 'home' }, ''); renderHome(); show('home'); };
+$('#cvStart').onclick = () => {
+  history.replaceState({ s: 'home' }, ''); renderHome(); show('home');
+  // 第一次使用自動打開教學
+  let seen = false;
+  try { seen = localStorage.getItem('cocoscan-help-seen') === '1'; localStorage.setItem('cocoscan-help-seen', '1'); } catch (_) {}
+  if (!seen) openHelp();
+};
+$('#btnHelp').onclick = () => openHelp();
+function openHelp() {
+  openSheet(`<div class="help"><h3>使用教學</h3>
+    <h4>三種拍法</h4><ul>
+      <li><b>即時掃描</b>：對準樂譜就會自動拍，適合一次拍很多頁。</li>
+      <li><b>高畫質拍照</b>：用手機相機拍，畫質最清楚，iPhone 特別建議用這個。</li>
+      <li><b>相簿匯入</b>：別人傳來的樂譜圖片也能整理成 PDF。</li></ul>
+    <h4>即時掃描小技巧</h4><ul>
+      <li>紙張四周要留一點空間，太貼邊不會拍。</li>
+      <li>綠框出現後拿穩，看到中間的「✓ 已拍好」才算完成。</li>
+      <li>換下一頁時，讓紙張離開畫面或翻頁，就會自動拍下一張。</li></ul>
+    <h4>裁切</h4><ul>
+      <li>拖四個角或拖邊來調整範圍，放大鏡能幫你對準。</li>
+      <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平。</li></ul>
+    <h4>模式與調整</h4><ul>
+      <li>黑白最適合樂譜，灰階、彩色適合有照片或顏色的講義。</li>
+      <li>「調整」可以改曝光、濃淡、去雜點等。按住畫面，可以和預設值比較。</li></ul>
+    <h4>管理文件</h4><ul>
+      <li>長按頁面可以拖曳排序，也可以選取多頁刪除。</li>
+      <li>在「全部文件」裡可以合併或刪除文件。</li></ul>
+    <h4>匯出</h4><ul>
+      <li>匯出 PDF 或圖片，檔名可以自己改。</li></ul>
+    <div class="warn"><h4>⚠ 重要提醒</h4><ul>
+      <li>掃描只存在這支手機裡，不會上傳。</li>
+      <li>刪除主畫面上的 App，或清除瀏覽器資料，掃描就會全部消失。重要的樂譜請記得匯出 PDF 備份。</li></ul></div>
+    <button class="close-help" id="helpClose">我知道了</button></div>`, (sh) => { sh.querySelector('#helpClose').onclick = closeSheet; sh.scrollTop = 0; });
+}
 $('#cvDonate').onclick = () => openDonate();
 $('#cvAuthor').onclick = () => openModal('authorModal');
 
-/* 贊助者名單：要新增名字，複製下面的範例改名字即可（名單是空的時候不顯示「贊助者名單」按鈕）
+/* 贊助者名單：要新增名字，複製下面的範例改名字即可（名單是空的時候顯示「目前尚未有人贊助」）
    例：{ name: '王小明' }, */
 const SPONSORS = [
 ];
@@ -2015,12 +2074,11 @@ function donatePanel(which) {
   $('#donateIntro').style.display = which ? 'none' : '';
   ['', 'Jko', 'Bank', 'Sponsors'].forEach((k) => { $('#donate' + (k || '_')).style.display = which === k ? 'flex' : 'none'; });
   if (which === 'Sponsors') {
-    $('#sponsorList').innerHTML = SPONSORS.map((x) => `<span>${String(x.name).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))}</span>`).join('');
+    $('#sponsorList').innerHTML = !SPONSORS.length ? '<div class="sponsor-empty">目前尚未有人贊助，成為第一位贊助者 💛</div>' : SPONSORS.map((x) => `<span>${String(x.name).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))}</span>`).join('');
   }
   $('#donateModal').scrollTop = 0;
 }
 function openDonate() { donatePanel(''); openModal('donateModal'); }
-$('#sponsorEntry').style.display = SPONSORS.length ? '' : 'none';
 document.querySelectorAll('.dmodal').forEach((m) => {
   m.addEventListener('click', (e) => {
     if (e.target === m || e.target.closest('[data-close]')) { closeModal(m.id); return; }
