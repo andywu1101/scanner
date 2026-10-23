@@ -170,18 +170,36 @@ function trueAspect(P, width, height) {
 }
 
 /* ---------- 增強 ---------- */
-function estimateBackground(cv, img) {
-  // img: 8UC1 或 8UC3。回傳同尺寸的「紙張底色」估計
+// 「紙張底色」的低解析度估計（整頁），img: 8UC1 或 8UC3
+function backgroundSmall(cv, img) {
   const w = img.cols, h = img.rows;
   const scale = Math.min(1, 700 / Math.max(w, h));
   const small = new cv.Mat();
-  cv.resize(img, small, new cv.Size(Math.round(w * scale), Math.round(h * scale)), 0, 0, cv.INTER_AREA);
+  cv.resize(img, small, new cv.Size(Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale))), 0, 0, cv.INTER_AREA);
   const k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(11, 11));
   cv.dilate(small, small, k);
   cv.medianBlur(small, small, 21);
+  k.delete();
+  return small;
+}
+// 把整頁底色放大到目前影像的尺寸；crop（整頁像素座標）有值時只取那一塊
+function expandBackground(cv, small, outW, outH, full) {
   const bg = new cv.Mat();
-  cv.resize(small, bg, new cv.Size(w, h), 0, 0, cv.INTER_LINEAR);
-  small.delete(); k.delete();
+  if (!full) { cv.resize(small, bg, new cv.Size(outW, outH), 0, 0, cv.INTER_LINEAR); return bg; }
+  const sx = small.cols / full.w, sy = small.rows / full.h;
+  const x0 = Math.max(0, Math.floor(full.x * sx) - 1), y0 = Math.max(0, Math.floor(full.y * sy) - 1);
+  const x1 = Math.min(small.cols, Math.ceil((full.x + outW) * sx) + 1), y1 = Math.min(small.rows, Math.ceil((full.y + outH) * sy) + 1);
+  const roi = small.roi(new cv.Rect(x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0)));
+  // 先放大這一小塊，再精準切出 crop 對應的範圍
+  const fx = (x1 - x0) / sx, fy = (y1 - y0) / sy;
+  const big = new cv.Mat();
+  cv.resize(roi, big, new cv.Size(Math.max(1, Math.round(fx)), Math.max(1, Math.round(fy))), 0, 0, cv.INTER_LINEAR);
+  roi.delete();
+  const ox = Math.max(0, Math.min(big.cols - outW, Math.round(full.x - x0 / sx)));
+  const oy = Math.max(0, Math.min(big.rows - outH, Math.round(full.y - y0 / sy)));
+  const cut = big.roi(new cv.Rect(ox, oy, Math.min(outW, big.cols - ox), Math.min(outH, big.rows - oy)));
+  if (cut.cols === outW && cut.rows === outH) cut.copyTo(bg); else cv.resize(cut, bg, new cv.Size(outW, outH), 0, 0, cv.INTER_LINEAR);
+  cut.delete(); big.delete();
   return bg;
 }
 
@@ -193,8 +211,13 @@ function sharpen(cv, img, amount, sigma) {
   blur.delete();
 }
 
-function normalizeLight(cv, img) {
-  const bg = estimateBackground(cv, img);
+// ctx.bg：預先算好的整頁底色（gray / rgb）；ctx.crop：這張影像在整頁中的位置
+function normalizeLight(cv, img, ctx) {
+  const key = img.channels() === 1 ? 'gray' : 'rgb';
+  const pre = ctx && ctx.bg && ctx.bg[key];
+  const small = pre || backgroundSmall(cv, img);
+  const bg = expandBackground(cv, small, img.cols, img.rows, ctx && ctx.crop);
+  if (!pre) small.delete();
   const out = new cv.Mat();
   cv.divide(img, bg, out, 255);
   bg.delete();
@@ -271,9 +294,11 @@ function despeckle(cv, bw, area) {
 }
 
 // 對已校正的 RGB 頁面套用模式與調整（會用掉 warped），回傳 1 或 3 通道結果
-function enhance(cv, warped, mode, params) {
+// ctx（可省略）：{ minSide 整頁短邊, bg 整頁底色, crop 區域位置 } —— 讓區域計算與整頁結果一致
+function enhance(cv, warped, mode, params, ctx) {
   const p = Object.assign({}, ADJ_DEFAULTS[mode] || {}, params || {});
-  const k = Math.max(0.25, Math.min(warped.cols, warped.rows) / 2400);
+  const minSide = (ctx && ctx.minSide) || Math.min(warped.cols, warped.rows);
+  const k = Math.max(0.25, minSide / 2400);
   const sig = (s) => Math.max(0.35, s * k);
 
   if (mode === 'original') {
@@ -283,7 +308,7 @@ function enhance(cv, warped, mode, params) {
     return warped;
   }
   if (mode === 'color') {
-    const norm = normalizeLight(cv, warped);
+    const norm = normalizeLight(cv, warped, ctx);
     warped.delete();
     applyTone(cv, norm, p, 1.1, -22);
     applyColor(cv, norm, p);
@@ -293,7 +318,7 @@ function enhance(cv, warped, mode, params) {
   const gray = new cv.Mat();
   cv.cvtColor(warped, gray, cv.COLOR_RGB2GRAY);
   warped.delete();
-  const norm = normalizeLight(cv, gray);
+  const norm = normalizeLight(cv, gray, ctx);
   gray.delete();
   if (mode === 'gray') {
     applyTone(cv, norm, p, 1.15, -30);
@@ -312,7 +337,7 @@ function enhance(cv, warped, mode, params) {
     sharpen(cv, sm, ((s - 50) / 50) * 1.5, sig(1.0));
   }
   norm.delete();
-  let block = Math.round(Math.min(sm.cols, sm.rows) / 45);
+  let block = Math.round(minSide / 45);
   if (block % 2 === 0) block++;
   block = Math.max(block, 15);
   const d = p.density || 0;
@@ -385,20 +410,84 @@ function processPage(cv, msg) {
   return finish(cv, enhance(cv, warped, mode, params), rotation);
 }
 
-// 調整拉桿的即時預覽：先把校正好的小圖存在 worker 裡，之後每次只重跑增強
+// 調整拉桿的預覽：worker 保留「全解析度校正圖」與縮小版
+//  - 整頁預覽用縮小版（快），數值依整頁尺度換算
+//  - 放大檢查時，用全解析度只算看得到的那一塊（與匯出結果一致）
 let previewCache = null;
+function releaseCache() {
+  if (!previewCache) return;
+  const c = previewCache;
+  c.full.delete(); c.small.delete();
+  for (const k of ['gray', 'rgb']) if (c.bg[k]) c.bg[k].delete();
+  previewCache = null;
+}
 function prepare(cv, msg) {
-  if (previewCache) { previewCache.mat.delete(); previewCache = null; }
+  releaseCache();
   const { key, buffer, width, height, corners, maxSide } = msg;
   const rgb = rgbFromBuffer(cv, buffer, width, height);
-  const warped = warpPage(cv, rgb, width, height, corners, maxSide);
+  const full = warpPage(cv, rgb, width, height, corners);
   rgb.delete();
-  previewCache = { key, mat: warped };
-  return { width: warped.cols, height: warped.rows };
+  const s = Math.min(1, maxSide / Math.max(full.cols, full.rows));
+  const small = new cv.Mat();
+  cv.resize(full, small, new cv.Size(Math.max(1, Math.round(full.cols * s)), Math.max(1, Math.round(full.rows * s))), 0, 0, cv.INTER_AREA);
+  // 整頁底色一次算好（灰階與彩色各一份）
+  const g = new cv.Mat();
+  cv.cvtColor(full, g, cv.COLOR_RGB2GRAY);
+  const bg = { gray: backgroundSmall(cv, g), rgb: backgroundSmall(cv, full) };
+  g.delete();
+  previewCache = { key, full, small, bg };
+  return { width: small.cols, height: small.rows, fullW: full.cols, fullH: full.rows };
+}
+function cacheFor(key) {
+  if (!previewCache || previewCache.key !== key) throw new Error('preview-missing');
+  return previewCache;
 }
 function renderPreview(cv, msg) {
-  if (!previewCache || previewCache.key !== msg.key) throw new Error('preview-missing');
-  return finish(cv, enhance(cv, previewCache.mat.clone(), msg.mode, msg.params), msg.rotation);
+  const c = cacheFor(msg.key);
+  const ctx = { minSide: Math.min(c.full.cols, c.full.rows), bg: c.bg, scale: c.small.cols / c.full.cols };
+  // 縮小版的模糊半徑、雜點面積要依縮小比例換算，所以傳「整頁短邊 × 縮小比例」
+  ctx.minSide *= ctx.scale;
+  return finish(cv, enhance(cv, c.small.clone(), msg.mode, msg.params, ctx), msg.rotation);
+}
+// rect：旋轉後畫面上的區域（0~1）。換回未旋轉的座標
+function unrotateRect(r, rot) {
+  const pts = [[r.x, r.y], [r.x + r.w, r.y + r.h]].map(([u, v]) => {
+    if (rot === 90) return [v, 1 - u];
+    if (rot === 180) return [1 - u, 1 - v];
+    if (rot === 270) return [1 - v, u];
+    return [u, v];
+  });
+  const x0 = Math.min(pts[0][0], pts[1][0]), x1 = Math.max(pts[0][0], pts[1][0]);
+  const y0 = Math.min(pts[0][1], pts[1][1]), y1 = Math.max(pts[0][1], pts[1][1]);
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+function renderRegion(cv, msg) {
+  const c = cacheFor(msg.key);
+  const rot = (((msg.rotation || 0) % 360) + 360) % 360;
+  const F = c.full, W = F.cols, H = F.rows;
+  const u = unrotateRect(msg.rect, rot);
+  let x = Math.max(0, Math.floor(u.x * W)), y = Math.max(0, Math.floor(u.y * H));
+  let x2 = Math.min(W, Math.ceil((u.x + u.w) * W)), y2 = Math.min(H, Math.ceil((u.y + u.h) * H));
+  if (x2 - x < 8 || y2 - y < 8) throw new Error('region-too-small');
+  // 四周多算一圈，避免邊界的模糊、門檻、去雜點效果不正確
+  const m = 96;
+  const mx = Math.max(0, x - m), my = Math.max(0, y - m), mx2 = Math.min(W, x2 + m), my2 = Math.min(H, y2 + m);
+  const roi = F.roi(new cv.Rect(mx, my, mx2 - mx, my2 - my));
+  const crop = roi.clone(); roi.delete();
+  const ctx = { minSide: Math.min(W, H), bg: c.bg, crop: { x: mx, y: my, w: W, h: H } };
+  const out = enhance(cv, crop, msg.mode, msg.params, ctx);
+  const inner = out.roi(new cv.Rect(x - mx, y - my, x2 - x, y2 - y));
+  const res = inner.clone(); inner.delete(); out.delete();
+  const r = finish(cv, res, rot);
+  // 回傳實際範圍（旋轉後 0~1）
+  const back = [[x / W, y / H], [x2 / W, y2 / H]].map(([a, b]) => {
+    if (rot === 90) return [1 - b, a];
+    if (rot === 180) return [1 - a, 1 - b];
+    if (rot === 270) return [b, 1 - a];
+    return [a, b];
+  });
+  r.rect = { x: Math.min(back[0][0], back[1][0]), y: Math.min(back[0][1], back[1][1]), w: Math.abs(back[1][0] - back[0][0]), h: Math.abs(back[1][1] - back[0][1]) };
+  return r;
 }
 
 self.onmessage = async (e) => {
@@ -417,8 +506,11 @@ self.onmessage = async (e) => {
     } else if (type === 'render') {
       const r = renderPreview(cv, e.data);
       self.postMessage({ id, ok: true, result: r }, [r.buffer]);
+    } else if (type === 'region') {
+      const r = renderRegion(cv, e.data);
+      self.postMessage({ id, ok: true, result: r }, [r.buffer]);
     } else if (type === 'release') {
-      if (previewCache) { previewCache.mat.delete(); previewCache = null; }
+      releaseCache();
       self.postMessage({ id, ok: true, result: null });
     }
   } catch (err) {

@@ -9,16 +9,16 @@ const MODES = [
   { id: 'original', name: '原圖' },
 ];
 // 各模式的調整拉桿（數值與 worker.js 的 ADJ_DEFAULTS 對應）
-const S_EXP = { k: 'exposure', name: '曝光', min: -100, max: 100, def: 0 };
-const S_CON = { k: 'contrast', name: '對比', min: -100, max: 100, def: 0 };
-const S_SAT = { k: 'saturation', name: '飽和度', min: -100, max: 100, def: 0 };
+const S_EXP = { k: 'exposure', name: '曝光', min: -100, max: 100, def: 0, lo: '暗', hi: '亮' };
+const S_CON = { k: 'contrast', name: '對比', min: -100, max: 100, def: 0, lo: '低', hi: '高' };
+const S_SAT = { k: 'saturation', name: '飽和度', min: -100, max: 100, def: 0, lo: '淡', hi: '豔' };
 const S_TMP = { k: 'temp', name: '色溫', min: -100, max: 100, def: 0, lo: '冷', hi: '暖' };
 const ADJ = {
   bw: [S_EXP, S_CON, { k: 'density', name: '濃淡', min: -100, max: 100, def: 0, lo: '淡', hi: '濃' },
-    { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 35 }, { k: 'despeckle', name: '去雜點', min: 0, max: 100, def: 20 }],
-  gray: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50 }],
-  color: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50 }, S_SAT, S_TMP],
-  original: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 0 }, S_SAT, S_TMP],
+    { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 35, lo: '柔', hi: '銳' }, { k: 'despeckle', name: '去雜點', min: 0, max: 100, def: 20, lo: '少', hi: '多' }],
+  gray: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50, lo: '柔', hi: '銳' }],
+  color: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50, lo: '柔', hi: '銳' }, S_SAT, S_TMP],
+  original: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 0, lo: '柔', hi: '銳' }, S_SAT, S_TMP],
 };
 const MAX_PIXELS = 16000000; // iOS canvas 上限約 16.7M 像素
 
@@ -1082,7 +1082,7 @@ function drawCrop() {
     Object.assign(L.style, { display: 'block', left: left + 'px', top: top + 'px', right: '' });
   }
 })();
-window.addEventListener('resize', () => { if (current === 'crop') layoutCrop(); if (current === 'page') fitView(); });
+window.addEventListener('resize', () => { if (current === 'crop') layoutCrop(); if (current === 'page') { if (adj.open) { fitAdj(); scheduleRegion(); } else fitView(); } });
 $('#cropFull').onclick = () => { cropCtx.corners = FULL.map((p) => p.slice()); drawCrop(); };
 $('#cropAuto').onclick = async () => {
   busy('偵測中…');
@@ -1301,12 +1301,15 @@ function fitView() {
 }
 // 手勢進行中用 transform 縮放（流暢）；手勢結束後把圖片「實際尺寸」設成放大後的大小，
 // 瀏覽器才會用原圖細節重新繪製，放大後不會糊（iPhone 只用 transform 會把小圖拉大）
+function zoomTarget() {
+  return adj.open ? { el: $('#adjWrap'), natW: adj.fullW || 1 } : { el: $('#viewImg'), natW: $('#viewImg').naturalWidth };
+}
 function applyZoom(gesturing) {
   const b = zoom.base; if (!b) return;
-  const img = $('#viewImg');
+  const { el: img, natW } = zoomTarget();
   if (!gesturing && zoom.s <= 1.001) { zoom.s = 1; zoom.x = 0; zoom.y = 0; }
   // 實際尺寸最多放到「原圖 1 像素 = 螢幕 1 像素」，再大就只是放大像素，交給 transform
-  const capS = Math.max(1, img.naturalWidth / (b.w * (window.devicePixelRatio || 1)));
+  const capS = Math.max(1, natW / (b.w * (window.devicePixelRatio || 1)));
   if (!gesturing || !zoom.cs) zoom.cs = Math.min(zoom.s, capS);
   const cs = zoom.cs;
   img.style.width = b.w * cs + 'px'; img.style.height = b.h * cs + 'px';
@@ -1316,15 +1319,17 @@ function applyZoom(gesturing) {
 (() => {
   const stage = $('#viewStage');
   const pts = new Map();
-  let g = null, lastTap = 0, swipeStart = null;
+  let g = null, lastTap = 0, swipeStart = null, holdT = null, holdStart = null;
   const pos = (e) => { const r = stage.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
   stage.addEventListener('pointerdown', (e) => {
     if (e.target.closest('.navarrow')) return;
     stage.setPointerCapture(e.pointerId);
     pts.set(e.pointerId, pos(e));
+    clearTimeout(holdT);
     if (pts.size === 1) {
       const now = Date.now();
       const p = pos(e);
+      if (adj.open) { holdStart = p; holdT = setTimeout(startCompare, 320); }
       if (now - lastTap < 300) { // 雙擊縮放
         const b = zoom.base;
         if (zoom.s > 1) { zoom.s = 1; } else {
@@ -1345,7 +1350,9 @@ function applyZoom(gesturing) {
     }
   });
   stage.addEventListener('pointermove', (e) => {
-    if (!pts.has(e.pointerId) || !g) return;
+    if (!pts.has(e.pointerId)) return;
+    if (holdStart) { const q = pos(e); if (Math.hypot(q[0] - holdStart[0], q[1] - holdStart[1]) > 8) { clearTimeout(holdT); holdStart = null; } }
+    if (!g) return;
     pts.set(e.pointerId, pos(e));
     const B = zoom.base;
     if (g.type === 'pinch' && pts.size >= 2) {
@@ -1370,7 +1377,9 @@ function applyZoom(gesturing) {
       if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
     }
     swipeStart = null;
-    if (pts.size === 0) { g = null; applyZoom(false); }
+    clearTimeout(holdT); holdStart = null;
+    if (adj.comparing) endCompare();
+    if (pts.size === 0) { g = null; applyZoom(false); if (adj.open) scheduleRegion(); }
     else if (pts.size === 1) { const q = [...pts.values()][0]; g = { type: 'pan', start: q, x0: zoom.x, y0: zoom.y }; }
   };
   stage.addEventListener('pointerup', up);
@@ -1428,62 +1437,103 @@ $('#pageDel').onclick = async () => {
 };
 
 
-/* ---------- 細部調整（每個模式一組數值，會記住） ---------- */
-const adj = { open: false, ready: false, busy: false, pending: false, key: null, mode: null, snap: null };
+/* ---------- 細部調整（每個模式一組數值，會記住） ----------
+   一次一條拉桿；預覽可放大，放開後以全解析度重算看得到的區域；按住預覽看預設數值 */
+const adj = { open: false, ready: false, busy: false, pending: false, key: null, mode: null, snap: null, active: null, regionSeq: 0, comparing: false };
+const defaultsOf = (mode) => Object.fromEntries(ADJ[mode].map((d) => [d.k, d.def]));
+const rotSwap = (r) => r === 90 || r === 270;
 async function openAdjust() {
   const p = viewPage;
   if (!p || adj.open) return;
-  Object.assign(adj, { open: true, ready: false, busy: false, pending: false, mode: p.mode, key: p.id + ':' + Date.now(), snap: JSON.stringify(adjOf(p.mode)), rotation: p.rotation || 0 });
+  Object.assign(adj, {
+    open: true, ready: false, busy: false, pending: false, mode: p.mode, key: p.id + ':' + Date.now(),
+    snap: JSON.stringify(adjOf(p.mode)), rotation: p.rotation || 0, comparing: false, defImg: null,
+    active: adj.mode === p.mode && adj.active ? adj.active : ADJ[p.mode][0].k,
+  });
   $('#page').classList.add('adjusting');
-  buildSliders();
+  hideDetail();
+  ['#adjMain', '#adjCmp', '#adjCmpDetail'].forEach((s) => { $(s).style.display = 'none'; });
+  $('#cmpTag').style.display = 'none';
+  buildPanel();
+  zoom.s = 1; zoom.x = 0; zoom.y = 0; zoom.cs = null;
   history.pushState({ s: 'page', doc: state.docId, i: state.pageIndex, adj: 1 }, '');
+  $('#viewBusy').style.display = 'block';
   try {
     await whenReady();
     const st = $('#viewStage').getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
-    const maxSide = Math.min(2000, Math.ceil(Math.max(st.width, st.height) * dpr));
-    const { img, url } = await loadImg(p.original);
-    const d = smallFrame(img, 2600);
-    URL.revokeObjectURL(url);
+    const maxSide = Math.min(1800, Math.ceil(Math.max(st.width, st.height) * dpr));
+    const d = await decodeFull(p.original);
     if (!adj.open) return;
-    await wcall('prepare', { key: adj.key, buffer: d.data.buffer, width: d.width, height: d.height, corners: p.corners, maxSide }, [d.data.buffer]);
+    const info = await wcall('prepare', { key: adj.key, buffer: d.data.buffer, width: d.width, height: d.height, corners: p.corners, maxSide }, [d.data.buffer]);
     if (!adj.open) return;
+    const sw = rotSwap(adj.rotation);
+    adj.pw = sw ? info.height : info.width; adj.ph = sw ? info.width : info.height;
+    adj.fullW = sw ? info.fullH : info.fullW; adj.fullH = sw ? info.fullW : info.fullH;
     adj.ready = true;
-    renderAdj();
+    fitAdj();
+    await renderAdj();
   } catch (e) { console.error(e); toast('預覽失敗：' + e.message); }
+  $('#viewBusy').style.display = 'none';
 }
-function buildSliders() {
-  const mode = adj.mode;
-  $('#adjTitle').textContent = MODES.find((m) => m.id === mode).name + '調整';
-  $('#adjNote').textContent = `會套用到所有「${MODES.find((m) => m.id === mode).name}」頁面・點兩下名稱可單獨重設`;
+function fitAdj() {
+  if (!adj.pw) return;
+  const st = $('#viewStage').getBoundingClientRect();
+  const pad = 10;
+  const s = Math.min((st.width - pad * 2) / adj.pw, (st.height - pad * 2) / adj.ph);
+  const w = adj.pw * s, h = adj.ph * s;
+  zoom.base = { x: (st.width - w) / 2, y: (st.height - h) / 2, w, h };
+  applyZoom();
+}
+function buildPanel() {
+  const mode = adj.mode, name = MODES.find((m) => m.id === mode).name;
+  $('#adjTitle').textContent = name + '調整';
+  $('#adjNote').textContent = `套用到所有「${name}」頁面・按住圖片看預設・雙指放大檢查`;
   const vals = adjOf(mode);
-  const box = $('#adjSliders');
-  box.innerHTML = '';
-  for (const d of ADJ[mode]) {
-    const row = document.createElement('div');
-    row.className = 'sl';
-    const defPct = ((d.def - d.min) / (d.max - d.min)) * 100;
-    row.innerHTML = `<div class="slh"><span class="sln">${d.name}</span>${d.lo ? `<span class="slr">${d.lo} ↔ ${d.hi}</span>` : ''}<output></output></div>
-      <input type="range" min="${d.min}" max="${d.max}" step="1" style="--def:${defPct}%">`;
-    const inp = row.querySelector('input'), out = row.querySelector('output');
-    const show = () => { const v = +inp.value; out.textContent = d.min < 0 && v > 0 ? '+' + v : String(v); out.classList.toggle('chg', v !== d.def); };
-    inp.value = vals[d.k]; show();
-    inp.addEventListener('input', () => {
-      (settings.adj[mode] = settings.adj[mode] || {})[d.k] = +inp.value;
-      show(); renderAdj();
-    });
-    inp.addEventListener('change', saveSettings);
+  $('#adjTabs').innerHTML = ADJ[mode].map((d) => `<button class="atab ${d.k === adj.active ? 'on' : ''} ${vals[d.k] !== d.def ? 'chg' : ''}" data-k="${d.k}">${d.name}</button>`).join('');
+  $('#adjTabs').querySelectorAll('.atab').forEach((b) => {
     let lastTap = 0;
-    row.querySelector('.slh').addEventListener('click', () => {
+    b.onclick = () => {
       const now = Date.now();
-      if (now - lastTap < 350) {
-        inp.value = d.def; (settings.adj[mode] = settings.adj[mode] || {})[d.k] = d.def;
-        show(); renderAdj(); saveSettings();
-      }
+      if (b.dataset.k === adj.active && now - lastTap < 350) { setAdjValue(b.dataset.k, ADJ[mode].find((d) => d.k === b.dataset.k).def, true); }
       lastTap = now;
-    });
-    box.appendChild(row);
-  }
+      adj.active = b.dataset.k;
+      $('#adjTabs').querySelectorAll('.atab').forEach((x) => x.classList.toggle('on', x === b));
+      showSlider();
+    };
+  });
+  showSlider();
+}
+function showSlider() {
+  const d = ADJ[adj.mode].find((x) => x.k === adj.active);
+  const inp = $('#adjRange');
+  inp.min = d.min; inp.max = d.max; inp.step = 1;
+  inp.style.setProperty('--def', ((d.def - d.min) / (d.max - d.min)) * 100 + '%');
+  inp.value = adjOf(adj.mode)[d.k];
+  $('#adjLo').textContent = d.lo || ''; $('#adjHi').textContent = d.hi || '';
+  showVal();
+}
+function showVal() {
+  const d = ADJ[adj.mode].find((x) => x.k === adj.active);
+  const v = +$('#adjRange').value;
+  const out = $('#adjVal');
+  out.textContent = d.name + ' ' + (d.min < 0 && v > 0 ? '+' + v : String(v));
+  out.classList.toggle('chg', v !== d.def);
+  const tab = $(`#adjTabs .atab[data-k="${d.k}"]`);
+  if (tab) tab.classList.toggle('chg', v !== d.def);
+}
+function setAdjValue(k, v, commit) {
+  (settings.adj[adj.mode] = settings.adj[adj.mode] || {})[k] = v;
+  if (k === adj.active) $('#adjRange').value = v;
+  showVal(); hideDetail(); renderAdj();
+  if (commit) { saveSettings(); scheduleRegion(); }
+}
+$('#adjRange').addEventListener('input', () => setAdjValue(adj.active, +$('#adjRange').value, false));
+$('#adjRange').addEventListener('change', () => { saveSettings(); scheduleRegion(); });
+
+function drawTo(canvas, r) {
+  if (canvas.width !== r.width || canvas.height !== r.height) { canvas.width = r.width; canvas.height = r.height; }
+  canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
 }
 async function renderAdj() {
   if (!adj.open || !adj.ready) return;
@@ -1491,40 +1541,88 @@ async function renderAdj() {
   adj.busy = true;
   try {
     const r = await wcall('render', { key: adj.key, mode: adj.mode, params: adjOf(adj.mode), rotation: adj.rotation });
-    if (adj.open) drawAdj(r);
+    if (adj.open) { drawTo($('#adjMain'), r); $('#adjMain').style.display = 'block'; }
   } catch (e) { console.warn(e); }
   adj.busy = false;
   if (adj.pending) { adj.pending = false; renderAdj(); }
 }
-function drawAdj(r) {
-  const c = $('#adjCanvas');
-  if (c.width !== r.width || c.height !== r.height) { c.width = r.width; c.height = r.height; }
-  c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
-  const st = $('#viewStage').getBoundingClientRect();
-  const pad = 12;
-  const s = Math.min((st.width - pad * 2) / r.width, (st.height - pad * 2) / r.height);
-  const w = r.width * s, h = r.height * s;
-  Object.assign(c.style, { width: w + 'px', height: h + 'px', left: (st.width - w) / 2 + 'px', top: (st.height - h) / 2 + 'px', display: 'block' });
+// 放大時，看得到的區域改用全解析度計算
+let regionTimer = null;
+function scheduleRegion() { clearTimeout(regionTimer); regionTimer = setTimeout(doRegion, 140); }
+function hideDetail() { adj.regionSeq++; adj.detailRect = null; $('#adjDetail').style.display = 'none'; }
+function visibleRect() {
+  const st = $('#viewStage').getBoundingClientRect(), b = zoom.base, s = zoom.s;
+  const left = b.x + zoom.x, top = b.y + zoom.y, W = b.w * s, H = b.h * s;
+  const x0 = Math.max(0, -left / W), x1 = Math.min(1, (st.width - left) / W);
+  const y0 = Math.max(0, -top / H), y1 = Math.min(1, (st.height - top) / H);
+  if (x1 - x0 < 0.003 || y1 - y0 < 0.003) return null;
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+function placeIn(canvas, rect) {
+  Object.assign(canvas.style, { left: rect.x * 100 + '%', top: rect.y * 100 + '%', width: rect.w * 100 + '%', height: rect.h * 100 + '%', display: 'block' });
+}
+async function doRegion() {
+  if (!adj.open || !adj.ready || zoom.s <= 1.15) { if (zoom.s <= 1.15) hideDetail(); return; }
+  const rect = visibleRect();
+  if (!rect) return;
+  const seq = ++adj.regionSeq, pk = JSON.stringify(adjOf(adj.mode));
+  try {
+    const r = await wcall('region', { key: adj.key, mode: adj.mode, params: adjOf(adj.mode), rotation: adj.rotation, rect });
+    if (!adj.open || seq !== adj.regionSeq || pk !== JSON.stringify(adjOf(adj.mode))) return;
+    const c = $('#adjDetail');
+    drawTo(c, r); placeIn(c, r.rect);
+    adj.detailRect = r.rect;
+  } catch (e) { console.warn(e); }
+}
+// 按住看預設數值
+async function startCompare() {
+  if (!adj.ready || adj.comparing) return;
+  adj.comparing = true;
+  if (navigator.vibrate) navigator.vibrate(10);
+  $('#cmpTag').style.display = 'block';
+  const defs = defaultsOf(adj.mode);
+  try {
+    if (!adj.defImg) {
+      const r = await wcall('render', { key: adj.key, mode: adj.mode, params: defs, rotation: adj.rotation });
+      adj.defImg = r;
+      drawTo($('#adjCmp'), r);
+    }
+    if (!adj.comparing) return;
+    $('#adjCmp').style.display = 'block';
+    if (adj.detailRect) {
+      const r = await wcall('region', { key: adj.key, mode: adj.mode, params: defs, rotation: adj.rotation, rect: adj.detailRect });
+      if (!adj.comparing) return;
+      const c = $('#adjCmpDetail'); drawTo(c, r); placeIn(c, r.rect);
+    }
+  } catch (e) { console.warn(e); }
+}
+function endCompare() {
+  if (!adj.comparing) return;
+  adj.comparing = false;
+  ['#adjCmp', '#adjCmpDetail', '#cmpTag'].forEach((s) => { $(s).style.display = 'none'; });
 }
 function closeAdjust() {
   if (!adj.open) return;
+  endCompare();
   adj.open = false; adj.ready = false;
+  clearTimeout(regionTimer); hideDetail();
   $('#page').classList.remove('adjusting');
-  $('#adjCanvas').style.display = 'none';
   wcall('release', {}).catch(() => {});
   saveSettings();
+  zoom.s = 1; zoom.x = 0; zoom.y = 0; zoom.cs = null;
   const changed = JSON.stringify(adjOf(adj.mode)) !== adj.snap;
   if (changed) {
     if (viewPage) enqueue(viewPage.id); // 先處理正在看的這頁
     getDocPages(state.docId).then(({ pages }) => ensureFresh(pages));
     toast(`已更新「${MODES.find((m) => m.id === adj.mode).name}」的設定`);
   }
-  renderPage(true);
+  renderPage();
+  fitView();
 }
 $('#adjDone').onclick = () => history.back();
 $('#adjReset').onclick = () => {
   settings.adj[adj.mode] = {};
-  saveSettings(); buildSliders(); renderAdj();
+  saveSettings(); buildPanel(); hideDetail(); renderAdj(); scheduleRegion();
 };
 
 /* ---------- PDF 產生（自製，JPEG 原檔直嵌、黑白頁 1-bit 無損） ---------- */
@@ -1708,7 +1806,7 @@ $('#btnSettings').onclick = () => {
     <div class="switch"><span>拍照後先確認裁切<small>高畫質拍照後進入四角微調畫面</small></span><button class="tg ${settings.confirmCrop ? 'on' : ''}" data-k="confirmCrop"></button></div>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會以相機全解析度拍攝；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.4</div>`, (s) => {
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.5</div>`, (s) => {
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));
@@ -1720,30 +1818,16 @@ $('#btnSettings').onclick = () => {
   });
 };
 
-/* ---------- iOS 26 主畫面 App 高度修正 ----------
-   iOS 26 加到主畫面的網頁 App，畫面高度會少掉約一個狀態列高，造成整體偏上、底部空白。
-   偵測到這種情況時，直接用實際螢幕高度排版。 */
-const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+/* ---------- 畫面資訊（除錯用，顯示在設定最下方） ----------
+   iOS 26 主畫面 App 底部空白的修正在 index.html 的 CSS（html min-height） */
 const isStandalone = () => navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
-function fixViewport() {
-  const root = document.documentElement;
-  if (!isIOS || !isStandalone()) { root.style.removeProperty('--app-h'); return; }
-  const portrait = matchMedia('(orientation: portrait)').matches;
-  const full = portrait ? Math.max(screen.width, screen.height) : Math.min(screen.width, screen.height);
-  if (window.innerHeight < full - 2) root.style.setProperty('--app-h', full + 'px');
-  else root.style.removeProperty('--app-h');
-}
-fixViewport();
-window.addEventListener('resize', fixViewport);
-window.addEventListener('orientationchange', () => setTimeout(fixViewport, 300));
-document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(fixViewport, 100); });
 function viewportInfo() {
   const d = document.createElement('div');
   d.style.cssText = 'position:fixed;visibility:hidden;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)';
   document.body.appendChild(d);
   const cs = getComputedStyle(d), t = cs.paddingTop, b = cs.paddingBottom;
   d.remove();
-  return `畫面 ${innerWidth}×${innerHeight}・螢幕 ${screen.width}×${screen.height}・上 ${t}・下 ${b}・修正 ${document.documentElement.style.getPropertyValue('--app-h') || '無'}`;
+  return `畫面 ${innerWidth}×${innerHeight}・螢幕 ${screen.width}×${screen.height}・上 ${t}・下 ${b}・網頁高 ${document.documentElement.getBoundingClientRect().height}・${isStandalone() ? '主畫面' : '瀏覽器'}`;
 }
 
 /* ---------- 啟動 ---------- */
