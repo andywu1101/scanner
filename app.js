@@ -1130,8 +1130,7 @@ function layoutCrop() {
   const pad = 26;
   const s = Math.min((st.width - pad * 2) / nw, (st.height - pad * 2) / nh);
   const w = nw * s, h = nh * s, x = (st.width - w) / 2;
-  // 1.13：照片比置中再往下 40 點，讓上方拖動時出現的預覽少擋一點（下方空間不夠就移到不碰工具列為止）
-  const y = (st.height - h) / 2 + Math.min(40, Math.max(0, (st.height - h) / 2 - 6));
+  const y = (st.height - h) / 2; // 置中（1.13 曾下移 40 點，1.14 預覽改到對角後改回置中）
   cropCtx.rect = { x, y, w, h };
   const ci = $('#cropImg');
   Object.assign(ci.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
@@ -1220,7 +1219,7 @@ function drawCrop() {
       return;
     }
     best.start = [lx, ly];
-    pipShow();
+    pipShow(lx + cropCtx.rect.x, ly + cropCtx.rect.y);
     best.c0 = cropCtx.corners.map((p) => p.slice());
     best.k0 = cropCtx.curve ? cropCtx.curve.map((e) => e.map((p) => p.slice())) : null;
     cropCtx.drag = best;
@@ -1367,12 +1366,13 @@ $('#cropNext').onclick = () => { if (!cropCtx) return; openCamera(); $('#cropOk'
 $('#cropRetake').onclick = () => { const c = cropCtx; cropCtx = null; pipClose(); if (c && c.onRetake) c.onRetake(); history.back(); };
 $('#cropPrev').onclick = () => pipFullOpen();
 
-/* ---------- 裁切即時成品預覽（1.13 方案 B） ----------
-   - 平常不顯示；拖控制點時才在上方出現（約半個畫面寬），即時更新；放開後停 1.5 秒再淡出
+/* ---------- 裁切即時成品預覽（1.13 方案 B，1.14 改對角） ----------
+   - 平常不顯示；拖控制點時才出現（約半個畫面寬），即時更新；放開後停 1 秒再淡出
    - 只做拉平轉正（不做黑白等增強）：拖動時長邊 700 像素，放開後 1400 像素
-   - 位置固定左上；拖的點靠近時左右對調（高度不變），兩邊都擋到時變透明；放大鏡永遠在它上面
+   - 位置：開始拖的那一刻，看手指在畫面中心的哪一個象限，就出現在相反的角落；拖的途中手指移到它附近才左右對調，
+     兩邊都擋到時變透明；放大鏡永遠在它上面
    - 出現時輕點可放大全螢幕；工具列「成品」隨時看全螢幕大圖，點一下回到框選 */
-const pip = { busy: false, want: null, avoid: false, hideT: null, hq: null };
+const pip = { busy: false, want: null, avoid: false, hideT: null, hq: null, v: 't', h: 'l' };
 async function pipInit(c) {
   pip.busy = false; pip.want = null; pip.hq = null; pip.avoid = false; clearTimeout(pip.hideT);
   $('#pipFull').classList.remove('show');
@@ -1394,21 +1394,25 @@ function pipClose() {
   clearTimeout(pip.hideT);
   wcall('cropRelease', {}).catch(() => {});
 }
-// 開始拖控制點時出現
-function pipShow() {
+// 開始拖控制點時出現在對角（fx、fy：手指在裁切區裡的位置）；還沒消失時直接滑到新的對角
+function pipShow(fx, fy) {
   clearTimeout(pip.hideT);
-  const el = $('#pip');
+  const el = $('#pip'), st = $('#cropStage').getBoundingClientRect();
+  pip.v = fy < st.height / 2 ? 'b' : 't';
+  pip.h = fx < st.width / 2 ? 'r' : 'l';
+  pip.avoid = false;
   el.style.opacity = '';
-  if (!el.classList.contains('show')) { pip.avoid = false; el.classList.add('show'); pipPlace(false); }
+  if (!el.classList.contains('show')) { el.classList.add('show'); el.style.transition = 'none'; pipPlace(false); void el.offsetWidth; el.style.transition = ''; }
+  else pipPlace(false);
   requestAnimationFrame(() => el.classList.add('vis'));
 }
-// 放開後停 1.5 秒再淡出
+// 放開後停 1 秒再淡出
 function pipHideSoon() {
   clearTimeout(pip.hideT);
   pip.hideT = setTimeout(() => {
     const el = $('#pip'); el.classList.remove('vis');
     pip.hideT = setTimeout(() => { el.classList.remove('show'); pip.avoid = false; }, 250);
-  }, 1500);
+  }, 1000);
 }
 // 要求更新預覽；忙碌時只記住最新一次，做完再接著做
 function pipRequest(hq) {
@@ -1435,11 +1439,11 @@ async function pipRun() {
   pip.busy = false;
   if (pip.want) pipRun();
 }
-// 位置（以裁切區為準，單位 px）：固定左上，讓開時換到右上
+// 位置（以裁切區為準，單位 px）：pip.v／pip.h 決定的角落，讓開時左右對調
 function pipHome() {
   const st = $('#cropStage').getBoundingClientRect(), el = $('#pip'), m = 10;
   const w = el.offsetWidth || st.width * 0.5, h = el.offsetHeight || w * 1.3;
-  return { st, x: m, y: m, w, h };
+  return { st, x: pip.h === 'r' ? st.width - w - m : m, y: pip.v === 'b' ? Math.max(m, st.height - h - m) : m, w, h };
 }
 function pipPlace(avoid) {
   const el = $('#pip');
@@ -2322,7 +2326,7 @@ $('#btnSettings').onclick = () => {
     <div class="seg" id="setUp">${[['auto', '自動'], ['always', '一律'], ['off', '關閉']].map(([k, n]) => `<button data-k="${k}" class="${settings.upscale === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會另外拍一張照片（最高 1500 萬畫素）；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.13</div>`, (s) => {
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.14</div>`, (s) => {
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));
