@@ -686,6 +686,21 @@ function renderRegion(cv, msg) {
   return r;
 }
 
+// 裁切畫面的即時成品預覽（1.12）：保留一張縮小的原圖，拖動時只做拉平轉正（不做增強），所以很快
+let cropCache = null;
+function cropRelease() { if (cropCache) { cropCache.rgb.delete(); cropCache = null; } }
+function cropSrc(cv, msg) {
+  cropRelease();
+  cropCache = { key: msg.key, rgb: rgbFromBuffer(cv, msg.buffer, msg.width, msg.height), w: msg.width, h: msg.height };
+  return { ok: true };
+}
+function cropWarp(cv, msg) {
+  if (!cropCache || cropCache.key !== msg.key) throw new Error('crop-missing');
+  const c = cropCache;
+  const warped = warpPage(cv, c.rgb, c.w, c.h, msg.corners, { curve: msg.curve, upscale: 'off', maxSide: msg.maxSide });
+  return finish(cv, warped, 0);
+}
+
 self.onmessage = async (e) => {
   const { id, type } = e.data;
   try {
@@ -707,6 +722,14 @@ self.onmessage = async (e) => {
     } else if (type === 'region') {
       const r = renderRegion(cv, e.data);
       self.postMessage({ id, ok: true, result: r }, [r.buffer]);
+    } else if (type === 'cropSrc') {
+      self.postMessage({ id, ok: true, result: cropSrc(cv, e.data) });
+    } else if (type === 'cropWarp') {
+      const r = cropWarp(cv, e.data);
+      self.postMessage({ id, ok: true, result: r }, [r.buffer]);
+    } else if (type === 'cropRelease') {
+      cropRelease();
+      self.postMessage({ id, ok: true, result: null });
     } else if (type === 'release') {
       releaseCache();
       self.postMessage({ id, ok: true, result: null });

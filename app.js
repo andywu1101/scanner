@@ -286,6 +286,7 @@ window.addEventListener('popstate', (e) => {
   const s = (e.state && e.state.s) || 'home';
   if (adj.open) closeAdjust();
   if (current === 'live') stopLive();
+  if (current === 'crop') pipClose();
   if (current === 'crop' && cropCtx && cropCtx.onCancel) { const f = cropCtx.onCancel; cropCtx = null; f(true); }
   closeSheet();
   if (s === 'cover') { show('cover'); }
@@ -365,6 +366,7 @@ async function renderHome() {
     <button class="allbtn" id="allDocs"><span>${ICON.folder}全部文件</span><span class="cnt">${docs.length} 份 ›</span></button>`;
   const inp = $('#recentName');
   inp.value = doc.title;
+  nameField(inp);
   const save = async () => {
     const v = inp.value.trim();
     const d = await DB.get('docs', doc.id);
@@ -1032,7 +1034,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden && current === 'live') finishLive();
 });
 
-/* ---------- 裁切（直線：四角＋拖邊平移；曲線：每條邊兩個彎曲點，可把彎曲的書頁拉平） ---------- */
+/* ---------- 裁切（直線：四角＋拖邊平移；曲線：每條邊 5 個點，抓哪裡拉哪裡，可把彎曲的書頁拉平） ---------- */
 let cropCtx = null;
 // 曲線工具（與 worker.js 相同）
 function crPt(p0, p1, p2, p3, t) {
@@ -1107,7 +1109,8 @@ async function openCrop(opts) {
   const lc = canvasOf(Math.round(img.naturalWidth * ls), Math.round(img.naturalHeight * ls));
   const lctx = lc.getContext('2d'); lctx.imageSmoothingQuality = 'high';
   lctx.drawImage(img, 0, 0, lc.width, lc.height);
-  cropCtx = Object.assign({}, opts, { url, nat: [img.naturalWidth, img.naturalHeight], loupeSrc: lc, corners: opts.corners.map((p) => p.slice()), curve, curveMode: !!curve, drag: null });
+  cropCtx = Object.assign({}, opts, { url, nat: [img.naturalWidth, img.naturalHeight], loupeSrc: lc, corners: opts.corners.map((p) => p.slice()), curve, curveMode: !!curve, drag: null, pipKey: 'crop:' + Date.now() });
+  pipInit(cropCtx);
   const ci = $('#cropImg'); ci.src = url;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
   $('#cropNext').style.display = opts.burst ? '' : 'none';
@@ -1130,9 +1133,12 @@ function layoutCrop() {
   cropCtx.rect = { x, y, w, h };
   const ci = $('#cropImg');
   Object.assign(ci.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
-  const svg = $('#cropSvg');
-  Object.assign(svg.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
-  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  for (const id of ['#cropSvg', '#cropHandles']) {
+    const svg = $(id);
+    Object.assign(svg.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
+    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  }
+  pipPlace(false);
   drawCrop();
 }
 function drawCrop() {
@@ -1144,6 +1150,9 @@ function drawCrop() {
   let html = `<defs><mask id="m"><rect x="-40" y="-40" width="${w + 80}" height="${h + 80}" fill="#fff"/><polygon points="${poly}" fill="#000"/></mask></defs>`;
   html += `<rect x="0" y="0" width="${w}" height="${h}" fill="rgba(28,19,14,.55)" mask="url(#m)"/>`;
   html += `<polygon points="${poly}" fill="none" stroke="#F2C48D" stroke-width="2.5" stroke-linejoin="round"/>`;
+  $('#cropSvg').innerHTML = html;
+  // 控制點另外畫在最上層（1.12）：預覽小視窗蓋到時也看得到、拖得到
+  html = '';
   if (curve) {
     // 正在拉的那一點
     if (g && g.type === 'rope') {
@@ -1164,14 +1173,16 @@ function drawCrop() {
     const on = g && g.type === 'corner' && g.i === i;
     html += `<circle cx="${p[0]}" cy="${p[1]}" r="13" fill="${on ? 'rgba(242,196,141,.55)' : 'rgba(242,196,141,.25)'}" stroke="#fff" stroke-width="2.5"/><circle cx="${p[0]}" cy="${p[1]}" r="3.5" fill="#fff"/>`;
   });
-  $('#cropSvg').innerHTML = html;
+  $('#cropHandles').innerHTML = html;
+  pipRequest(false);
 }
 (() => {
   const stage = $('#cropStage');
   const clamp = (v) => Math.min(1, Math.max(0, v));
   const local = (e) => { const b = stage.getBoundingClientRect(); return [e.clientX - b.left - cropCtx.rect.x, e.clientY - b.top - cropCtx.rect.y]; };
   stage.addEventListener('pointerdown', (e) => {
-    if (!cropCtx || cropCtx.drag) return;
+    if (!cropCtx || cropCtx.drag || pip.gesture) return;
+    if (e.target.closest('#pipFull')) { pipFullClose(); return; }
     const [lx, ly] = local(e);
     const { w, h } = cropCtx.rect;
     const P = cropCtx.corners.map((p) => [p[0] * w, p[1] * h]);
@@ -1179,7 +1190,10 @@ function drawCrop() {
     // 優先順序：角 → 彎曲點（曲線模式）→ 邊的中點把手（直線模式）
     let best = null, bd = 40;
     P.forEach((p, i) => { const d = Math.hypot(p[0] - lx, p[1] - ly); if (d < bd) { bd = d; best = { type: 'corner', i }; } });
-    if (!best && curveOn) {
+    // 曲線模式沿著邊任何位置都能拉（看不到明確的點），所以按在預覽小視窗上時讓小視窗優先；
+    // 看得到的控制點（四個角、直線模式的邊中點）則永遠優先
+    const onPip = !best && curveOn && e.target.closest('#pip');
+    if (!best && curveOn && !onPip) {
       // 找手指最靠近哪一條邊的哪個位置（只取邊的中段，太靠近角時彎不動）
       bd = 30;
       for (let i = 0; i < 4; i++) {
@@ -1200,7 +1214,12 @@ function drawCrop() {
         if (d < bd) { bd = d; best = { type: 'edge', i }; }
       }
     }
-    if (!best) return;
+    if (!best) {
+      // 沒按到控制點：按在小視窗上就是移動或點開小視窗
+      if (e.target.closest('#pipX')) { e.preventDefault(); pipSetHidden(true); }
+      else if (e.target.closest('#pip')) pipGestureStart(e);
+      return;
+    }
     best.start = [lx, ly];
     best.c0 = cropCtx.corners.map((p) => p.slice());
     best.k0 = cropCtx.curve ? cropCtx.curve.map((e) => e.map((p) => p.slice())) : null;
@@ -1210,6 +1229,7 @@ function drawCrop() {
     drawCrop(); loupe(lx, ly);
   });
   stage.addEventListener('pointermove', (e) => {
+    if (pip.gesture) { pipGestureMove(e); return; }
     const g = cropCtx && cropCtx.drag;
     if (!g) return;
     const [lx, ly] = local(e);
@@ -1246,8 +1266,15 @@ function drawCrop() {
       cropCtx.corners[j] = [clamp(g.c0[j][0] + (dn * nx) / w), clamp(g.c0[j][1] + (dn * ny) / h)];
     }
     drawCrop(); loupe(lx, ly);
+    pipAvoid(lx + cropCtx.rect.x, ly + cropCtx.rect.y);
   });
-  const end = () => { if (!cropCtx) return; cropCtx.drag = null; $('#loupe').style.display = 'none'; drawCrop(); };
+  const end = (e) => {
+    if (pip.gesture) { pipGestureEnd(e); return; }
+    if (!cropCtx) return;
+    const was = !!cropCtx.drag;
+    cropCtx.drag = null; $('#loupe').style.display = 'none'; drawCrop();
+    if (was) { pipRequest(true); pipReturnSoon(); }
+  };
   window.ropePoint = (g) => { const C = cropCtx.corners, k = cropCtx.curve[g.i]; return edgePoint(C[g.i], k, C[(g.i + 1) % 4], g.s); };
   stage.addEventListener('pointerup', end);
   stage.addEventListener('pointercancel', end);
@@ -1334,11 +1361,153 @@ $('#cropOk').onclick = async () => {
   if (area < 0.01) { toast('範圍太小了'); return; }
   cropCtx = null;
   URL.revokeObjectURL(c.url);
+  pipClose();
   await c.onConfirm(q, c.curveMode && c.curve ? c.curve : null);
 };
 $('#cropCancel').onclick = () => history.back();
 $('#cropNext').onclick = () => { if (!cropCtx) return; openCamera(); $('#cropOk').onclick(); };
-$('#cropRetake').onclick = () => { const c = cropCtx; cropCtx = null; if (c && c.onRetake) c.onRetake(); history.back(); };
+$('#cropRetake').onclick = () => { const c = cropCtx; cropCtx = null; pipClose(); if (c && c.onRetake) c.onRetake(); history.back(); };
+$('#cropPrev').onclick = () => pipSetHidden(false);
+
+/* ---------- 裁切即時成品預覽（1.12，子母畫面） ----------
+   - 只做拉平轉正（不做黑白等增強）：拖動時長邊 700 像素，放開後 1400 像素
+   - 預設左上角；拖的點靠近時左右對調（高度不變），放開 0.6 秒後回原位；兩邊都擋到時變透明
+   - 按住小視窗可拖到任意位置（放開靠最近的左右邊，記住位置）；輕點放大全螢幕；× 收起（記住） */
+const pip = { busy: false, want: null, gesture: null, avoid: false, back: null, w: 0, h: 0, hq: null };
+const pipPrefs = (() => { let o = {}; try { o = JSON.parse(localStorage.getItem('cocoscan-pip') || '{}'); } catch (_) {} return Object.assign({ hidden: false, side: 'l', y: 0 }, o); })();
+function pipSave() { try { localStorage.setItem('cocoscan-pip', JSON.stringify(pipPrefs)); } catch (_) {} }
+async function pipInit(c) {
+  pip.busy = false; pip.want = null; pip.hq = null; pip.avoid = false; clearTimeout(pip.back);
+  $('#pipFull').classList.remove('show');
+  const cv = $('#pipCv'); cv.width = 1; cv.height = 1;
+  $('#pip').style.opacity = '';
+  pipShowState();
+  try {
+    await whenReady();
+    if (cropCtx !== c) return;
+    const d = smallFrame(c.loupeSrc, 1600);
+    await wcall('cropSrc', { key: c.pipKey, buffer: d.data.buffer, width: d.width, height: d.height }, [d.data.buffer]);
+    if (cropCtx !== c) return;
+    c.pipReady = true;
+    pipRequest(true);
+  } catch (e) { console.warn('pip', e); }
+}
+function pipClose() {
+  $('#pipFull').classList.remove('show');
+  $('#pip').classList.remove('show');
+  clearTimeout(pip.back);
+  wcall('cropRelease', {}).catch(() => {});
+}
+function pipShowState() {
+  $('#pip').classList.toggle('show', !pipPrefs.hidden && !!cropCtx);
+  $('#cropPrev').style.display = pipPrefs.hidden ? '' : 'none';
+}
+function pipSetHidden(h) {
+  pipPrefs.hidden = h; pipSave(); pipShowState();
+  if (!h) { pipPlace(false); pipRequest(true); }
+}
+// 要求更新預覽；忙碌時只記住最新一次，做完再接著做
+function pipRequest(hq) {
+  const c = cropCtx;
+  if (!c || !c.pipReady || (pipPrefs.hidden && !$('#pipFull').classList.contains('show'))) return;
+  pip.want = { c, hq, corners: c.corners.map((p) => p.slice()), curve: c.curveMode && c.curve ? c.curve.map((e) => e.map((p) => p.slice())) : null };
+  if (!pip.busy) pipRun();
+}
+async function pipRun() {
+  const job = pip.want; pip.want = null;
+  if (!job || job.c !== cropCtx) return;
+  pip.busy = true;
+  try {
+    const r = await wcall('cropWarp', { key: job.c.pipKey, corners: job.corners, curve: job.curve, maxSide: job.hq ? 1400 : 700 });
+    if (job.c === cropCtx) {
+      const cv = $('#pipCv');
+      if (cv.width !== r.width || cv.height !== r.height) { cv.width = r.width; cv.height = r.height; }
+      cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
+      pip.hq = job.hq ? r : null;
+      if ($('#pipFull').classList.contains('show')) drawFull();
+      pipPlace(pip.avoid);
+    }
+  } catch (e) { console.warn('cropWarp', e); }
+  pip.busy = false;
+  if (pip.want) pipRun();
+}
+// 小視窗的位置（以裁切區為準，單位 px）
+function pipBox() {
+  const st = $('#cropStage').getBoundingClientRect();
+  const el = $('#pip');
+  const w = el.offsetWidth || Math.min(200, st.width * 0.34), h = el.offsetHeight || w * 1.3;
+  return { st, w, h };
+}
+function pipHome() {
+  const { st, w, h } = pipBox(), m = 10;
+  const x = pipPrefs.side === 'r' ? st.width - w - m : m;
+  const y = Math.max(m, Math.min(st.height - h - m, pipPrefs.y * st.height + m));
+  return { x, y, w, h };
+}
+function pipPlace(avoid) {
+  const el = $('#pip');
+  if (!el.classList.contains('show') || pip.gesture) return;
+  const { st } = pipBox();
+  let { x, y, w } = pipHome();
+  if (avoid) x = st.width - w - x; // 左右對調，高度不變
+  el.style.left = x + 'px'; el.style.top = y + 'px';
+}
+// 拖控制點時：手指靠近小視窗就讓開
+function pipAvoid(fx, fy) {
+  const el = $('#pip');
+  if (!el.classList.contains('show')) return;
+  clearTimeout(pip.back);
+  const { st } = pipBox();
+  const home = pipHome(), pad = 36;
+  const inBox = (bx) => fx > bx - pad && fx < bx + home.w + pad && fy > home.y - pad && fy < home.y + home.h + pad;
+  const other = st.width - home.w - home.x;
+  if (!pip.avoid && inBox(home.x)) pip.avoid = true;
+  else if (pip.avoid && !inBox(other) && !inBox(home.x)) { /* 保持讓開，放開手指後再回去 */ }
+  pipPlace(pip.avoid);
+  const cur = pip.avoid ? other : home.x;
+  el.style.opacity = inBox(cur) ? '0.15' : ''; // 兩邊都擋到（紙張很小）時變透明
+}
+function pipReturnSoon() {
+  clearTimeout(pip.back);
+  pip.back = setTimeout(() => { pip.avoid = false; $('#pip').style.opacity = ''; pipPlace(false); }, 600);
+}
+// 按住小視窗：移動；輕點：放大
+function pipGestureStart(e) {
+  const el = $('#pip');
+  const b = el.getBoundingClientRect(), st = $('#cropStage').getBoundingClientRect();
+  pip.gesture = { id: e.pointerId, sx: e.clientX, sy: e.clientY, ox: b.left - st.left, oy: b.top - st.top, moved: false };
+  $('#cropStage').setPointerCapture(e.pointerId);
+  e.preventDefault();
+}
+function pipGestureMove(e) {
+  const g = pip.gesture;
+  const dx = e.clientX - g.sx, dy = e.clientY - g.sy;
+  if (!g.moved && Math.hypot(dx, dy) < 8) return;
+  g.moved = true;
+  const el = $('#pip'); el.classList.add('dragging');
+  const { st, w, h } = pipBox();
+  el.style.left = Math.max(0, Math.min(st.width - w, g.ox + dx)) + 'px';
+  el.style.top = Math.max(0, Math.min(st.height - h, g.oy + dy)) + 'px';
+}
+function pipGestureEnd() {
+  const g = pip.gesture; pip.gesture = null;
+  const el = $('#pip'); el.classList.remove('dragging');
+  if (!g) return;
+  if (!g.moved) { pipFullOpen(); return; }
+  // 放開：靠到最近的左右邊，記住位置
+  const { st, w } = pipBox();
+  const x = parseFloat(el.style.left), y = parseFloat(el.style.top);
+  pipPrefs.side = x + w / 2 > st.width / 2 ? 'r' : 'l';
+  pipPrefs.y = Math.max(0, (y - 10) / st.height);
+  pipSave(); pip.avoid = false; pipPlace(false);
+}
+function drawFull() {
+  const src = $('#pipCv'), fc = $('#pipFullCv');
+  fc.width = src.width; fc.height = src.height;
+  fc.getContext('2d').drawImage(src, 0, 0);
+}
+function pipFullOpen() { drawFull(); $('#pipFull').classList.add('show'); if (!pip.hq) pipRequest(true); }
+function pipFullClose() { $('#pipFull').classList.remove('show'); }
 
 /* ---------- 文件頁 ---------- */
 async function openDoc(id, push = true) {
@@ -1467,10 +1636,25 @@ function addSheet() {
 $('#docAdd').onclick = addSheet;
 $('#docBack').onclick = () => history.back();
 $('#docTitle').onclick = renameDoc;
-async function renameDoc() {
-  const doc = await DB.get('docs', state.docId);
-  const t = prompt('文件名稱', doc.title);
-  if (t && t.trim()) { doc.title = t.trim(); delete doc.exportName; doc.updated = Date.now(); await DB.put('docs', doc); $('#docTitle').textContent = doc.title; }
+// 改名（1.12 起不用瀏覽器內建對話框，改成底部輸入畫面，才能全選、有清除鈕）
+function renameDoc() {
+  const title = $('#docTitle').textContent;
+  openSheet(`<h3>文件名稱</h3><div class="fname"><input id="rnIn" type="text" enterkeyhint="done" autocomplete="off" aria-label="文件名稱"></div><button class="bigbtn" id="rnOk" style="width:100%">確定</button>`, (s) => {
+    const i = s.querySelector('#rnIn');
+    i.value = title; nameField(i);
+    const ok = async () => {
+      const t = i.value.trim();
+      closeSheet();
+      if (!t || t === title) return;
+      const doc = await DB.get('docs', state.docId);
+      if (!doc) return;
+      doc.title = t; delete doc.exportName; doc.updated = Date.now(); await DB.put('docs', doc);
+      $('#docTitle').textContent = doc.title; toast('已重新命名');
+    };
+    s.querySelector('#rnOk').onclick = ok;
+    i.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); ok(); } });
+    i.focus(); // 在點擊的同一個動作裡聚焦，iPhone 才會跳出鍵盤
+  });
 }
 $('#docMore').onclick = () => openSheet(`<h3>文件</h3>
   <button class="srow" data-a="rename">${ICON.edit}<span>重新命名</span></button>
@@ -2123,6 +2307,39 @@ async function fillName(s) {
   const doc = await DB.get('docs', state.docId);
   const i = s.querySelector('#fname');
   i.value = doc.exportName || doc.title;
+  nameField(i);
+}
+/* 名稱輸入框（1.12）：第一次點進去全選（直接打字就整段換掉，再點一下才是一般游標）；右邊 ⓧ 一鍵清空
+   iPhone Safari 點擊放開時會把選取取消，所以 focus 後短時間內攔掉 mouseup，並延遲再選一次 */
+function nameField(inp) {
+  if (!inp || inp.dataset.nf) { if (inp && inp._sync) inp._sync(); return; }
+  inp.dataset.nf = '1';
+  const btn = document.createElement('button');
+  btn.type = 'button'; btn.className = 'nclr'; btn.setAttribute('aria-label', '清除');
+  btn.innerHTML = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor" opacity=".35"/><path d="M8.5 8.5l7 7M15.5 8.5l-7 7" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/></svg>';
+  inp.after(btn);
+  const sync = () => btn.classList.toggle('on', !!inp.value);
+  inp._sync = sync;
+  inp.addEventListener('input', sync); sync();
+  let fresh = false, freshT = 0;
+  const selAll = () => { try { inp.setSelectionRange(0, inp.value.length); } catch (_) { inp.select(); } };
+  inp.addEventListener('focus', () => {
+    fresh = true; selAll(); setTimeout(selAll, 0); setTimeout(selAll, 80);
+    clearTimeout(freshT); freshT = setTimeout(() => { fresh = false; }, 450);
+  });
+  inp.addEventListener('mouseup', (e) => { if (fresh) e.preventDefault(); });
+  // 按清除鈕是程式改值，瀏覽器不會發 change；離開時自己補發，讓存檔的程式照常運作
+  let atFocus = inp.value, viaClear = false;
+  inp.addEventListener('focus', () => { atFocus = inp.value; viaClear = false; });
+  inp.addEventListener('blur', () => { fresh = false; if (viaClear && inp.value !== atFocus) inp.dispatchEvent(new Event('change')); viaClear = false; });
+  btn.addEventListener('pointerdown', (e) => e.preventDefault()); // 保持輸入框的焦點
+  btn.addEventListener('mousedown', (e) => e.preventDefault());
+  btn.addEventListener('click', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    inp.focus(); // 先聚焦再清空（沒聚焦時按清除鈕也能正確存檔）
+    inp.value = ''; sync(); fresh = false; viaClear = true;
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+  });
 }
 function readName(s) {
   const v = safeName(s.querySelector('#fname').value);
@@ -2141,7 +2358,7 @@ $('#btnSettings').onclick = () => {
     <div class="seg" id="setUp">${[['auto', '自動'], ['always', '一律'], ['off', '關閉']].map(([k, n]) => `<button data-k="${k}" class="${settings.upscale === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會另外拍一張照片（最高 1500 萬畫素）；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.11</div>`, (s) => {
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.12</div>`, (s) => {
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));
@@ -2187,7 +2404,8 @@ function openHelp() {
       <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平。</li></ul>
     <h4>模式與調整</h4><ul>
       <li>黑白最適合樂譜，灰階、彩色適合有照片或顏色的講義。</li>
-      <li>「調整」可以改曝光、濃淡、去雜點等。按住畫面，可以和預設值比較。</li></ul>
+      <li>「調整」可以改曝光、濃淡、去雜點等。按住畫面，可以和預設值比較。</li>
+      <li>文件頁的「統一調整」可以一次調整全部頁面；在單頁裡調整只會影響那一頁。</li></ul>
     <h4>管理文件</h4><ul>
       <li>長按頁面可以拖曳排序，也可以選取多頁刪除。</li>
       <li>在「全部文件」裡可以合併或刪除文件。</li></ul>
