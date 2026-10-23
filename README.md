@@ -1,11 +1,11 @@
-# 可可掃描
+# 伍敵樂譜掃描
 
 手機文件掃描 PWA：自動抓文件邊框、透視校正（含真實長寬比還原）、去陰影、四種增強模式、多頁管理、匯出 PDF／圖片。所有資料只存在手機瀏覽器裡，不會上傳。
 
 ## 架設到 GitHub Pages
 
 1. 在 GitHub 新增一個 repo（例如 `scanner`），設為 Public。
-2. 把這個資料夾裡的**所有檔案與子資料夾**（`index.html`、`app.js`、`worker.js`、`sw.js`、`manifest.webmanifest`、`lib/`、`icons/`）上傳到 repo 根目錄。
+2. 把這個資料夾裡的**所有檔案與子資料夾**（`index.html`、`app.js`、`worker.js`、`sw.js`、`manifest.webmanifest`、`og-image.png`、`lib/`、`icons/`）上傳到 repo 根目錄。
    - `lib/opencv.js` 約 10 MB，網頁上傳可以接受（上限 25 MB）。
 3. repo 的 **Settings → Pages**，Source 選 `Deploy from a branch`，Branch 選 `main`、資料夾 `/ (root)`，按 Save。
 4. 約一分鐘後網址會是 `https://andywu1101.github.io/scanner/`。
@@ -42,5 +42,10 @@
 
 1. 先在舊版 App 裡，把想保留的掃描匯出成 PDF（刪除主畫面 App 會一併清除裡面的掃描）。
 2. 上傳 1.6 版檔案到 GitHub。
-3. 在主畫面長按舊的「可可掃描」刪除。
+3. 在主畫面長按舊的 App 刪除。
 4. 用 Safari 重新打開網址 → 分享 → 加入主畫面。
+
+## 1.7 版：改名為「伍敵樂譜掃描」
+
+- 主畫面名稱改為「伍敵掃描」，同樣要刪掉主畫面上的 App 再重新加入才會更新（刪除前先匯出想保留的掃描）。
+- 新增分享預覽（og-image.png）：在 LINE、Facebook 分享網址會顯示標題、說明與預覽圖。這些平台會暫存舊的預覽，換新後可能要過一陣子才更新。

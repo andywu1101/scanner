@@ -1,4 +1,4 @@
-/* 可可掃描 — 主程式 */
+/* 伍敵樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
@@ -952,21 +952,53 @@ function crPt(p0, p1, p2, p3, t) {
   const t2 = t * t, t3 = t2 * t;
   return [0, 1].map((k) => 0.5 * (2 * p1[k] + (-p0[k] + p2[k]) * t + (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2 + (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * t3));
 }
-function edgePath(a, p1, p2, b, n) {
-  const P = [[2 * a[0] - p1[0], 2 * a[1] - p1[1]], a, p1, p2, b, [2 * b[0] - p2[0], 2 * b[1] - p2[1]]];
+// 通過 a、內部點 ctrl[]、b 的平滑曲線（Catmull-Rom）；每段取 n 點
+function edgePath(a, ctrl, b, n) {
+  const pts = [a, ...ctrl, b], m = pts.length;
+  const P = [[2 * a[0] - pts[1][0], 2 * a[1] - pts[1][1]], ...pts, [2 * b[0] - pts[m - 2][0], 2 * b[1] - pts[m - 2][1]]];
   const out = [];
-  for (let s = 1; s <= 3; s++) for (let i = 0; i < n; i++) out.push(crPt(P[s - 1], P[s], P[s + 1], P[s + 2], i / n));
+  for (let s = 1; s < m; s++) for (let i = 0; i < n; i++) out.push(crPt(P[s - 1], P[s], P[s + 1], P[s + 2], i / n));
   out.push(b.slice());
   return out;
 }
+const CURVE_N = 5; // 每條邊的內部點數
+const bump = (u, u0) => (u <= u0 ? 0.5 - 0.5 * Math.cos((Math.PI * u) / u0) : 0.5 - 0.5 * Math.cos((Math.PI * (1 - u)) / (1 - u0)));
+const sameCorners = (a, b) => !!a && a.every((p, i) => Math.abs(p[0] - b[i][0]) < 1e-6 && Math.abs(p[1] - b[i][1]) < 1e-6);
+// 曲線上位置 u（0~1）對 a、各內部點、b 的權重（曲線對這些點是線性的）
+function edgeWeights(u, m) {
+  const segs = m + 1, s = Math.min(segs - 1e-9, Math.max(0, u * segs)), seg = Math.floor(s), t = s - seg;
+  const n = m + 2, w = new Array(n).fill(0);
+  // 端點外插的虛擬點：P[-1] = 2a - p1，P[n] = 2b - p(n-2)
+  const add = (idx, c) => {
+    if (idx === -1) { w[0] += 2 * c; w[1] -= c; } else if (idx === n) { w[n - 1] += 2 * c; w[n - 2] -= c; } else w[idx] += c;
+  };
+  const t2 = t * t, t3 = t2 * t;
+  add(seg - 1, 0.5 * (-t + 2 * t2 - t3));
+  add(seg, 0.5 * (2 - 5 * t2 + 3 * t3));
+  add(seg + 1, 0.5 * (t + 4 * t2 - 3 * t3));
+  add(seg + 2, 0.5 * (-t2 + t3));
+  return w;
+}
+function edgePoint(a, ctrl, b, u) {
+  const pts = [a, ...ctrl, b], w = edgeWeights(u, ctrl.length);
+  return [0, 1].map((k) => pts.reduce((acc, p, i) => acc + w[i] * p[k], 0));
+}
+// 把任何點數的曲線換成 CURVE_N 個內部點（舊資料或自動偵測的結果）
+function normCurve(C, curve) {
+  return curve.map((ctrl, i) => {
+    if (ctrl.length === CURVE_N) return ctrl.map((p) => p.slice());
+    const a = C[i], b = C[(i + 1) % 4];
+    return Array.from({ length: CURVE_N }, (_, k) => edgePoint(a, ctrl, b, (k + 1) / (CURVE_N + 1)));
+  });
+}
 function straightCurve(C) {
-  return [0, 1, 2, 3].map((i) => { const a = C[i], b = C[(i + 1) % 4]; return [1 / 3, 2 / 3].map((t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]); });
+  return [0, 1, 2, 3].map((i) => { const a = C[i], b = C[(i + 1) % 4]; return Array.from({ length: CURVE_N }, (_, k) => { const t = (k + 1) / (CURVE_N + 1); return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]; }); });
 }
 // 外框折線（0~1 座標）；曲線模式依彎曲點畫平滑曲線
 function cropOutline(C, curve) {
   if (!curve) return C.map((p) => p.slice());
   const pts = [];
-  for (let i = 0; i < 4; i++) { const seg = edgePath(C[i], curve[i][0], curve[i][1], C[(i + 1) % 4], 10); seg.pop(); pts.push(...seg); }
+  for (let i = 0; i < 4; i++) { const seg = edgePath(C[i], curve[i], C[(i + 1) % 4], 6); seg.pop(); pts.push(...seg); }
   return pts;
 }
 async function detectCurveOn(img, corners) {
@@ -981,8 +1013,14 @@ async function detectCurveOn(img, corners) {
 async function openCrop(opts) {
   if (cropCtx && cropCtx.url) URL.revokeObjectURL(cropCtx.url);
   const { img, url } = await loadImg(opts.blob);
-  const curve = opts.curve ? opts.curve.map((e) => e.map((p) => p.slice())) : null;
-  cropCtx = Object.assign({}, opts, { url, nat: [img.naturalWidth, img.naturalHeight], corners: opts.corners.map((p) => p.slice()), curve, curveMode: !!curve, drag: null });
+  const curve = opts.curve ? normCurve(opts.corners, opts.curve) : null;
+  // 放大鏡的取圖來源：把整張照片畫進畫布（整張繪製時各瀏覽器都會正確套用照片方向），
+  // 之後只從這張畫布取局部，避免 iPhone Safari 取局部時沒套用方向而錯位
+  const ls = Math.min(1, 2400 / Math.max(img.naturalWidth, img.naturalHeight));
+  const lc = canvasOf(Math.round(img.naturalWidth * ls), Math.round(img.naturalHeight * ls));
+  const lctx = lc.getContext('2d'); lctx.imageSmoothingQuality = 'high';
+  lctx.drawImage(img, 0, 0, lc.width, lc.height);
+  cropCtx = Object.assign({}, opts, { url, nat: [img.naturalWidth, img.naturalHeight], loupeSrc: lc, corners: opts.corners.map((p) => p.slice()), curve, curveMode: !!curve, drag: null });
   const ci = $('#cropImg'); ci.src = url;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
   $('#cropNext').style.display = opts.burst ? '' : 'none';
@@ -1020,11 +1058,11 @@ function drawCrop() {
   html += `<rect x="0" y="0" width="${w}" height="${h}" fill="rgba(28,19,14,.55)" mask="url(#m)"/>`;
   html += `<polygon points="${poly}" fill="none" stroke="#F2C48D" stroke-width="2.5" stroke-linejoin="round"/>`;
   if (curve) {
-    // 彎曲點
-    curve.forEach((e, i) => e.forEach((p, j) => {
-      const on = g && g.type === 'ctrl' && g.i === i && g.j === j;
-      html += `<circle cx="${p[0] * w}" cy="${p[1] * h}" r="9" fill="${on ? '#F2C48D' : 'rgba(255,255,255,.92)'}" stroke="#C9935F" stroke-width="2.5"/>`;
-    }));
+    // 正在拉的那一點
+    if (g && g.type === 'rope') {
+      const p = ropePoint(g);
+      html += `<circle cx="${p[0] * w}" cy="${p[1] * h}" r="15" fill="rgba(242,196,141,.35)" stroke="#fff" stroke-width="2.5"/><circle cx="${p[0] * w}" cy="${p[1] * h}" r="3.5" fill="#fff"/>`;
+    }
   } else {
     // 四條邊的中點把手（拖動只移動那一條邊）
     for (let i = 0; i < 4; i++) {
@@ -1055,8 +1093,17 @@ function drawCrop() {
     let best = null, bd = 40;
     P.forEach((p, i) => { const d = Math.hypot(p[0] - lx, p[1] - ly); if (d < bd) { bd = d; best = { type: 'corner', i }; } });
     if (!best && curveOn) {
-      bd = 34;
-      cropCtx.curve.forEach((e, i) => e.forEach((p, j) => { const d = Math.hypot(p[0] * w - lx, p[1] * h - ly); if (d < bd) { bd = d; best = { type: 'ctrl', i, j }; } }));
+      // 找手指最靠近哪一條邊的哪個位置（只取邊的中段，太靠近角時彎不動）
+      bd = 30;
+      for (let i = 0; i < 4; i++) {
+        const a = cropCtx.corners[i], b = cropCtx.corners[(i + 1) % 4], k = cropCtx.curve[i];
+        for (let n = 0; n <= 90; n++) {
+          const u = 0.05 + (0.9 * n) / 90;
+          const p = edgePoint(a, k, b, u);
+          const d = Math.hypot(p[0] * w - lx, p[1] * h - ly);
+          if (d < bd) { bd = d; best = { type: 'rope', i, s: u }; }
+        }
+      }
     }
     if (!best && !curveOn) {
       bd = 34;
@@ -1090,11 +1137,17 @@ function drawCrop() {
         const ddx = n[0] - c[0], ddy = n[1] - c[1];
         const prev = (g.i + 3) % 4;
         const mv = (ei, j, f) => { const p = g.k0[ei][j]; cropCtx.curve[ei][j] = [clamp(p[0] + ddx * f), clamp(p[1] + ddy * f)]; };
-        mv(g.i, 0, 2 / 3); mv(g.i, 1, 1 / 3); mv(prev, 0, 1 / 3); mv(prev, 1, 2 / 3);
+        for (let j = 0; j < CURVE_N; j++) { const u = (j + 1) / (CURVE_N + 1); mv(g.i, j, 1 - u); mv(prev, j, u); }
       }
-    } else if (g.type === 'ctrl') {
-      const p = g.k0[g.i][g.j];
-      cropCtx.curve[g.i][g.j] = [clamp(p[0] + dx / w), clamp(p[1] + dy / h)];
+    } else if (g.type === 'rope') {
+      // 讓曲線上被抓住的那一點跟著手指移動：用最小變動量調整這條邊的兩個內部控制點，兩端的角不動
+      // 像拉繩子：位移從手指那點往兩端平順遞減（兩端的角為 0），再換算成讓手指那點剛好跟著走
+      const k0 = g.k0[g.i], m = k0.length;
+      const phi = k0.map((_, j) => bump((j + 1) / (m + 1), g.s));
+      const wts = edgeWeights(g.s, m);
+      const gain = Math.max(0.3, phi.reduce((acc, f, j) => acc + f * wts[j + 1], 0));
+      const D = [dx / w / gain, dy / h / gain];
+      cropCtx.curve[g.i] = k0.map((p, j) => [clamp(p[0] + D[0] * phi[j]), clamp(p[1] + D[1] * phi[j])]);
     } else {
       // 邊：沿著與這條邊垂直的方向平移，兩端的角一起移動
       const i = g.i, j = (i + 1) % 4;
@@ -1108,6 +1161,7 @@ function drawCrop() {
     drawCrop(); loupe(lx, ly);
   });
   const end = () => { if (!cropCtx) return; cropCtx.drag = null; $('#loupe').style.display = 'none'; drawCrop(); };
+  window.ropePoint = (g) => { const C = cropCtx.corners, k = cropCtx.curve[g.i]; return edgePoint(C[g.i], k, C[(g.i + 1) % 4], g.s); };
   stage.addEventListener('pointerup', end);
   stage.addEventListener('pointercancel', end);
 
@@ -1117,21 +1171,26 @@ function drawCrop() {
     const L = $('#loupe');
     const ctx = L.getContext('2d');
     const { w, h, x: rx, y: ry } = cropCtx.rect;
-    const [nw, nh] = cropCtx.nat;
     const C = cropCtx.corners;
     let fxN, fyN;
     if (g.type === 'corner') [fxN, fyN] = C[g.i];
-    else if (g.type === 'ctrl') [fxN, fyN] = cropCtx.curve[g.i][g.j];
+    else if (g.type === 'rope') [fxN, fyN] = ropePoint(g);
     else { const a = C[g.i], b = C[(g.i + 1) % 4]; fxN = (a[0] + b[0]) / 2; fyN = (a[1] + b[1]) / 2; }
     const R = 264, half = R / 2;
-    const scale = 2.6 * 2 * (w / nw);
-    const cx = fxN * nw, cy = fyN * nh;
+    const src = cropCtx.loupeSrc, SW = src.width, SH = src.height;
+    const scale = 2.6 * 2 * (w / SW);       // 暫存圖像素 → 放大鏡畫布像素
+    const cx = fxN * SW, cy = fyN * SH;
     ctx.save();
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, R, R);
     ctx.imageSmoothingQuality = 'high';
+    // 自己裁掉超出圖片範圍的部分，不依賴瀏覽器對「超出範圍取圖」的處理
     const sw = R / scale;
-    ctx.drawImage($('#cropImg'), cx - sw / 2, cy - sw / 2, sw, sw, 0, 0, R, R);
-    const toL = (p) => [(p[0] * nw - cx) * scale + half, (p[1] * nh - cy) * scale + half];
+    const sx0 = Math.max(0, cx - sw / 2), sy0 = Math.max(0, cy - sw / 2);
+    const sx1 = Math.min(SW, cx + sw / 2), sy1 = Math.min(SH, cy + sw / 2);
+    if (sx1 > sx0 && sy1 > sy0) {
+      ctx.drawImage(src, sx0, sy0, sx1 - sx0, sy1 - sy0, (sx0 - cx) * scale + half, (sy0 - cy) * scale + half, (sx1 - sx0) * scale, (sy1 - sy0) * scale);
+    }
+    const toL = (p) => [(p[0] * SW - cx) * scale + half, (p[1] * SH - cy) * scale + half];
     const Q = cropOutline(C, cropCtx.curveMode ? cropCtx.curve : null).map(toL);
     const path = () => { ctx.moveTo(Q[0][0], Q[0][1]); for (let k = 1; k < Q.length; k++) ctx.lineTo(Q[k][0], Q[k][1]); ctx.closePath(); };
     ctx.beginPath(); ctx.rect(-10, -10, R + 20, R + 20); path();
@@ -1162,8 +1221,8 @@ $('#cropAuto').onclick = async () => {
     c.corners = r.corners;
     if (c.curveMode) {
       const cv = await detectCurveOn($('#cropImg'), c.corners);
-      c.curve = cv || straightCurve(c.corners);
-      if (!cv) toast('沒有偵測到明顯彎曲，可以手動拖彎曲點');
+      c.curve = cv ? normCurve(c.corners, cv) : straightCurve(c.corners);
+      toast(cv ? '已依紙張邊緣擺好曲線，可再拉邊微調' : '沒有偵測到明顯彎曲，可以按住邊拉彎');
     }
     if (cropCtx === c) drawCrop();
   } finally { unbusy(); }
@@ -1172,19 +1231,12 @@ $('#cropAuto').onclick = async () => {
 $('#cropCurve').onclick = async () => {
   const c = cropCtx; if (!c) return;
   if (c.curveMode) {
-    c.savedCurve = c.curve; c.curveMode = false;
+    c.savedCurve = c.curve; c.savedCorners = c.corners.map((p) => p.slice()); c.curve = null; c.curveMode = false;
   } else {
+    // 從目前框好的範圍開始：之前彎過就沿用，否則四條邊先維持直線，由使用者拉彎
     c.curveMode = true;
-    if (!c.curve) {
-      c.curve = c.savedCurve || null;
-      if (!c.curve) {
-        busy('偵測彎曲…');
-        const cv = await detectCurveOn($('#cropImg'), c.corners);
-        unbusy();
-        c.curve = cv || straightCurve(c.corners);
-        toast(cv ? '已依紙張邊緣擺好曲線，可再微調' : '沒有偵測到明顯彎曲，可以手動拖彎曲點');
-      }
-    }
+    if (!c.curve) c.curve = c.savedCurve && sameCorners(c.savedCorners, c.corners) ? c.savedCurve : straightCurve(c.corners);
+    toast('按住任何一條邊拉動，就能把邊拉彎');
   }
   if (cropCtx === c) { updateCurveBtn(); drawCrop(); }
 };
@@ -1796,7 +1848,7 @@ async function buildPdf(title, pages, sizeMode, onProgress) {
   const pageObj = (i) => 4 + i * 3;
   obj(1, `<< /Type /Catalog /Pages 2 0 R >>`);
   obj(2, `<< /Type /Pages /Count ${n} /Kids [${pages.map((_, i) => `${pageObj(i)} 0 R`).join(' ')}] >>`);
-  obj(3, `<< /Title ${utf16hex(title)} /Producer (CocoaScan) /CreationDate (D:${new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)}) >>`);
+  obj(3, `<< /Title ${utf16hex(title)} /Producer (WuDi Score Scan) /CreationDate (D:${new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)}) >>`);
   for (let i = 0; i < n; i++) {
     onProgress && onProgress(i + 1, n);
     const im = await pageImageForPdf(pages[i]);
@@ -1924,7 +1976,7 @@ $('#btnSettings').onclick = () => {
     <div class="seg" id="setUp">${[['auto', '自動'], ['always', '一律'], ['off', '關閉']].map(([k, n]) => `<button data-k="${k}" class="${settings.upscale === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會以相機全解析度拍攝；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.6</div>`, (s) => {
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.7</div>`, (s) => {
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));

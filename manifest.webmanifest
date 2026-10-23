@@ -1,7 +1,7 @@
 {
-  "name": "可可掃描",
-  "short_name": "可可掃描",
-  "description": "高畫質文件掃描：自動抓邊、透視校正、去陰影、匯出 PDF",
+  "name": "伍敵樂譜掃描",
+  "short_name": "伍敵掃描",
+  "description": "用手機把樂譜、講義掃成清晰的 PDF：自動抓邊、彎曲書頁拉平、去雜點。免註冊，資料只存在自己的手機。",
   "lang": "zh-Hant-TW",
   "start_url": "./",
   "scope": "./",

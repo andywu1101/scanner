@@ -1,4 +1,4 @@
-/* 可可掃描 — 影像處理 Worker（OpenCV.js） */
+/* 伍敵樂譜掃描 — 影像處理 Worker（OpenCV.js） */
 self.importScripts('lib/opencv.js');
 
 let cvReady = null;
@@ -371,10 +371,11 @@ function crPt(p0, p1, p2, p3, t) {
   return [0, 1].map((k) => 0.5 * (2 * p1[k] + (-p0[k] + p2[k]) * t + (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2 + (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * t3));
 }
 // 通過 a、p1、p2、b 四點的平滑曲線（Catmull-Rom），回傳折線
-function edgePath(a, p1, p2, b, n) {
-  const P = [[2 * a[0] - p1[0], 2 * a[1] - p1[1]], a, p1, p2, b, [2 * b[0] - p2[0], 2 * b[1] - p2[1]]];
+function edgePath(a, ctrl, b, n) {
+  const pts = [a, ...ctrl, b], m = pts.length;
+  const P = [[2 * a[0] - pts[1][0], 2 * a[1] - pts[1][1]], ...pts, [2 * b[0] - pts[m - 2][0], 2 * b[1] - pts[m - 2][1]]];
   const out = [];
-  for (let s = 1; s <= 3; s++) for (let i = 0; i < n; i++) out.push(crPt(P[s - 1], P[s], P[s + 1], P[s + 2], i / n));
+  for (let s = 1; s < m; s++) for (let i = 0; i < n; i++) out.push(crPt(P[s - 1], P[s], P[s + 1], P[s + 2], i / n));
   out.push(b.slice());
   return out;
 }
@@ -421,7 +422,7 @@ function warpPage(cv, rgb, width, height, corners, opts) {
   if (isCurved(opts.curve)) {
     const C = opts.curve.map((e) => e.map((p) => [p[0] * width, p[1] * height]));
     const H = homog(cv, P, [[0, 0], [outW, 0], [outW, outH], [0, outH]]);
-    const ed = (i) => edgePath(P[i], C[i][0], C[i][1], P[(i + 1) % 4], 24).map((p) => applyH(H, p));
+    const ed = (i) => edgePath(P[i], C[i], P[(i + 1) % 4], Math.ceil(72 / (C[i].length + 1))).map((p) => applyH(H, p));
     const top = ed(0), right = ed(1), bottom = ed(2).reverse(), left = ed(3).reverse();
     const rw = Math.max(polyLen(top), polyLen(bottom)) / outW, rh = Math.max(polyLen(left), polyLen(right)) / outH;
     curves = { top, right, bottom, left, rw: outW, rh: outH, Hinv: homog(cv, [[0, 0], [outW, 0], [outW, outH], [0, outH]], P) };
