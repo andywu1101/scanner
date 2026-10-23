@@ -1129,7 +1129,9 @@ function layoutCrop() {
   const [nw, nh] = cropCtx.nat;
   const pad = 26;
   const s = Math.min((st.width - pad * 2) / nw, (st.height - pad * 2) / nh);
-  const w = nw * s, h = nh * s, x = (st.width - w) / 2, y = (st.height - h) / 2;
+  const w = nw * s, h = nh * s, x = (st.width - w) / 2;
+  // 1.13：照片比置中再往下 40 點，讓上方拖動時出現的預覽少擋一點（下方空間不夠就移到不碰工具列為止）
+  const y = (st.height - h) / 2 + Math.min(40, Math.max(0, (st.height - h) / 2 - 6));
   cropCtx.rect = { x, y, w, h };
   const ci = $('#cropImg');
   Object.assign(ci.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
@@ -1181,7 +1183,7 @@ function drawCrop() {
   const clamp = (v) => Math.min(1, Math.max(0, v));
   const local = (e) => { const b = stage.getBoundingClientRect(); return [e.clientX - b.left - cropCtx.rect.x, e.clientY - b.top - cropCtx.rect.y]; };
   stage.addEventListener('pointerdown', (e) => {
-    if (!cropCtx || cropCtx.drag || pip.gesture) return;
+    if (!cropCtx || cropCtx.drag) return;
     if (e.target.closest('#pipFull')) { pipFullClose(); return; }
     const [lx, ly] = local(e);
     const { w, h } = cropCtx.rect;
@@ -1190,10 +1192,8 @@ function drawCrop() {
     // 優先順序：角 → 彎曲點（曲線模式）→ 邊的中點把手（直線模式）
     let best = null, bd = 40;
     P.forEach((p, i) => { const d = Math.hypot(p[0] - lx, p[1] - ly); if (d < bd) { bd = d; best = { type: 'corner', i }; } });
-    // 曲線模式沿著邊任何位置都能拉（看不到明確的點），所以按在預覽小視窗上時讓小視窗優先；
-    // 看得到的控制點（四個角、直線模式的邊中點）則永遠優先
-    const onPip = !best && curveOn && e.target.closest('#pip');
-    if (!best && curveOn && !onPip) {
+    // 1.13：預覽只是暫時出現，所有控制點（含曲線沿邊拉）都優先；離邊遠的地方點預覽才是放大
+    if (!best && curveOn) {
       // 找手指最靠近哪一條邊的哪個位置（只取邊的中段，太靠近角時彎不動）
       bd = 30;
       for (let i = 0; i < 4; i++) {
@@ -1216,11 +1216,11 @@ function drawCrop() {
     }
     if (!best) {
       // 沒按到控制點：按在小視窗上就是移動或點開小視窗
-      if (e.target.closest('#pipX')) { e.preventDefault(); pipSetHidden(true); }
-      else if (e.target.closest('#pip')) pipGestureStart(e);
+      if (e.target.closest('#pip') && $('#pip').classList.contains('vis')) { e.preventDefault(); pipFullOpen(); }
       return;
     }
     best.start = [lx, ly];
+    pipShow();
     best.c0 = cropCtx.corners.map((p) => p.slice());
     best.k0 = cropCtx.curve ? cropCtx.curve.map((e) => e.map((p) => p.slice())) : null;
     cropCtx.drag = best;
@@ -1229,7 +1229,6 @@ function drawCrop() {
     drawCrop(); loupe(lx, ly);
   });
   stage.addEventListener('pointermove', (e) => {
-    if (pip.gesture) { pipGestureMove(e); return; }
     const g = cropCtx && cropCtx.drag;
     if (!g) return;
     const [lx, ly] = local(e);
@@ -1269,11 +1268,10 @@ function drawCrop() {
     pipAvoid(lx + cropCtx.rect.x, ly + cropCtx.rect.y);
   });
   const end = (e) => {
-    if (pip.gesture) { pipGestureEnd(e); return; }
     if (!cropCtx) return;
     const was = !!cropCtx.drag;
     cropCtx.drag = null; $('#loupe').style.display = 'none'; drawCrop();
-    if (was) { pipRequest(true); pipReturnSoon(); }
+    if (was) { pipRequest(true); pipHideSoon(); }
   };
   window.ropePoint = (g) => { const C = cropCtx.corners, k = cropCtx.curve[g.i]; return edgePoint(C[g.i], k, C[(g.i + 1) % 4], g.s); };
   stage.addEventListener('pointerup', end);
@@ -1367,21 +1365,19 @@ $('#cropOk').onclick = async () => {
 $('#cropCancel').onclick = () => history.back();
 $('#cropNext').onclick = () => { if (!cropCtx) return; openCamera(); $('#cropOk').onclick(); };
 $('#cropRetake').onclick = () => { const c = cropCtx; cropCtx = null; pipClose(); if (c && c.onRetake) c.onRetake(); history.back(); };
-$('#cropPrev').onclick = () => pipSetHidden(false);
+$('#cropPrev').onclick = () => pipFullOpen();
 
-/* ---------- 裁切即時成品預覽（1.12，子母畫面） ----------
+/* ---------- 裁切即時成品預覽（1.13 方案 B） ----------
+   - 平常不顯示；拖控制點時才在上方出現（約半個畫面寬），即時更新；放開後停 1.5 秒再淡出
    - 只做拉平轉正（不做黑白等增強）：拖動時長邊 700 像素，放開後 1400 像素
-   - 預設左上角；拖的點靠近時左右對調（高度不變），放開 0.6 秒後回原位；兩邊都擋到時變透明
-   - 按住小視窗可拖到任意位置（放開靠最近的左右邊，記住位置）；輕點放大全螢幕；× 收起（記住） */
-const pip = { busy: false, want: null, gesture: null, avoid: false, back: null, w: 0, h: 0, hq: null };
-const pipPrefs = (() => { let o = {}; try { o = JSON.parse(localStorage.getItem('cocoscan-pip') || '{}'); } catch (_) {} return Object.assign({ hidden: false, side: 'l', y: 0 }, o); })();
-function pipSave() { try { localStorage.setItem('cocoscan-pip', JSON.stringify(pipPrefs)); } catch (_) {} }
+   - 位置固定左上；拖的點靠近時左右對調（高度不變），兩邊都擋到時變透明；放大鏡永遠在它上面
+   - 出現時輕點可放大全螢幕；工具列「成品」隨時看全螢幕大圖，點一下回到框選 */
+const pip = { busy: false, want: null, avoid: false, hideT: null, hq: null };
 async function pipInit(c) {
-  pip.busy = false; pip.want = null; pip.hq = null; pip.avoid = false; clearTimeout(pip.back);
+  pip.busy = false; pip.want = null; pip.hq = null; pip.avoid = false; clearTimeout(pip.hideT);
   $('#pipFull').classList.remove('show');
+  $('#pip').classList.remove('show', 'vis');
   const cv = $('#pipCv'); cv.width = 1; cv.height = 1;
-  $('#pip').style.opacity = '';
-  pipShowState();
   try {
     await whenReady();
     if (cropCtx !== c) return;
@@ -1394,22 +1390,30 @@ async function pipInit(c) {
 }
 function pipClose() {
   $('#pipFull').classList.remove('show');
-  $('#pip').classList.remove('show');
-  clearTimeout(pip.back);
+  $('#pip').classList.remove('show', 'vis');
+  clearTimeout(pip.hideT);
   wcall('cropRelease', {}).catch(() => {});
 }
-function pipShowState() {
-  $('#pip').classList.toggle('show', !pipPrefs.hidden && !!cropCtx);
-  $('#cropPrev').style.display = pipPrefs.hidden ? '' : 'none';
+// 開始拖控制點時出現
+function pipShow() {
+  clearTimeout(pip.hideT);
+  const el = $('#pip');
+  el.style.opacity = '';
+  if (!el.classList.contains('show')) { pip.avoid = false; el.classList.add('show'); pipPlace(false); }
+  requestAnimationFrame(() => el.classList.add('vis'));
 }
-function pipSetHidden(h) {
-  pipPrefs.hidden = h; pipSave(); pipShowState();
-  if (!h) { pipPlace(false); pipRequest(true); }
+// 放開後停 1.5 秒再淡出
+function pipHideSoon() {
+  clearTimeout(pip.hideT);
+  pip.hideT = setTimeout(() => {
+    const el = $('#pip'); el.classList.remove('vis');
+    pip.hideT = setTimeout(() => { el.classList.remove('show'); pip.avoid = false; }, 250);
+  }, 1500);
 }
 // 要求更新預覽；忙碌時只記住最新一次，做完再接著做
 function pipRequest(hq) {
   const c = cropCtx;
-  if (!c || !c.pipReady || (pipPrefs.hidden && !$('#pipFull').classList.contains('show'))) return;
+  if (!c || !c.pipReady) return;
   pip.want = { c, hq, corners: c.corners.map((p) => p.slice()), curve: c.curveMode && c.curve ? c.curve.map((e) => e.map((p) => p.slice())) : null };
   if (!pip.busy) pipRun();
 }
@@ -1431,82 +1435,38 @@ async function pipRun() {
   pip.busy = false;
   if (pip.want) pipRun();
 }
-// 小視窗的位置（以裁切區為準，單位 px）
-function pipBox() {
-  const st = $('#cropStage').getBoundingClientRect();
-  const el = $('#pip');
-  const w = el.offsetWidth || Math.min(200, st.width * 0.34), h = el.offsetHeight || w * 1.3;
-  return { st, w, h };
-}
+// 位置（以裁切區為準，單位 px）：固定左上，讓開時換到右上
 function pipHome() {
-  const { st, w, h } = pipBox(), m = 10;
-  const x = pipPrefs.side === 'r' ? st.width - w - m : m;
-  const y = Math.max(m, Math.min(st.height - h - m, pipPrefs.y * st.height + m));
-  return { x, y, w, h };
+  const st = $('#cropStage').getBoundingClientRect(), el = $('#pip'), m = 10;
+  const w = el.offsetWidth || st.width * 0.5, h = el.offsetHeight || w * 1.3;
+  return { st, x: m, y: m, w, h };
 }
 function pipPlace(avoid) {
   const el = $('#pip');
-  if (!el.classList.contains('show') || pip.gesture) return;
-  const { st } = pipBox();
-  let { x, y, w } = pipHome();
-  if (avoid) x = st.width - w - x; // 左右對調，高度不變
-  el.style.left = x + 'px'; el.style.top = y + 'px';
+  if (!el.classList.contains('show')) return;
+  const { st, x, y, w } = pipHome();
+  el.style.left = (avoid ? st.width - w - x : x) + 'px'; el.style.top = y + 'px';
 }
-// 拖控制點時：手指靠近小視窗就讓開
 function pipAvoid(fx, fy) {
   const el = $('#pip');
   if (!el.classList.contains('show')) return;
-  clearTimeout(pip.back);
-  const { st } = pipBox();
   const home = pipHome(), pad = 36;
   const inBox = (bx) => fx > bx - pad && fx < bx + home.w + pad && fy > home.y - pad && fy < home.y + home.h + pad;
-  const other = st.width - home.w - home.x;
+  const other = home.st.width - home.w - home.x;
   if (!pip.avoid && inBox(home.x)) pip.avoid = true;
-  else if (pip.avoid && !inBox(other) && !inBox(home.x)) { /* 保持讓開，放開手指後再回去 */ }
   pipPlace(pip.avoid);
-  const cur = pip.avoid ? other : home.x;
-  el.style.opacity = inBox(cur) ? '0.15' : ''; // 兩邊都擋到（紙張很小）時變透明
-}
-function pipReturnSoon() {
-  clearTimeout(pip.back);
-  pip.back = setTimeout(() => { pip.avoid = false; $('#pip').style.opacity = ''; pipPlace(false); }, 600);
-}
-// 按住小視窗：移動；輕點：放大
-function pipGestureStart(e) {
-  const el = $('#pip');
-  const b = el.getBoundingClientRect(), st = $('#cropStage').getBoundingClientRect();
-  pip.gesture = { id: e.pointerId, sx: e.clientX, sy: e.clientY, ox: b.left - st.left, oy: b.top - st.top, moved: false };
-  $('#cropStage').setPointerCapture(e.pointerId);
-  e.preventDefault();
-}
-function pipGestureMove(e) {
-  const g = pip.gesture;
-  const dx = e.clientX - g.sx, dy = e.clientY - g.sy;
-  if (!g.moved && Math.hypot(dx, dy) < 8) return;
-  g.moved = true;
-  const el = $('#pip'); el.classList.add('dragging');
-  const { st, w, h } = pipBox();
-  el.style.left = Math.max(0, Math.min(st.width - w, g.ox + dx)) + 'px';
-  el.style.top = Math.max(0, Math.min(st.height - h, g.oy + dy)) + 'px';
-}
-function pipGestureEnd() {
-  const g = pip.gesture; pip.gesture = null;
-  const el = $('#pip'); el.classList.remove('dragging');
-  if (!g) return;
-  if (!g.moved) { pipFullOpen(); return; }
-  // 放開：靠到最近的左右邊，記住位置
-  const { st, w } = pipBox();
-  const x = parseFloat(el.style.left), y = parseFloat(el.style.top);
-  pipPrefs.side = x + w / 2 > st.width / 2 ? 'r' : 'l';
-  pipPrefs.y = Math.max(0, (y - 10) / st.height);
-  pipSave(); pip.avoid = false; pipPlace(false);
+  el.style.opacity = inBox(pip.avoid ? other : home.x) ? '0.15' : ''; // 兩邊都擋到（紙張很小）時變透明
 }
 function drawFull() {
   const src = $('#pipCv'), fc = $('#pipFullCv');
   fc.width = src.width; fc.height = src.height;
   fc.getContext('2d').drawImage(src, 0, 0);
 }
-function pipFullOpen() { drawFull(); $('#pipFull').classList.add('show'); if (!pip.hq) pipRequest(true); }
+function pipFullOpen() {
+  clearTimeout(pip.hideT); $('#pip').classList.remove('show', 'vis');
+  drawFull(); $('#pipFull').classList.add('show');
+  if (!pip.hq) pipRequest(true);
+}
 function pipFullClose() { $('#pipFull').classList.remove('show'); }
 
 /* ---------- 文件頁 ---------- */
@@ -2230,13 +2190,17 @@ async function buildPdf(title, pages, sizeMode, onProgress) {
 function safeName(s) { return s.replace(/[\\/:*?"<>|]/g, '-').trim() || '掃描'; }
 
 /* ---------- 匯出 ---------- */
+// iPhone／iPad（iPadOS 會自稱 Mac，用觸控點數判斷）
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 function deliverSheet(files, label) {
-  const canShare = navigator.canShare && navigator.canShare({ files });
+  // 1.13：iPhone 的 PDF 用「開啟檔案」那條路（系統 PDF 預覽右上角的分享選單才有 LINE），只留一顆按鈕
+  const iosPdf = IS_IOS && files.length === 1 && /\.pdf$/i.test(files[0].name);
+  const canShare = !iosPdf && navigator.canShare && navigator.canShare({ files });
   const totalMB = files.reduce((a, f) => a + f.size, 0) / 1048576;
   openSheet(`<h3>${label}已完成</h3>
     <div class="note" style="margin-top:0">${files.length} 個檔案・共 ${totalMB.toFixed(1)} MB</div>
     ${canShare ? `<button class="bigbtn" id="dShare">分享／儲存到檔案或相簿</button>` : ''}
-    <button class="bigbtn ${canShare ? 'alt' : ''}" id="dDown">下載</button>`, (s) => {
+    <button class="bigbtn ${canShare ? 'alt' : ''}" id="dDown">${iosPdf ? '分享／儲存到檔案' : '下載'}</button>`, (s) => {
     const sh = s.querySelector('#dShare');
     if (sh) sh.onclick = async () => {
       try { await navigator.share({ files }); closeSheet(); }
@@ -2358,7 +2322,7 @@ $('#btnSettings').onclick = () => {
     <div class="seg" id="setUp">${[['auto', '自動'], ['always', '一律'], ['off', '關閉']].map(([k, n]) => `<button data-k="${k}" class="${settings.upscale === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會另外拍一張照片（最高 1500 萬畫素）；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.12</div>`, (s) => {
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.13</div>`, (s) => {
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));
