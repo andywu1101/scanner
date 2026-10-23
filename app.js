@@ -15,7 +15,7 @@ const S_SAT = { k: 'saturation', name: '飽和度', min: -100, max: 100, def: 0,
 const S_TMP = { k: 'temp', name: '色溫', min: -100, max: 100, def: 0, lo: '冷', hi: '暖' };
 const ADJ = {
   bw: [S_EXP, S_CON, { k: 'density', name: '濃淡', min: -100, max: 100, def: 0, lo: '淡', hi: '濃' },
-    { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 35, lo: '柔', hi: '銳' }, { k: 'despeckle', name: '去雜點', min: 0, max: 100, def: 20, lo: '少', hi: '多' },
+    { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 82, lo: '柔', hi: '銳' }, { k: 'despeckle', name: '去雜點', min: 0, max: 100, def: 35, lo: '少', hi: '多' }, // 1.15 起 82／35（原 35／20）
     { k: 'smooth', name: '邊緣平滑', min: 0, max: 100, def: 50, lo: '關', hi: '強' }],
   gray: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50, lo: '柔', hi: '銳' }],
   color: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50, lo: '柔', hi: '銳' }, S_SAT, S_TMP],
@@ -35,7 +35,7 @@ const settings = (() => {
 })();
 /* 調整數值分三層（1.11）：
    1. App 預設值（ADJ 的 def）
-   2. 文件的統一設定 doc.adj[mode]（新文件從 settings.adj＝上一次統一調整的數值開始）
+   2. 文件的統一設定 doc.adj[mode]（新文件從 settings.adj 複製；settings.adj＝設定裡的「預設調整數值」，1.15 起只在設定裡改）
    3. 單頁設定 page.adj[mode]（有值＝這一頁單獨調整過，只影響這一頁）
    docAdjCache 是所有文件 doc.adj 的記憶體副本，讓 procKey 可以同步算出每一頁實際用的數值 */
 if (!settings.adj) settings.adj = {};
@@ -49,6 +49,9 @@ function docAdjOf(docId, mode) { const a = docAdjCache.get(docId); return fillAd
 function pageAdjOf(p, mode = p.mode) { return p.adj && p.adj[mode] ? fillAdj(mode, p.adj[mode]) : docAdjOf(p.docId, mode); }
 const pageCustom = (p) => !!(p && p.adj && p.adj[p.mode]);
 const cloneAdj = (a) => JSON.parse(JSON.stringify(a || {}));
+// 使用者的預設調整數值（設定 → 預設調整數值）；新文件以完整數值複製一份，之後出廠值再改也不會影響已有文件
+const userDefOf = (mode) => fillAdj(mode, settings.adj[mode]);
+const userDefAll = () => Object.fromEntries(MODES.map((m) => [m.id, userDefOf(m.id)]));
 // 處理結果的「身分」：模式、旋轉、四角、這一頁實際用的調整數值，任何一項變了就要重算
 function procKey(p) { return JSON.stringify([p.mode, p.rotation || 0, p.corners, p.curve || null, pageAdjOf(p), settings.upscale]); }
 function isStale(p) { return !p.processed || p.pkey !== procKey(p); }
@@ -243,7 +246,7 @@ async function createDoc() {
   const now = new Date();
   const p = (n) => String(n).padStart(2, '0');
   const doc = {
-    id: uid(), created: Date.now(), updated: Date.now(), pageIds: [], adj: cloneAdj(settings.adj),
+    id: uid(), created: Date.now(), updated: Date.now(), pageIds: [], adj: userDefAll(),
     title: `掃描 ${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}`,
   };
   await DB.put('docs', doc);
@@ -252,9 +255,31 @@ async function createDoc() {
 }
 // 啟動時載入每份文件的統一設定；1.10 以前的文件沒有 doc.adj，以當時的數值（settings.adj）為起點，看起來不會變
 async function loadDocAdj() {
+  const fix115 = !settings.adjFix115;
   for (const d of await DB.all('docs')) {
-    if (!d.adj) { d.adj = cloneAdj(settings.adj); await DB.put('docs', d); }
+    let dirty = false;
+    if (!d.adj) { d.adj = cloneAdj(settings.adj); dirty = true; }
+    // 1.15 黑白出廠值改成 82／35：已有的文件把沒設定過的這兩項固定成舊值 35／20，看起來不變、也不用重算
+    if (fix115) {
+      const b = d.adj.bw = d.adj.bw || {};
+      if (b.sharp === undefined) { b.sharp = 35; dirty = true; }
+      if (b.despeckle === undefined) { b.despeckle = 20; dirty = true; }
+    }
+    if (dirty) await DB.put('docs', d);
     docAdjCache.set(d.id, d.adj);
+  }
+  if (fix115) {
+    // 單頁設定一般存完整數值；萬一有缺，也固定成舊值
+    for (const p of await DB.all('pages')) {
+      const b = p.adj && p.adj.bw;
+      if (b && (b.sharp === undefined || b.despeckle === undefined)) {
+        if (b.sharp === undefined) b.sharp = 35;
+        if (b.despeckle === undefined) b.despeckle = 20;
+        await DB.put('pages', p);
+      }
+    }
+    settings.adj = {}; // 預設調整數值改回新的出廠值（作者選擇）
+    settings.adjFix115 = true; saveSettings();
   }
 }
 async function addPage(docId, blob, corners, curve) {
@@ -1848,7 +1873,7 @@ async function openAdjust(scope) {
   const p = viewPage;
   if (!p || adj.open) return;
   const vals = scope === 'doc' ? docAdjOf(p.docId, p.mode) : pageAdjOf(p);
-  const ref = scope === 'doc' ? defaultsOf(p.mode) : docAdjOf(p.docId, p.mode);
+  const ref = scope === 'doc' ? userDefOf(p.mode) : docAdjOf(p.docId, p.mode); // 統一調整對照／重設＝預設調整數值
   Object.assign(adj, {
     open: true, ready: false, busy: false, pending: false, mode: p.mode, scope, vals, ref,
     snap: JSON.stringify(vals), comparing: false, defImg: null,
@@ -2069,7 +2094,6 @@ async function applyDocAdjust(docId, mode, vals, changed) {
     doc.adj[mode] = vals;
     docAdjCache.set(doc.id, doc.adj);
     await DB.put('docs', doc);
-    settings.adj[mode] = Object.assign({}, vals); saveSettings();
     const custom = pages.filter((p) => p.adj && p.adj[mode] && JSON.stringify(fillAdj(mode, p.adj[mode])) !== JSON.stringify(vals));
     if (custom.length) overwrite = confirm(`有 ${custom.length} 頁單獨調整過。\n要一起套用新的統一設定嗎？\n\n確定：全部套用\n取消：保留那幾頁自己的設定`);
     for (const p of pages) {
@@ -2324,9 +2348,11 @@ $('#btnSettings').onclick = () => {
     <div class="switch"><span>拍照後先確認裁切<small>高畫質拍照後進入四角微調畫面</small></span><button class="tg ${settings.confirmCrop ? 'on' : ''}" data-k="confirmCrop"></button></div>
     <div class="lbl" style="margin-top:12px">小圖平滑放大<small style="display:block;font-size:12px;margin-top:2px">讓解析度低的圖片（例如別人傳來的照片）轉黑白時邊緣更平順</small></div>
     <div class="seg" id="setUp">${[['auto', '自動'], ['always', '一律'], ['off', '關閉']].map(([k, n]) => `<button data-k="${k}" class="${settings.upscale === k ? 'on' : ''}">${n}</button>`).join('')}</div>
+    <button class="srow" id="setDefAdj" style="margin-top:6px"><span>預設調整數值 ›<span class="sub">新文件一開始用的曝光、濃淡、銳利度等數值</span></span></button>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會另外拍一張照片（最高 1500 萬畫素）；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.14</div>`, (s) => {
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.15</div>`, (s) => {
+    s.querySelector('#setDefAdj').onclick = () => openDefAdj('bw');
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));
@@ -2417,6 +2443,32 @@ function copyText(btn, text) {
     done();
   };
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
+}
+
+/* ---------- 預設調整數值（1.15） ----------
+   四個模式各一組拉桿；存在 settings.adj（只記和出廠值不同的項目）。
+   新文件從這組數值開始，統一調整的「按住對照」與「全部重設」也以它為準；已經存在的文件不受影響 */
+function openDefAdj(mode) {
+  const vals = userDefOf(mode);
+  openSheet(`<h3>預設調整數值</h3>
+    <div class="seg" id="defMode">${MODES.map((m) => `<button data-m="${m.id}" class="${m.id === mode ? 'on' : ''}">${m.name}</button>`).join('')}</div>
+    ${ADJ[mode].map((d) => `<div class="defrow"><div class="dh"><span>${d.name}</span><b data-v="${d.k}">${vals[d.k] > 0 && d.min < 0 ? '+' : ''}${vals[d.k]}</b></div>
+      <input type="range" class="defrange" data-k="${d.k}" min="${d.min}" max="${d.max}" step="1" value="${vals[d.k]}" style="--def:${((d.def - d.min) / (d.max - d.min)) * 100}%">
+      <div class="dl"><span>${d.lo || ''}</span><span>出廠 ${d.def}</span><span>${d.hi || ''}</span></div></div>`).join('')}
+    <button class="bigbtn alt" id="defReset" style="width:100%;margin-top:6px">恢復「${MODES.find((m) => m.id === mode).name}」的出廠值</button>
+    <div class="note">新文件會從這組數值開始；文件裡的「統一調整」按住對照、全部重設也以這組為準。已經存在的文件不受影響。</div>
+    <button class="bigbtn" id="defBack" style="width:100%;margin-top:12px">完成</button>`, (s) => {
+    s.querySelectorAll('#defMode button').forEach((b) => b.onclick = () => openDefAdj(b.dataset.m));
+    s.querySelectorAll('.defrange').forEach((inp) => inp.addEventListener('input', () => {
+      const d = ADJ[mode].find((x) => x.k === inp.dataset.k), v = +inp.value;
+      s.querySelector(`[data-v="${d.k}"]`).textContent = (v > 0 && d.min < 0 ? '+' : '') + v;
+      const cur = settings.adj[mode] = settings.adj[mode] || {};
+      if (v === d.def) delete cur[d.k]; else cur[d.k] = v;
+      saveSettings();
+    }));
+    s.querySelector('#defReset').onclick = () => { delete settings.adj[mode]; saveSettings(); openDefAdj(mode); };
+    s.querySelector('#defBack').onclick = closeSheet;
+  });
 }
 
 /* ---------- 畫面資訊（除錯用，顯示在設定最下方） ----------
