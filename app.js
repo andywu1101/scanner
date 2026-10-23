@@ -22,6 +22,8 @@ const ADJ = {
   original: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 0, lo: '柔', hi: '銳' }, S_SAT, S_TMP],
 };
 const MAX_PIXELS = 16000000; // iOS canvas 上限約 16.7M 像素
+const MAX_PHOTO = 15000000;  // Android 即時掃描拍照上限 1500 萬畫素（1.10）
+const HAS_IC = 'ImageCapture' in window; // Android Chrome 有、iPhone 沒有
 
 /* ---------- 設定 ---------- */
 const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, confirmCrop: true, upscale: 'auto', v: 2 };
@@ -583,7 +585,11 @@ async function startLive(docId) {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 4096 }, height: { ideal: 3072 } },
+      // Android（有 ImageCapture）另外用 takePhoto 拍照，預覽只用來找紙，要 1920×1440 就夠，弱手機偵測才跟得上（1.10）
+      // iPhone 沒有 ImageCapture，存下來的就是預覽那一格，所以維持最高解析度
+      video: HAS_IC
+        ? { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } }
+        : { facingMode: { ideal: 'environment' }, width: { ideal: 4096 }, height: { ideal: 3072 } },
     });
     if (!live.running) { stream.getTracks().forEach((t) => t.stop()); return; }
     live.stream = stream;
@@ -596,9 +602,21 @@ async function startLive(docId) {
       $('#torchBtn').style.display = caps.torch ? '' : 'none';
       if (caps.focusMode && caps.focusMode.includes('continuous')) live.track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
     } catch (_) {}
-    if ('ImageCapture' in window) { try { live.ic = new ImageCapture(live.track); } catch (_) {} }
+    live.photoSettings = null;
+    if (HAS_IC) {
+      try {
+        live.ic = new ImageCapture(live.track);
+        // 拍照尺寸：請相機用不超過 1500 萬畫素的大小拍（手機不支援時會選最接近的，拍完再縮）
+        live.ic.getPhotoCapabilities().then((pc) => {
+          const W = pc.imageWidth, H = pc.imageHeight;
+          if (!W || !H || !W.max || !H.max || W.max * H.max <= MAX_PHOTO) return;
+          const s = Math.sqrt(MAX_PHOTO / (W.max * H.max));
+          live.photoSettings = { imageWidth: Math.floor(W.max * s), imageHeight: Math.floor(H.max * s) };
+        }).catch(() => {});
+      } catch (_) {}
+    }
     const updRes = () => {
-      $('#resChip').textContent = live.ic ? `預覽 ${v.videoWidth}×${v.videoHeight}・拍攝用全解析度` : `${v.videoWidth}×${v.videoHeight}`;
+      $('#resChip').textContent = live.ic ? `預覽 ${v.videoWidth}×${v.videoHeight}・拍照最高 1500 萬畫素` : `${v.videoWidth}×${v.videoHeight}`;
     };
     v.onloadedmetadata = updRes; updRes();
     setHint(workerReady ? '將文件放進畫面中' : '影像引擎載入中…');
@@ -903,7 +921,11 @@ async function capture(sig, full, quadAt) {
       // Android：全解析度拍照需要一點時間，拍好才閃光
       setHint('拍攝中，請勿移動…', true);
       live.holdBox = true; shotFx('busy');
-      try { blob = await live.ic.takePhoto(); fromPhoto = !!blob; } catch (e) { console.warn('takePhoto', e); }
+      try { blob = await live.ic.takePhoto(live.photoSettings || undefined); fromPhoto = !!blob; }
+      catch (e) {
+        console.warn('takePhoto', e);
+        if (live.photoSettings) { try { blob = await live.ic.takePhoto(); fromPhoto = !!blob; } catch (_) {} }
+      }
       live.holdBox = false; shotFx('');
     }
     if (!blob) {
@@ -919,11 +941,25 @@ async function capture(sig, full, quadAt) {
       let r = null, sameAspect = true;
       if (fromPhoto) {
         const { img, url } = await loadImg(blob);
-        sameAspect = Math.abs(img.naturalWidth / img.naturalHeight - v.videoWidth / v.videoHeight) < 0.02;
-        r = await detectOn(img);
+        const iw = img.naturalWidth, ih = img.naturalHeight;
+        sameAspect = Math.abs(iw / ih - v.videoWidth / v.videoHeight) < 0.02;
+        let srcImg = img;
+        if (iw * ih > MAX_PHOTO * 1.05) {
+          // 相機給的照片太大（例如 4800 萬畫素），先縮到 1500 萬再存，後面的處理才不會拖慢
+          const sc = Math.sqrt(MAX_PHOTO / (iw * ih));
+          const c = canvasOf(Math.floor(iw * sc), Math.floor(ih * sc));
+          const cx = c.getContext('2d'); cx.imageSmoothingQuality = 'high'; cx.drawImage(img, 0, 0, c.width, c.height);
+          const nb = await toBlob(c, 'image/jpeg', 0.95);
+          if (nb) { blob = nb; srcImg = c; }
+        }
+        r = await detectOn(srcImg);
+        if (srcImg !== img) srcImg.width = srcImg.height = 0;
         URL.revokeObjectURL(url);
       } else if (src) r = await detectOn(src);
-      if (r && (!quad || !sameAspect || maxDisp(r.corners, quad) < 0.06)) corners = r.corners;
+      // Android 照片：即時框在弱手機上可能偏掉，以照片上完整偵測的結果為準（只排除差太多的誤判）
+      const okR = r && (fromPhoto ? r.area > 0.15 && (!quad || !sameAspect || maxDisp(r.corners, quad) < 0.25)
+                                  : (!quad || !sameAspect || maxDisp(r.corners, quad) < 0.06));
+      if (okR) corners = r.corners;
       else if (!r && !sameAspect) corners = FULL.map((p) => p.slice());
     } catch (_) {}
     if (!live.docId) live.docId = (await createDoc()).id;
@@ -2001,12 +2037,9 @@ $('#btnSettings').onclick = () => {
     <div class="switch"><span>拍照後先確認裁切<small>高畫質拍照後進入四角微調畫面</small></span><button class="tg ${settings.confirmCrop ? 'on' : ''}" data-k="confirmCrop"></button></div>
     <div class="lbl" style="margin-top:12px">小圖平滑放大<small style="display:block;font-size:12px;margin-top:2px">讓解析度低的圖片（例如別人傳來的照片）轉黑白時邊緣更平順</small></div>
     <div class="seg" id="setUp">${[['auto', '自動'], ['always', '一律'], ['off', '關閉']].map(([k, n]) => `<button data-k="${k}" class="${settings.upscale === k ? 'on' : ''}">${n}</button>`).join('')}</div>
-    <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會以相機全解析度拍攝；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
+    <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會另外拍一張照片（最高 1500 萬畫素）；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="set-links"><button class="donate" id="setDonate">❤ 小額贊助</button><button id="setCover">← 回封面</button></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.9</div>`, (s) => {
-    s.querySelector('#setDonate').onclick = () => { closeSheet(); openDonate(); };
-    s.querySelector('#setCover').onclick = () => { closeSheet(); goCover(); };
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.10</div>`, (s) => {
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));
@@ -2035,6 +2068,8 @@ $('#cvStart').onclick = () => {
   if (!seen) openHelp();
 };
 $('#btnHelp').onclick = () => openHelp();
+$('#homeCover').onclick = () => goCover();
+$('#homeDonate').onclick = () => openDonate();
 function openHelp() {
   openSheet(`<div class="help"><h3>使用教學</h3>
     <h4>三種拍法</h4><ul>
