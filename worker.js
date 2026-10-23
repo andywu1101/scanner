@@ -186,6 +186,7 @@ function estimateBackground(cv, img) {
 }
 
 function sharpen(cv, img, amount, sigma) {
+  if (amount <= 0.001) return;
   const blur = new cv.Mat();
   cv.GaussianBlur(img, blur, new cv.Size(0, 0), sigma);
   cv.addWeighted(img, 1 + amount, blur, -amount, 0, img);
@@ -200,15 +201,136 @@ function normalizeLight(cv, img) {
   return out;
 }
 
-function processPage(cv, msg) {
-  const { buffer, width, height, corners, rotation, mode } = msg;
-  let src = new cv.Mat(height, width, cv.CV_8UC4);
-  src.data.set(new Uint8Array(buffer));
-  const rgb = new cv.Mat();
-  cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
-  src.delete();
+/* ---------- 調整參數 ----------
+   exposure / contrast / saturation / temp / density：-100 ~ 100（0 = 預設）
+   sharp / despeckle：0 ~ 100
+   空間相關的數值（模糊半徑、雜點面積）依頁面短邊等比例換算，預覽與全解析度效果一致 */
+const ADJ_DEFAULTS = {
+  bw: { exposure: 0, contrast: 0, density: 0, sharp: 35, despeckle: 20 },
+  gray: { exposure: 0, contrast: 0, sharp: 50 },
+  color: { exposure: 0, contrast: 0, sharp: 50, saturation: 0, temp: 0 },
+  original: { exposure: 0, contrast: 0, sharp: 0, saturation: 0, temp: 0 },
+};
 
-  // 透視校正（以原始解析度）
+// 曝光（約 ±1 級）＋對比，做成查表一次套用；base 是各模式原本的固定調整
+function toneLUT(cv, p, baseGain, baseOff) {
+  const gain = Math.pow(2, (p.exposure || 0) / 100);
+  const con = p.contrast || 0;
+  const c = con >= 0 ? 1 + con / 100 : 1 + con / 150;
+  const lut = new cv.Mat(1, 256, cv.CV_8UC1);
+  for (let x = 0; x < 256; x++) {
+    let v = (x * baseGain + baseOff) * gain;
+    v = (v - 128) * c + 128;
+    lut.data[x] = v < 0 ? 0 : v > 255 ? 255 : Math.round(v);
+  }
+  return lut;
+}
+function applyTone(cv, img, p, baseGain, baseOff) {
+  const lut = toneLUT(cv, p, baseGain, baseOff);
+  cv.LUT(img, lut, img);
+  lut.delete();
+}
+// 飽和度與色溫（RGB）
+function applyColor(cv, img, p) {
+  const sat = 1 + (p.saturation || 0) / 100;
+  if (Math.abs(sat - 1) > 0.001) {
+    const g = new cv.Mat(), g3 = new cv.Mat();
+    cv.cvtColor(img, g, cv.COLOR_RGB2GRAY);
+    cv.cvtColor(g, g3, cv.COLOR_GRAY2RGB);
+    cv.addWeighted(img, sat, g3, 1 - sat, 0, img);
+    g.delete(); g3.delete();
+  }
+  const t = (p.temp || 0) / 100;
+  if (Math.abs(t) > 0.001) {
+    const ch = new cv.MatVector();
+    cv.split(img, ch);
+    const r = ch.get(0), b = ch.get(2);
+    r.convertTo(r, -1, 1 + 0.18 * t, 0);
+    b.convertTo(b, -1, 1 - 0.18 * t, 0);
+    cv.merge(ch, img);
+    r.delete(); b.delete(); ch.delete();
+  }
+}
+// 去雜點：移除面積小於 area 的孤立黑點
+function despeckle(cv, bw, area) {
+  if (area < 1) return;
+  const inv = new cv.Mat();
+  cv.bitwise_not(bw, inv);
+  const labels = new cv.Mat(), stats = new cv.Mat(), cents = new cv.Mat();
+  const n = cv.connectedComponentsWithStats(inv, labels, stats, cents, 8, cv.CV_32S);
+  const kill = new Uint8Array(n);
+  let any = false;
+  for (let i = 1; i < n; i++) {
+    if (stats.intAt(i, cv.CC_STAT_AREA) < area) { kill[i] = 1; any = true; }
+  }
+  if (any) {
+    const L = labels.data32S, D = bw.data;
+    for (let i = 0; i < L.length; i++) if (kill[L[i]]) D[i] = 255;
+  }
+  inv.delete(); labels.delete(); stats.delete(); cents.delete();
+}
+
+// 對已校正的 RGB 頁面套用模式與調整（會用掉 warped），回傳 1 或 3 通道結果
+function enhance(cv, warped, mode, params) {
+  const p = Object.assign({}, ADJ_DEFAULTS[mode] || {}, params || {});
+  const k = Math.max(0.25, Math.min(warped.cols, warped.rows) / 2400);
+  const sig = (s) => Math.max(0.35, s * k);
+
+  if (mode === 'original') {
+    applyTone(cv, warped, p, 1, 0);
+    applyColor(cv, warped, p);
+    sharpen(cv, warped, (p.sharp / 100) * 1.2, sig(1.2));
+    return warped;
+  }
+  if (mode === 'color') {
+    const norm = normalizeLight(cv, warped);
+    warped.delete();
+    applyTone(cv, norm, p, 1.1, -22);
+    applyColor(cv, norm, p);
+    sharpen(cv, norm, (p.sharp / 100) * 1.2, sig(1.2));
+    return norm;
+  }
+  const gray = new cv.Mat();
+  cv.cvtColor(warped, gray, cv.COLOR_RGB2GRAY);
+  warped.delete();
+  const norm = normalizeLight(cv, gray);
+  gray.delete();
+  if (mode === 'gray') {
+    applyTone(cv, norm, p, 1.15, -30);
+    sharpen(cv, norm, (p.sharp / 100) * 1.4, sig(1.2));
+    return norm;
+  }
+  // 黑白
+  applyTone(cv, norm, p, 1, 0);
+  const s = p.sharp;
+  const sm = new cv.Mat();
+  if (s <= 50) {
+    // 越低越柔：門檻前先模糊，可同時壓掉紙紋
+    cv.GaussianBlur(norm, sm, new cv.Size(0, 0), sig(0.6 + ((50 - s) / 50) * 1.4));
+  } else {
+    cv.GaussianBlur(norm, sm, new cv.Size(0, 0), sig(0.6));
+    sharpen(cv, sm, ((s - 50) / 50) * 1.5, sig(1.0));
+  }
+  norm.delete();
+  let block = Math.round(Math.min(sm.cols, sm.rows) / 45);
+  if (block % 2 === 0) block++;
+  block = Math.max(block, 15);
+  const d = p.density || 0;
+  const C = 16 - d * 0.11; // 越大越不容易變黑；預設比舊版（14）寬鬆一點
+  const bw = new cv.Mat();
+  cv.adaptiveThreshold(sm, bw, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, block, C);
+  const dark = new cv.Mat();
+  cv.threshold(sm, dark, 110 + d * 0.5, 255, cv.THRESH_BINARY); // 很暗的地方一定是黑（填滿符頭）
+  cv.bitwise_and(bw, dark, bw);
+  dark.delete(); sm.delete();
+  if (s <= 50) cv.medianBlur(bw, bw, 3); // 修掉鋸齒與單點雜訊
+  const area = Math.pow((p.despeckle || 0) / 100, 1.5) * 90 * k * k;
+  despeckle(cv, bw, area);
+  return bw;
+}
+
+// 透視校正；maxSide 有值時（預覽）以較小尺寸輸出
+function warpPage(cv, rgb, width, height, corners, maxSide) {
   const P = corners.map((c) => [c[0] * width, c[1] * height]);
   const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
   let outW = Math.round(Math.max(dist(P[0], P[1]), dist(P[3], P[2])));
@@ -220,53 +342,26 @@ function processPage(cv, msg) {
   }
   const cap = 16000000;
   if (outW * outH > cap) { const s = Math.sqrt(cap / (outW * outH)); outW = Math.floor(outW * s); outH = Math.floor(outH * s); }
+  if (maxSide && Math.max(outW, outH) > maxSide) { const s = maxSide / Math.max(outW, outH); outW = Math.round(outW * s); outH = Math.round(outH * s); }
   outW = Math.max(outW, 16); outH = Math.max(outH, 16);
   const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, P.flat());
   const dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, outW, 0, outW, outH, 0, outH]);
   const M = cv.getPerspectiveTransform(srcTri, dstTri);
-  let warped = new cv.Mat();
-  cv.warpPerspective(rgb, warped, M, new cv.Size(outW, outH), cv.INTER_CUBIC, cv.BORDER_REPLICATE);
-  rgb.delete(); srcTri.delete(); dstTri.delete(); M.delete();
-
-  let result;
-  if (mode === 'original') {
-    result = warped;
-  } else if (mode === 'color') {
-    const norm = normalizeLight(cv, warped);
-    warped.delete();
-    // 黑位略壓、對比略增
-    norm.convertTo(norm, -1, 1.1, -22);
-    sharpen(cv, norm, 0.6, 1.2);
-    result = norm;
-  } else {
-    const gray = new cv.Mat();
-    cv.cvtColor(warped, gray, cv.COLOR_RGB2GRAY);
-    warped.delete();
-    const norm = normalizeLight(cv, gray);
-    gray.delete();
-    if (mode === 'gray') {
-      norm.convertTo(norm, -1, 1.15, -30);
-      sharpen(cv, norm, 0.7, 1.2);
-      result = norm;
-    } else {
-      // 黑白：自適應門檻 + 深色區保底
-      const bw = new cv.Mat();
-      let block = Math.round(Math.min(outW, outH) / 45);
-      if (block % 2 === 0) block++;
-      block = Math.max(block, 15);
-      const sm = new cv.Mat();
-      cv.GaussianBlur(norm, sm, new cv.Size(3, 3), 0);
-      cv.adaptiveThreshold(sm, bw, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, block, 14);
-      const dark = new cv.Mat();
-      cv.threshold(sm, dark, 110, 255, cv.THRESH_BINARY);
-      cv.bitwise_and(bw, dark, bw);
-      dark.delete(); sm.delete(); norm.delete();
-      result = bw;
-    }
-  }
-
-  // 旋轉
-  const rot = ((rotation % 360) + 360) % 360;
+  const warped = new cv.Mat();
+  cv.warpPerspective(rgb, warped, M, new cv.Size(outW, outH), maxSide ? cv.INTER_AREA : cv.INTER_CUBIC, cv.BORDER_REPLICATE);
+  srcTri.delete(); dstTri.delete(); M.delete();
+  return warped;
+}
+function rgbFromBuffer(cv, buffer, width, height) {
+  const src = new cv.Mat(height, width, cv.CV_8UC4);
+  src.data.set(new Uint8Array(buffer));
+  const rgb = new cv.Mat();
+  cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
+  src.delete();
+  return rgb;
+}
+function finish(cv, result, rotation) {
+  const rot = (((rotation || 0) % 360) + 360) % 360;
   if (rot) {
     const r = new cv.Mat();
     const code = rot === 90 ? cv.ROTATE_90_CLOCKWISE : rot === 180 ? cv.ROTATE_180 : cv.ROTATE_90_COUNTERCLOCKWISE;
@@ -274,13 +369,36 @@ function processPage(cv, msg) {
     result.delete();
     result = r;
   }
-
   const rgba = new cv.Mat();
   cv.cvtColor(result, rgba, result.channels() === 1 ? cv.COLOR_GRAY2RGBA : cv.COLOR_RGB2RGBA);
   const out = new Uint8ClampedArray(rgba.data); // 複製
   const res = { buffer: out.buffer, width: rgba.cols, height: rgba.rows };
   result.delete(); rgba.delete();
   return res;
+}
+
+function processPage(cv, msg) {
+  const { buffer, width, height, corners, rotation, mode, params } = msg;
+  const rgb = rgbFromBuffer(cv, buffer, width, height);
+  const warped = warpPage(cv, rgb, width, height, corners);
+  rgb.delete();
+  return finish(cv, enhance(cv, warped, mode, params), rotation);
+}
+
+// 調整拉桿的即時預覽：先把校正好的小圖存在 worker 裡，之後每次只重跑增強
+let previewCache = null;
+function prepare(cv, msg) {
+  if (previewCache) { previewCache.mat.delete(); previewCache = null; }
+  const { key, buffer, width, height, corners, maxSide } = msg;
+  const rgb = rgbFromBuffer(cv, buffer, width, height);
+  const warped = warpPage(cv, rgb, width, height, corners, maxSide);
+  rgb.delete();
+  previewCache = { key, mat: warped };
+  return { width: warped.cols, height: warped.rows };
+}
+function renderPreview(cv, msg) {
+  if (!previewCache || previewCache.key !== msg.key) throw new Error('preview-missing');
+  return finish(cv, enhance(cv, previewCache.mat.clone(), msg.mode, msg.params), msg.rotation);
 }
 
 self.onmessage = async (e) => {
@@ -294,6 +412,14 @@ self.onmessage = async (e) => {
     } else if (type === 'process') {
       const r = processPage(cv, e.data);
       self.postMessage({ id, ok: true, result: r }, [r.buffer]);
+    } else if (type === 'prepare') {
+      self.postMessage({ id, ok: true, result: prepare(cv, e.data) });
+    } else if (type === 'render') {
+      const r = renderPreview(cv, e.data);
+      self.postMessage({ id, ok: true, result: r }, [r.buffer]);
+    } else if (type === 'release') {
+      if (previewCache) { previewCache.mat.delete(); previewCache = null; }
+      self.postMessage({ id, ok: true, result: null });
     }
   } catch (err) {
     let m = err && err.message ? err.message : String(err);

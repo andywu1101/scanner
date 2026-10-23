@@ -3,11 +3,23 @@
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
-  { id: 'color', name: '彩色' },
-  { id: 'gray', name: '灰階' },
   { id: 'bw', name: '黑白' },
+  { id: 'gray', name: '灰階' },
+  { id: 'color', name: '彩色' },
   { id: 'original', name: '原圖' },
 ];
+// 各模式的調整拉桿（數值與 worker.js 的 ADJ_DEFAULTS 對應）
+const S_EXP = { k: 'exposure', name: '曝光', min: -100, max: 100, def: 0 };
+const S_CON = { k: 'contrast', name: '對比', min: -100, max: 100, def: 0 };
+const S_SAT = { k: 'saturation', name: '飽和度', min: -100, max: 100, def: 0 };
+const S_TMP = { k: 'temp', name: '色溫', min: -100, max: 100, def: 0, lo: '冷', hi: '暖' };
+const ADJ = {
+  bw: [S_EXP, S_CON, { k: 'density', name: '濃淡', min: -100, max: 100, def: 0, lo: '淡', hi: '濃' },
+    { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 35 }, { k: 'despeckle', name: '去雜點', min: 0, max: 100, def: 20 }],
+  gray: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50 }],
+  color: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50 }, S_SAT, S_TMP],
+  original: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 0 }, S_SAT, S_TMP],
+};
 const MAX_PIXELS = 16000000; // iOS canvas 上限約 16.7M 像素
 
 /* ---------- 設定 ---------- */
@@ -18,6 +30,15 @@ const settings = (() => {
   if (s.v !== 2) { s.mode = 'bw'; s.v = 2; } // 1.1 起預設黑白
   return Object.assign({}, DEFAULTS, s);
 })();
+if (!settings.adj) settings.adj = {};
+function adjOf(mode) {
+  const o = {}, cur = settings.adj[mode] || {};
+  for (const d of ADJ[mode] || []) o[d.k] = cur[d.k] !== undefined ? cur[d.k] : d.def;
+  return o;
+}
+// 處理結果的「身分」：模式、旋轉、四角、該模式的調整數值，任何一項變了就要重算
+function procKey(p) { return JSON.stringify([p.mode, p.rotation || 0, p.corners, adjOf(p.mode)]); }
+function isStale(p) { return !p.processed || p.pkey !== procKey(p); }
 function saveSettings() { try { localStorage.setItem('cocoscan-settings', JSON.stringify(settings)); } catch (_) {} }
 
 /* ---------- IndexedDB ---------- */
@@ -171,12 +192,13 @@ function enqueue(pageId) {
 }
 async function processPageNow(pageId) {
   const page = await DB.get('pages', pageId);
-  if (!page) return;
+  if (!page || !isStale(page)) return;
+  const key = procKey(page);
   await whenReady();
   const d = await decodeFull(page.original);
   const r = await wcall('process', {
     buffer: d.data.buffer, width: d.width, height: d.height,
-    corners: page.corners, rotation: page.rotation || 0, mode: page.mode,
+    corners: page.corners, rotation: page.rotation || 0, mode: page.mode, params: adjOf(page.mode),
   }, [d.data.buffer]);
   const c = canvasOf(r.width, r.height);
   c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
@@ -190,11 +212,16 @@ async function processPageNow(pageId) {
   // 期間可能被修改或刪除，重新讀取
   const latest = await DB.get('pages', pageId);
   if (!latest) return;
-  if (latest.mode !== page.mode || latest.rotation !== page.rotation || JSON.stringify(latest.corners) !== JSON.stringify(page.corners)) return;
+  if (procKey(latest) !== key) return;
+  latest.pkey = key;
   latest.processed = processed; latest.thumb = thumb; latest.ver = (latest.ver || 0) + 1; latest.outW = r.width; latest.outH = r.height;
   await DB.put('pages', latest);
 }
 async function waitQueue() { await queue; }
+// 舊頁面不主動重算，打開或匯出時才依目前的數值更新
+function ensureFresh(pages) {
+  for (const p of pages) if (p && isStale(p) && !processing.has(p.id)) enqueue(p.id);
+}
 
 async function createDoc() {
   const now = new Date();
@@ -230,6 +257,7 @@ function go(name, push = true) {
 history.replaceState({ s: 'home' }, '');
 window.addEventListener('popstate', (e) => {
   const s = (e.state && e.state.s) || 'home';
+  if (adj.open) closeAdjust();
   if (current === 'live') stopLive();
   if (current === 'crop' && cropCtx && cropCtx.onCancel) { const f = cropCtx.onCancel; cropCtx = null; f(true); }
   closeSheet();
@@ -264,6 +292,7 @@ const ICON = {
   share: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 6l-4-4-4 4M12 2v13"/></svg>',
   down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>',
   edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>',
+  sliders: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>',
   folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>',
 };
@@ -325,6 +354,7 @@ async function renderHome() {
 function updateHomeStrip(pages) {
   const strip = $('#homeStrip');
   if (!strip) return;
+  ensureFresh(pages);
   const docId = $('#homeBody').dataset.doc;
   strip.innerHTML = '';
   pages.forEach((p, i) => {
@@ -525,7 +555,8 @@ $('#fileGallery').addEventListener('change', async (e) => {
 /* ---------- 即時掃描 ---------- */
 const live = { running: false };
 const STABLE_MS = 500;   // 鎖定後大致不動多久就拍
-const STABLE_TOL = 0.03;  // 容許的手抖（畫面比例）
+const STABLE_TOL = 0.03;
+const EDGE_MARGIN = 0.03; // 紙張四角至少離畫面邊緣 3%  // 容許的手抖（畫面比例）
 async function startLive(docId) {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     toast('此瀏覽器不支援即時相機，請改用「高畫質拍照」'); return;
@@ -602,7 +633,7 @@ function medianQuad(list) {
   return [0, 1, 2, 3].map((i) => [med(list.map((q) => q[i][0])), med(list.map((q) => q[i][1]))]);
 }
 function resetLock() {
-  Object.assign(live, { cand: [], acc: [], lockQ: null, outliers: 0, miss: 0, anchorQ: null, stableSince: 0, progress: 0, best: null, prevQs: null, lastQs: null });
+  Object.assign(live, { cand: [], acc: [], lockQ: null, outliers: 0, miss: 0, anchorQ: null, stableSince: 0, progress: 0, best: null, prevQs: null, lastQs: null, edge: false });
   live.lastQuad = null;
 }
 // 清晰度（梯度能量），用來從穩定期間挑最清楚的一格
@@ -767,6 +798,13 @@ function onDetect(r, sig, full, sharp, gt) {
   const progress = Math.min(1, (now - live.stableSince) / STABLE_MS);
   live.progress = progress;
 
+  // 紙張太靠近畫面邊緣：照片四周會沒有空間可以重新裁切，先不拍
+  live.edge = live.lockQ.some(([x, y]) => x < EDGE_MARGIN || x > 1 - EDGE_MARGIN || y < EDGE_MARGIN || y > 1 - EDGE_MARGIN);
+  if (live.edge) {
+    live.stableSince = now; live.progress = 0; live.best = null;
+    setRing(0); setHint('請稍微拉遠一點'); return;
+  }
+
   // 記錄倒數期間最清楚的一格
   if (full && (!live.best || sharp > live.best.sharp)) live.best = { canvas: full, sharp, quad: q.map((p) => p.slice()) };
 
@@ -806,10 +844,10 @@ function drawOverlay() {
     ctx.globalAlpha = live.fade;
     ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))); ctx.closePath();
     // 綠色隨倒數逐漸變濃
-    ctx.fillStyle = `rgba(143,179,138,${0.12 + 0.3 * pr})`;
+    ctx.fillStyle = live.edge ? 'rgba(242,196,141,.18)' : `rgba(143,179,138,${0.12 + 0.3 * pr})`;
     ctx.fill();
     ctx.lineWidth = 3 + pr; ctx.lineJoin = 'round';
-    ctx.strokeStyle = '#A8D4A1';
+    ctx.strokeStyle = live.edge ? '#F2C48D' : '#A8D4A1';
     ctx.stroke();
     ctx.fillStyle = '#fff';
     pts.forEach((p) => { ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, 7); ctx.fill(); });
@@ -905,7 +943,7 @@ let cropCtx = null;
 async function openCrop(opts) {
   if (cropCtx && cropCtx.url) URL.revokeObjectURL(cropCtx.url);
   const { img, url } = await loadImg(opts.blob);
-  cropCtx = Object.assign({ url, nat: [img.naturalWidth, img.naturalHeight], corners: opts.corners.map((p) => p.slice()) }, opts);
+  cropCtx = Object.assign({}, opts, { url, nat: [img.naturalWidth, img.naturalHeight], corners: opts.corners.map((p) => p.slice()), drag: null });
   const ci = $('#cropImg'); ci.src = url;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
   $('#cropNext').style.display = opts.burst ? '' : 'none';
@@ -934,52 +972,114 @@ function drawCrop() {
   let html = `<defs><mask id="m"><rect x="-40" y="-40" width="${w + 80}" height="${h + 80}" fill="#fff"/><polygon points="${poly}" fill="#000"/></mask></defs>`;
   html += `<rect x="0" y="0" width="${w}" height="${h}" fill="rgba(28,19,14,.55)" mask="url(#m)"/>`;
   html += `<polygon points="${poly}" fill="none" stroke="#F2C48D" stroke-width="2.5" stroke-linejoin="round"/>`;
-  P.forEach((p) => { html += `<circle cx="${p[0]}" cy="${p[1]}" r="13" fill="rgba(242,196,141,.25)" stroke="#fff" stroke-width="2.5"/><circle cx="${p[0]}" cy="${p[1]}" r="3.5" fill="#fff"/>`; });
+  // 四條邊的中點把手（拖動只移動那一條邊）
+  for (let i = 0; i < 4; i++) {
+    const a = P[i], b = P[(i + 1) % 4];
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+    const ang = Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI;
+    const on = cropCtx.drag && cropCtx.drag.type === 'edge' && cropCtx.drag.i === i;
+    html += `<rect x="${mx - 15}" y="${my - 4.5}" width="30" height="9" rx="4.5" transform="rotate(${ang} ${mx} ${my})" fill="${on ? '#F2C48D' : '#fff'}" stroke="rgba(28,19,14,.35)" stroke-width="1"/>`;
+  }
+  P.forEach((p, i) => {
+    const on = cropCtx.drag && cropCtx.drag.type === 'corner' && cropCtx.drag.i === i;
+    html += `<circle cx="${p[0]}" cy="${p[1]}" r="13" fill="${on ? 'rgba(242,196,141,.55)' : 'rgba(242,196,141,.25)'}" stroke="#fff" stroke-width="2.5"/><circle cx="${p[0]}" cy="${p[1]}" r="3.5" fill="#fff"/>`;
+  });
   $('#cropSvg').innerHTML = html;
 }
 (() => {
   const stage = $('#cropStage');
-  let drag = -1, off = [0, 0];
+  const clamp = (v) => Math.min(1, Math.max(0, v));
+  // 畫面座標（相對於圖片左上角）
   const local = (e) => { const b = stage.getBoundingClientRect(); return [e.clientX - b.left - cropCtx.rect.x, e.clientY - b.top - cropCtx.rect.y]; };
   stage.addEventListener('pointerdown', (e) => {
-    if (!cropCtx) return;
+    if (!cropCtx || cropCtx.drag) return;
     const [lx, ly] = local(e);
     const { w, h } = cropCtx.rect;
-    let best = -1, bd = 46;
-    cropCtx.corners.forEach((p, i) => { const d = Math.hypot(p[0] * w - lx, p[1] * h - ly); if (d < bd) { bd = d; best = i; } });
-    if (best < 0) return;
-    drag = best; off = [cropCtx.corners[best][0] * w - lx, cropCtx.corners[best][1] * h - ly];
+    const P = cropCtx.corners.map((p) => [p[0] * w, p[1] * h]);
+    // 角優先，其次是邊的中點把手
+    let best = null, bd = 44;
+    P.forEach((p, i) => { const d = Math.hypot(p[0] - lx, p[1] - ly); if (d < bd) { bd = d; best = { type: 'corner', i }; } });
+    if (!best) {
+      bd = 34;
+      for (let i = 0; i < 4; i++) {
+        const a = P[i], b = P[(i + 1) % 4];
+        const d = Math.hypot((a[0] + b[0]) / 2 - lx, (a[1] + b[1]) / 2 - ly);
+        if (d < bd) { bd = d; best = { type: 'edge', i }; }
+      }
+    }
+    if (!best) return;
+    best.start = [lx, ly];
+    best.c0 = cropCtx.corners.map((p) => p.slice());
+    cropCtx.drag = best;
     stage.setPointerCapture(e.pointerId);
     e.preventDefault();
-    loupe(e);
+    drawCrop(); loupe(lx, ly);
   });
   stage.addEventListener('pointermove', (e) => {
-    if (drag < 0) return;
+    const g = cropCtx && cropCtx.drag;
+    if (!g) return;
     const [lx, ly] = local(e);
     const { w, h } = cropCtx.rect;
-    cropCtx.corners[drag] = [Math.min(1, Math.max(0, (lx + off[0]) / w)), Math.min(1, Math.max(0, (ly + off[1]) / h))];
-    drawCrop(); loupe(e);
+    const dx = lx - g.start[0], dy = ly - g.start[1];
+    if (g.type === 'corner') {
+      const c = g.c0[g.i];
+      cropCtx.corners[g.i] = [clamp(c[0] + dx / w), clamp(c[1] + dy / h)];
+    } else {
+      // 邊：沿著與這條邊垂直的方向平移，兩端的角一起移動
+      const i = g.i, j = (i + 1) % 4;
+      const a = [g.c0[i][0] * w, g.c0[i][1] * h], b = [g.c0[j][0] * w, g.c0[j][1] * h];
+      const ex = b[0] - a[0], ey = b[1] - a[1], len = Math.hypot(ex, ey) || 1;
+      const nx = -ey / len, ny = ex / len;
+      const dn = dx * nx + dy * ny;
+      cropCtx.corners[i] = [clamp(g.c0[i][0] + (dn * nx) / w), clamp(g.c0[i][1] + (dn * ny) / h)];
+      cropCtx.corners[j] = [clamp(g.c0[j][0] + (dn * nx) / w), clamp(g.c0[j][1] + (dn * ny) / h)];
+    }
+    drawCrop(); loupe(lx, ly);
   });
-  const end = () => { drag = -1; $('#loupe').style.display = 'none'; };
+  const end = () => { if (!cropCtx) return; cropCtx.drag = null; $('#loupe').style.display = 'none'; drawCrop(); };
   stage.addEventListener('pointerup', end);
   stage.addEventListener('pointercancel', end);
-  function loupe() {
+
+  // 放大鏡：顯示正在拖的角（或邊的中點）附近，直接畫出裁切邊、框外變暗；跟著手指，顯示在手指上方
+  function loupe(fx, fy) {
+    const g = cropCtx.drag;
     const L = $('#loupe');
-    const p = cropCtx.corners[drag];
-    const [nw, nh] = cropCtx.nat;
     const ctx = L.getContext('2d');
-    const zoom = 3;
-    const k = nw / cropCtx.rect.w; // 原圖像素 / 畫面像素
-    const srcSize = (132 / zoom) * k;
-    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, 264, 264);
+    const { w, h, x: rx, y: ry } = cropCtx.rect;
+    const [nw, nh] = cropCtx.nat;
+    const C = cropCtx.corners;
+    let fxN, fyN;
+    if (g.type === 'corner') [fxN, fyN] = C[g.i];
+    else { const a = C[g.i], b = C[(g.i + 1) % 4]; fxN = (a[0] + b[0]) / 2; fyN = (a[1] + b[1]) / 2; }
+    const R = 264, half = R / 2;           // 畫布像素（CSS 132px，2 倍）
+    const scale = 2.6 * 2 * (w / nw);       // 原圖像素 → 放大鏡畫布像素
+    const cx = fxN * nw, cy = fyN * nh;
+    ctx.save();
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, R, R);
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage($('#cropImg'), p[0] * nw - srcSize / 2, p[1] * nh - srcSize / 2, srcSize, srcSize, 0, 0, 264, 264);
-    ctx.strokeStyle = '#F2C48D'; ctx.lineWidth = 2.5;
-    ctx.beginPath(); ctx.moveTo(132, 108); ctx.lineTo(132, 156); ctx.moveTo(108, 132); ctx.lineTo(156, 132); ctx.stroke();
-    const leftSide = p[0] < 0.5;
-    L.style.display = 'block';
-    L.style.left = leftSide ? '' : '12px';
-    L.style.right = leftSide ? '12px' : '';
+    const sw = R / scale;
+    ctx.drawImage($('#cropImg'), cx - sw / 2, cy - sw / 2, sw, sw, 0, 0, R, R);
+    const toL = (p) => [(p[0] * nw - cx) * scale + half, (p[1] * nh - cy) * scale + half];
+    const Q = C.map(toL);
+    // 框外變暗
+    ctx.beginPath();
+    ctx.rect(-10, -10, R + 20, R + 20);
+    ctx.moveTo(Q[0][0], Q[0][1]); for (let k = 1; k < 4; k++) ctx.lineTo(Q[k][0], Q[k][1]); ctx.closePath();
+    ctx.fillStyle = 'rgba(28,19,14,.5)';
+    ctx.fill('evenodd');
+    // 裁切邊
+    ctx.beginPath();
+    ctx.moveTo(Q[0][0], Q[0][1]); for (let k = 1; k < 4; k++) ctx.lineTo(Q[k][0], Q[k][1]); ctx.closePath();
+    ctx.strokeStyle = '#F2C48D'; ctx.lineWidth = 4; ctx.lineJoin = 'miter';
+    ctx.stroke();
+    ctx.restore();
+    // 位置：手指上方約 95px；太靠上就放到手指下方
+    const st = $('#cropStage').getBoundingClientRect();
+    const sx = rx + fx, sy = ry + fy, size = 132, gap = 95;
+    let top = sy - gap - size / 2;
+    if (top < 6) top = sy + gap - size / 2;
+    const left = Math.min(st.width - size - 6, Math.max(6, sx - size / 2));
+    Object.assign(L.style, { display: 'block', left: left + 'px', top: top + 'px', right: '' });
   }
 })();
 window.addEventListener('resize', () => { if (current === 'crop') layoutCrop(); if (current === 'page') fitView(); });
@@ -1033,6 +1133,7 @@ function updateDocSelUI(total) {
 async function renderDoc() {
   const { doc, pages } = await getDocPages(state.docId);
   if (!doc) return;
+  ensureFresh(pages);
   if (docSel.docId !== doc.id) { docSel.on = false; docSel.ids.clear(); docSel.docId = doc.id; }
   $('#docTitle').textContent = doc.title;
   const g = $('#pageGrid'); g.innerHTML = '';
@@ -1181,9 +1282,12 @@ async function renderPage(keepZoom) {
     };
     img.src = url;
   }
-  $('#viewBusy').style.display = processing.has(p.id) || !p.processed ? 'block' : 'none';
-  $('#modeChips').innerHTML = MODES.map((m) => `<button class="chip ${p.mode === m.id ? 'on' : ''}" data-m="${m.id}">${m.name}</button>`).join('');
-  $('#modeChips').querySelectorAll('.chip').forEach((b) => b.onclick = () => updatePage({ mode: b.dataset.m }));
+  ensureFresh([p]);
+  $('#viewBusy').style.display = processing.has(p.id) || isStale(p) ? 'block' : 'none';
+  $('#modeChips').innerHTML = MODES.map((m) => `<button class="chip ${p.mode === m.id ? 'on' : ''}" data-m="${m.id}">${m.name}</button>`).join('') +
+    `<button class="chip adj" id="adjBtn">${ICON.sliders}調整</button>`;
+  $('#modeChips').querySelectorAll('.chip[data-m]').forEach((b) => b.onclick = () => updatePage({ mode: b.dataset.m }));
+  $('#adjBtn').onclick = openAdjust;
 }
 function fitView() {
   const img = $('#viewImg');
@@ -1261,7 +1365,7 @@ function applyZoom(gesturing) {
   const up = (e) => {
     const p = pts.get(e.pointerId);
     pts.delete(e.pointerId);
-    if (swipeStart && p && pts.size === 0) {
+    if (swipeStart && p && pts.size === 0 && !adj.open) {
       const dx = pos(e)[0] - swipeStart[0], dy = pos(e)[1] - swipeStart[1];
       if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
     }
@@ -1321,6 +1425,106 @@ $('#pageDel').onclick = async () => {
   }
   await DB.put('docs', doc);
   renderPage();
+};
+
+
+/* ---------- 細部調整（每個模式一組數值，會記住） ---------- */
+const adj = { open: false, ready: false, busy: false, pending: false, key: null, mode: null, snap: null };
+async function openAdjust() {
+  const p = viewPage;
+  if (!p || adj.open) return;
+  Object.assign(adj, { open: true, ready: false, busy: false, pending: false, mode: p.mode, key: p.id + ':' + Date.now(), snap: JSON.stringify(adjOf(p.mode)), rotation: p.rotation || 0 });
+  $('#page').classList.add('adjusting');
+  buildSliders();
+  history.pushState({ s: 'page', doc: state.docId, i: state.pageIndex, adj: 1 }, '');
+  try {
+    await whenReady();
+    const st = $('#viewStage').getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const maxSide = Math.min(2000, Math.ceil(Math.max(st.width, st.height) * dpr));
+    const { img, url } = await loadImg(p.original);
+    const d = smallFrame(img, 2600);
+    URL.revokeObjectURL(url);
+    if (!adj.open) return;
+    await wcall('prepare', { key: adj.key, buffer: d.data.buffer, width: d.width, height: d.height, corners: p.corners, maxSide }, [d.data.buffer]);
+    if (!adj.open) return;
+    adj.ready = true;
+    renderAdj();
+  } catch (e) { console.error(e); toast('預覽失敗：' + e.message); }
+}
+function buildSliders() {
+  const mode = adj.mode;
+  $('#adjTitle').textContent = MODES.find((m) => m.id === mode).name + '調整';
+  $('#adjNote').textContent = `會套用到所有「${MODES.find((m) => m.id === mode).name}」頁面・點兩下名稱可單獨重設`;
+  const vals = adjOf(mode);
+  const box = $('#adjSliders');
+  box.innerHTML = '';
+  for (const d of ADJ[mode]) {
+    const row = document.createElement('div');
+    row.className = 'sl';
+    const defPct = ((d.def - d.min) / (d.max - d.min)) * 100;
+    row.innerHTML = `<div class="slh"><span class="sln">${d.name}</span>${d.lo ? `<span class="slr">${d.lo} ↔ ${d.hi}</span>` : ''}<output></output></div>
+      <input type="range" min="${d.min}" max="${d.max}" step="1" style="--def:${defPct}%">`;
+    const inp = row.querySelector('input'), out = row.querySelector('output');
+    const show = () => { const v = +inp.value; out.textContent = d.min < 0 && v > 0 ? '+' + v : String(v); out.classList.toggle('chg', v !== d.def); };
+    inp.value = vals[d.k]; show();
+    inp.addEventListener('input', () => {
+      (settings.adj[mode] = settings.adj[mode] || {})[d.k] = +inp.value;
+      show(); renderAdj();
+    });
+    inp.addEventListener('change', saveSettings);
+    let lastTap = 0;
+    row.querySelector('.slh').addEventListener('click', () => {
+      const now = Date.now();
+      if (now - lastTap < 350) {
+        inp.value = d.def; (settings.adj[mode] = settings.adj[mode] || {})[d.k] = d.def;
+        show(); renderAdj(); saveSettings();
+      }
+      lastTap = now;
+    });
+    box.appendChild(row);
+  }
+}
+async function renderAdj() {
+  if (!adj.open || !adj.ready) return;
+  if (adj.busy) { adj.pending = true; return; }
+  adj.busy = true;
+  try {
+    const r = await wcall('render', { key: adj.key, mode: adj.mode, params: adjOf(adj.mode), rotation: adj.rotation });
+    if (adj.open) drawAdj(r);
+  } catch (e) { console.warn(e); }
+  adj.busy = false;
+  if (adj.pending) { adj.pending = false; renderAdj(); }
+}
+function drawAdj(r) {
+  const c = $('#adjCanvas');
+  if (c.width !== r.width || c.height !== r.height) { c.width = r.width; c.height = r.height; }
+  c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
+  const st = $('#viewStage').getBoundingClientRect();
+  const pad = 12;
+  const s = Math.min((st.width - pad * 2) / r.width, (st.height - pad * 2) / r.height);
+  const w = r.width * s, h = r.height * s;
+  Object.assign(c.style, { width: w + 'px', height: h + 'px', left: (st.width - w) / 2 + 'px', top: (st.height - h) / 2 + 'px', display: 'block' });
+}
+function closeAdjust() {
+  if (!adj.open) return;
+  adj.open = false; adj.ready = false;
+  $('#page').classList.remove('adjusting');
+  $('#adjCanvas').style.display = 'none';
+  wcall('release', {}).catch(() => {});
+  saveSettings();
+  const changed = JSON.stringify(adjOf(adj.mode)) !== adj.snap;
+  if (changed) {
+    if (viewPage) enqueue(viewPage.id); // 先處理正在看的這頁
+    getDocPages(state.docId).then(({ pages }) => ensureFresh(pages));
+    toast(`已更新「${MODES.find((m) => m.id === adj.mode).name}」的設定`);
+  }
+  renderPage(true);
+}
+$('#adjDone').onclick = () => history.back();
+$('#adjReset').onclick = () => {
+  settings.adj[adj.mode] = {};
+  saveSettings(); buildSliders(); renderAdj();
 };
 
 /* ---------- PDF 產生（自製，JPEG 原檔直嵌、黑白頁 1-bit 無損） ---------- */
@@ -1450,6 +1654,7 @@ function openPdfSheet() {
       const name = readName(s);
       closeSheet(); busy('等待頁面處理…');
       try {
+        ensureFresh((await getDocPages(state.docId)).pages);
         await waitQueue();
         const { doc, pages } = await getDocPages(state.docId);
         const ready = pages.filter((p) => p.processed);
@@ -1469,6 +1674,7 @@ $('#docImg').onclick = () => openSheet(`<h3>匯出圖片</h3><div class="lbl">�
     const name = readName(s);
     closeSheet(); busy('等待頁面處理…');
     try {
+      ensureFresh((await getDocPages(state.docId)).pages);
       await waitQueue();
       const { pages } = await getDocPages(state.docId);
       const ready = pages.filter((p) => p.processed);
@@ -1501,7 +1707,8 @@ $('#btnSettings').onclick = () => {
     <div class="switch"><span>即時掃描自動拍攝<small>文件穩定約 1 秒後自動按快門</small></span><button class="tg ${settings.autoShutter ? 'on' : ''}" data-k="autoShutter"></button></div>
     <div class="switch"><span>拍照後先確認裁切<small>高畫質拍照後進入四角微調畫面</small></span><button class="tg ${settings.confirmCrop ? 'on' : ''}" data-k="confirmCrop"></button></div>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會以相機全解析度拍攝；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
-    <div class="note" id="storeInfo"></div>`, (s) => {
+    <div class="note" id="storeInfo"></div>
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.4</div>`, (s) => {
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));
@@ -1512,6 +1719,32 @@ $('#btnSettings').onclick = () => {
     });
   });
 };
+
+/* ---------- iOS 26 主畫面 App 高度修正 ----------
+   iOS 26 加到主畫面的網頁 App，畫面高度會少掉約一個狀態列高，造成整體偏上、底部空白。
+   偵測到這種情況時，直接用實際螢幕高度排版。 */
+const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isStandalone = () => navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+function fixViewport() {
+  const root = document.documentElement;
+  if (!isIOS || !isStandalone()) { root.style.removeProperty('--app-h'); return; }
+  const portrait = matchMedia('(orientation: portrait)').matches;
+  const full = portrait ? Math.max(screen.width, screen.height) : Math.min(screen.width, screen.height);
+  if (window.innerHeight < full - 2) root.style.setProperty('--app-h', full + 'px');
+  else root.style.removeProperty('--app-h');
+}
+fixViewport();
+window.addEventListener('resize', fixViewport);
+window.addEventListener('orientationchange', () => setTimeout(fixViewport, 300));
+document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(fixViewport, 100); });
+function viewportInfo() {
+  const d = document.createElement('div');
+  d.style.cssText = 'position:fixed;visibility:hidden;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)';
+  document.body.appendChild(d);
+  const cs = getComputedStyle(d), t = cs.paddingTop, b = cs.paddingBottom;
+  d.remove();
+  return `畫面 ${innerWidth}×${innerHeight}・螢幕 ${screen.width}×${screen.height}・上 ${t}・下 ${b}・修正 ${document.documentElement.style.getPropertyValue('--app-h') || '無'}`;
+}
 
 /* ---------- 啟動 ---------- */
 renderHome();
