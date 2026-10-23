@@ -33,14 +33,24 @@ const settings = (() => {
   if (s.v !== 2) { s.mode = 'bw'; s.v = 2; } // 1.1 起預設黑白
   return Object.assign({}, DEFAULTS, s);
 })();
+/* 調整數值分三層（1.11）：
+   1. App 預設值（ADJ 的 def）
+   2. 文件的統一設定 doc.adj[mode]（新文件從 settings.adj＝上一次統一調整的數值開始）
+   3. 單頁設定 page.adj[mode]（有值＝這一頁單獨調整過，只影響這一頁）
+   docAdjCache 是所有文件 doc.adj 的記憶體副本，讓 procKey 可以同步算出每一頁實際用的數值 */
 if (!settings.adj) settings.adj = {};
-function adjOf(mode) {
-  const o = {}, cur = settings.adj[mode] || {};
-  for (const d of ADJ[mode] || []) o[d.k] = cur[d.k] !== undefined ? cur[d.k] : d.def;
+const docAdjCache = new Map();
+function fillAdj(mode, cur) {
+  const o = {};
+  for (const d of ADJ[mode] || []) o[d.k] = cur && cur[d.k] !== undefined ? cur[d.k] : d.def;
   return o;
 }
-// 處理結果的「身分」：模式、旋轉、四角、該模式的調整數值，任何一項變了就要重算
-function procKey(p) { return JSON.stringify([p.mode, p.rotation || 0, p.corners, p.curve || null, adjOf(p.mode), settings.upscale]); }
+function docAdjOf(docId, mode) { const a = docAdjCache.get(docId); return fillAdj(mode, a ? a[mode] : settings.adj[mode]); }
+function pageAdjOf(p, mode = p.mode) { return p.adj && p.adj[mode] ? fillAdj(mode, p.adj[mode]) : docAdjOf(p.docId, mode); }
+const pageCustom = (p) => !!(p && p.adj && p.adj[p.mode]);
+const cloneAdj = (a) => JSON.parse(JSON.stringify(a || {}));
+// 處理結果的「身分」：模式、旋轉、四角、這一頁實際用的調整數值，任何一項變了就要重算
+function procKey(p) { return JSON.stringify([p.mode, p.rotation || 0, p.corners, p.curve || null, pageAdjOf(p), settings.upscale]); }
 function isStale(p) { return !p.processed || p.pkey !== procKey(p); }
 function saveSettings() { try { localStorage.setItem('cocoscan-settings', JSON.stringify(settings)); } catch (_) {} }
 
@@ -204,7 +214,7 @@ async function processPageNow(pageId) {
   const r = await wcall('process', {
     buffer: d.data.buffer, width: d.width, height: d.height,
     corners: page.corners, curve: page.curve || null, upscale: settings.upscale,
-    rotation: page.rotation || 0, mode: page.mode, params: adjOf(page.mode),
+    rotation: page.rotation || 0, mode: page.mode, params: pageAdjOf(page),
   }, [d.data.buffer]);
   const c = canvasOf(r.width, r.height);
   c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
@@ -233,11 +243,19 @@ async function createDoc() {
   const now = new Date();
   const p = (n) => String(n).padStart(2, '0');
   const doc = {
-    id: uid(), created: Date.now(), updated: Date.now(), pageIds: [],
+    id: uid(), created: Date.now(), updated: Date.now(), pageIds: [], adj: cloneAdj(settings.adj),
     title: `掃描 ${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}`,
   };
   await DB.put('docs', doc);
+  docAdjCache.set(doc.id, doc.adj);
   return doc;
+}
+// 啟動時載入每份文件的統一設定；1.10 以前的文件沒有 doc.adj，以當時的數值（settings.adj）為起點，看起來不會變
+async function loadDocAdj() {
+  for (const d of await DB.all('docs')) {
+    if (!d.adj) { d.adj = cloneAdj(settings.adj); await DB.put('docs', d); }
+    docAdjCache.set(d.id, d.adj);
+  }
 }
 async function addPage(docId, blob, corners, curve) {
   const page = { id: uid(), docId, original: blob, corners, curve: curve || null, rotation: 0, mode: settings.mode, created: Date.now() };
@@ -439,11 +457,17 @@ $('#libMerge').onclick = async () => {
     const docs = (await Promise.all(lib.order.map((id) => DB.get('docs', id)))).filter(Boolean);
     const merged = await createDoc();
     merged.title = docs[0].title + '（合併）';
+    merged.adj = cloneAdj(docs[0].adj || settings.adj); docAdjCache.set(merged.id, merged.adj);
     for (const d of docs) {
       for (const pid of d.pageIds) {
         const p = await DB.get('pages', pid);
         if (!p) continue;
-        const copy = Object.assign({}, p, { id: uid(), docId: merged.id, created: Date.now() });
+        const copy = Object.assign({}, p, { id: uid(), docId: merged.id, created: Date.now(), adj: cloneAdj(p.adj) });
+        // 合併後統一設定改成第一份的；原本跟著自己文件設定的頁面，數值不同時記成單頁設定，維持原樣
+        if (!copy.adj[p.mode]) {
+          const was = pageAdjOf(p), now = docAdjOf(merged.id, p.mode);
+          if (JSON.stringify(was) !== JSON.stringify(now)) copy.adj[p.mode] = was;
+        }
         await DB.put('pages', copy);
         merged.pageIds.push(copy.id);
       }
@@ -1422,7 +1446,7 @@ function setupSort(g) {
 function fillPageThumb(el, p, i) {
   const src = p.thumb || p.original;
   const wait = !p.thumb || processing.has(p.id);
-  el.innerHTML = `<img src="${blobUrl('t:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span class="no">${i + 1}</span>${wait ? '<span class="wait"><span class="spin sm"></span></span>' : ''}`;
+  el.innerHTML = `<img src="${blobUrl('t:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span class="no">${i + 1}</span>${pageCustom(p) ? `<span class="custom" title="這一頁單獨調整過">${ICON.sliders}</span>` : ''}${wait ? '<span class="wait"><span class="spin sm"></span></span>' : ''}`;
 }
 async function onPageUpdated(pageId) {
   if (current === 'doc') {
@@ -1459,14 +1483,29 @@ $('#docMore').onclick = () => openSheet(`<h3>文件</h3>
     history.back();
   };
 });
-$('#docMode').onclick = () => openSheet(`<h3>套用到全部頁面</h3>${MODES.map((m) => `<button class="srow" data-m="${m.id}"><span>${m.name}<span class="sub">${modeDesc(m.id)}</span></span></button>`).join('')}`, (s) => {
+$('#docMode').onclick = () => openSheet(`<h3>統一調整</h3><div class="note" style="margin:-6px 4px 10px">選一個模式套用到全部頁面，接著可以調整這份文件統一的數值</div>${MODES.map((m) => `<button class="srow" data-m="${m.id}"><span>${m.name}<span class="sub">${modeDesc(m.id)}</span></span></button>`).join('')}`, (s) => {
   s.querySelectorAll('.srow').forEach((b) => b.onclick = async () => {
     closeSheet();
-    const { pages } = await getDocPages(state.docId);
-    for (const p of pages) { if (p.mode !== b.dataset.m) { p.mode = b.dataset.m; await DB.put('pages', p); enqueue(p.id); } }
-    renderDoc();
+    openDocAdjust(b.dataset.m);
   });
 });
+// 統一調整：全部頁面改成這個模式，再進入調整畫面（預覽第一頁，可左右切換預覽的頁面）
+async function openDocAdjust(mode) {
+  const { pages } = await getDocPages(state.docId);
+  if (!pages.length) return;
+  for (const p of pages) { if (p.mode !== mode) { p.mode = mode; await DB.put('pages', p); } } // 先不重算，按完成後一起處理
+  state.pageIndex = 0;
+  viewPage = pages[0];
+  history.pushState({ s: 'page', doc: state.docId, i: 0, adj: 1, scope: 'doc' }, '');
+  show('page');
+  setAdjNav(pages.length);
+  openAdjust('doc');
+}
+function setAdjNav(n) {
+  $('#pageTitle').textContent = `統一調整・預覽第 ${state.pageIndex + 1} / ${n} 頁`;
+  $('#prevBtn').style.visibility = state.pageIndex > 0 ? 'visible' : 'hidden';
+  $('#nextBtn').style.visibility = state.pageIndex < n - 1 ? 'visible' : 'hidden';
+}
 function modeDesc(id) {
   return { color: '提亮紙張、去除陰影，保留色彩', gray: '去陰影後轉灰階，柔和清楚', bw: '純黑白，最適合樂譜、講義、文字', original: '只裁切校正，不做色彩處理' }[id];
 }
@@ -1598,8 +1637,8 @@ function applyZoom(gesturing) {
   stage.addEventListener('pointercancel', up);
 })();
 function step(d) { state.pageIndex += d; zoom.s = 1; renderPage(); history.replaceState({ s: 'page', doc: state.docId, i: state.pageIndex }, ''); }
-$('#prevBtn').onclick = () => step(-1);
-$('#nextBtn').onclick = () => step(1);
+$('#prevBtn').onclick = () => (adj.open && adj.scope === 'doc' ? adjSwitch(-1) : step(-1));
+$('#nextBtn').onclick = () => (adj.open && adj.scope === 'doc' ? adjSwitch(1) : step(1));
 $('#pageBack').onclick = () => history.back();
 async function updatePage(patch) {
   const p = await DB.get('pages', viewPage.id);
@@ -1649,36 +1688,50 @@ $('#pageDel').onclick = async () => {
 };
 
 
-/* ---------- 細部調整（每個模式一組數值，會記住） ----------
-   一次一條拉桿；預覽可放大，放開後以全解析度重算看得到的區域；按住預覽看預設數值 */
-const adj = { open: false, ready: false, busy: false, pending: false, key: null, mode: null, snap: null, active: null, regionSeq: 0, comparing: false };
+/* ---------- 細部調整（1.11 起分「單頁」與「統一調整」兩種） ----------
+   一次一條拉桿；預覽可放大，放開後以全解析度重算看得到的區域；按住預覽看對照數值
+   scope 'page'：只改這一頁（page.adj），對照／重設＝這份文件的統一設定
+   scope 'doc' ：改整份文件（doc.adj），對照／重設＝App 預設值；可左右切換預覽的頁面 */
+const adj = { open: false, ready: false, busy: false, pending: false, key: null, mode: null, snap: null, active: null, regionSeq: 0, comparing: false, scope: 'page', vals: null, ref: null };
 const defaultsOf = (mode) => Object.fromEntries(ADJ[mode].map((d) => [d.k, d.def]));
 const rotSwap = (r) => r === 90 || r === 270;
-async function openAdjust() {
+async function openAdjust(scope) {
+  if (scope !== 'doc') scope = 'page'; // 由按鈕直接呼叫時會傳進事件物件
   const p = viewPage;
   if (!p || adj.open) return;
+  const vals = scope === 'doc' ? docAdjOf(p.docId, p.mode) : pageAdjOf(p);
+  const ref = scope === 'doc' ? defaultsOf(p.mode) : docAdjOf(p.docId, p.mode);
   Object.assign(adj, {
-    open: true, ready: false, busy: false, pending: false, mode: p.mode, key: p.id + ':' + Date.now(),
-    snap: JSON.stringify(adjOf(p.mode)), rotation: p.rotation || 0, comparing: false, defImg: null,
+    open: true, ready: false, busy: false, pending: false, mode: p.mode, scope, vals, ref,
+    snap: JSON.stringify(vals), comparing: false, defImg: null,
     active: adj.mode === p.mode && adj.active ? adj.active : ADJ[p.mode][0].k,
   });
   $('#page').classList.add('adjusting');
-  hideDetail();
+  $('#page').classList.toggle('adj-doc', scope === 'doc');
+  $('#cmpTag').textContent = scope === 'doc' ? '預設' : '統一設定';
+  $('#adjReset').textContent = scope === 'doc' ? '全部重設' : '回到統一設定';
   ['#adjMain', '#adjCmp', '#adjCmpDetail'].forEach((s) => { $(s).style.display = 'none'; });
   $('#cmpTag').style.display = 'none';
   buildPanel();
+  if (scope === 'page') history.pushState({ s: 'page', doc: state.docId, i: state.pageIndex, adj: 1 }, '');
+  await adjPrepare(p);
+}
+// 把一頁原圖準備成預覽用的校正圖（切換預覽頁面時也會用到）
+async function adjPrepare(p) {
+  hideDetail(); endCompare();
+  adj.ready = false; adj.defImg = null; adj.key = p.id + ':' + Date.now(); adj.rotation = p.rotation || 0;
   zoom.s = 1; zoom.x = 0; zoom.y = 0; zoom.cs = null;
-  history.pushState({ s: 'page', doc: state.docId, i: state.pageIndex, adj: 1 }, '');
   $('#viewBusy').style.display = 'block';
+  const key = adj.key;
   try {
     await whenReady();
     const st = $('#viewStage').getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     const maxSide = Math.min(1800, Math.ceil(Math.max(st.width, st.height) * dpr));
     const d = await decodeFull(p.original);
-    if (!adj.open) return;
-    const info = await wcall('prepare', { key: adj.key, buffer: d.data.buffer, width: d.width, height: d.height, corners: p.corners, curve: p.curve || null, upscale: settings.upscale, maxSide }, [d.data.buffer]);
-    if (!adj.open) return;
+    if (!adj.open || key !== adj.key) return;
+    const info = await wcall('prepare', { key, buffer: d.data.buffer, width: d.width, height: d.height, corners: p.corners, curve: p.curve || null, upscale: settings.upscale, maxSide }, [d.data.buffer]);
+    if (!adj.open || key !== adj.key) return;
     const sw = rotSwap(adj.rotation);
     adj.pw = sw ? info.height : info.width; adj.ph = sw ? info.width : info.height;
     adj.fullW = sw ? info.fullH : info.fullW; adj.fullH = sw ? info.fullW : info.fullH;
@@ -1686,7 +1739,18 @@ async function openAdjust() {
     fitAdj();
     await renderAdj();
   } catch (e) { console.error(e); toast('預覽失敗：' + e.message); }
-  $('#viewBusy').style.display = 'none';
+  if (key === adj.key) $('#viewBusy').style.display = 'none';
+}
+// 統一調整時切換預覽的頁面
+async function adjSwitch(d) {
+  const { pages } = await getDocPages(state.docId);
+  const j = state.pageIndex + d;
+  if (j < 0 || j >= pages.length) return;
+  state.pageIndex = j; viewPage = pages[j];
+  history.replaceState({ s: 'page', doc: state.docId, i: j, adj: 1, scope: 'doc' }, '');
+  setAdjNav(pages.length);
+  $('#adjMain').style.display = 'none';
+  adjPrepare(pages[j]);
 }
 function fitAdj() {
   if (!adj.pw) return;
@@ -1699,15 +1763,16 @@ function fitAdj() {
 }
 function buildPanel() {
   const mode = adj.mode, name = MODES.find((m) => m.id === mode).name;
-  $('#adjTitle').textContent = name + '調整';
-  $('#adjNote').textContent = `套用到所有「${name}」頁面・按住圖片看預設・雙指放大檢查`;
-  const vals = adjOf(mode);
-  $('#adjTabs').innerHTML = ADJ[mode].map((d) => `<button class="atab ${d.k === adj.active ? 'on' : ''} ${vals[d.k] !== d.def ? 'chg' : ''}" data-k="${d.k}">${d.name}</button>`).join('');
+  $('#adjTitle').textContent = adj.scope === 'doc' ? `統一調整・${name}` : `這一頁・${name}`;
+  $('#adjNote').textContent = adj.scope === 'doc'
+    ? '套用到這份文件的所有頁面・左右箭頭切換預覽頁・按住圖片看預設值'
+    : '只套用到這一頁・按住圖片看統一設定・雙指放大檢查';
+  $('#adjTabs').innerHTML = ADJ[mode].map((d) => `<button class="atab ${d.k === adj.active ? 'on' : ''} ${adj.vals[d.k] !== adj.ref[d.k] ? 'chg' : ''}" data-k="${d.k}">${d.name}</button>`).join('');
   $('#adjTabs').querySelectorAll('.atab').forEach((b) => {
     let lastTap = 0;
     b.onclick = () => {
       const now = Date.now();
-      if (b.dataset.k === adj.active && now - lastTap < 350) { setAdjValue(b.dataset.k, ADJ[mode].find((d) => d.k === b.dataset.k).def, true); }
+      if (b.dataset.k === adj.active && now - lastTap < 350) { setAdjValue(b.dataset.k, adj.ref[b.dataset.k], true); }
       lastTap = now;
       adj.active = b.dataset.k;
       $('#adjTabs').querySelectorAll('.atab').forEach((x) => x.classList.toggle('on', x === b));
@@ -1720,8 +1785,8 @@ function showSlider() {
   const d = ADJ[adj.mode].find((x) => x.k === adj.active);
   const inp = $('#adjRange');
   inp.min = d.min; inp.max = d.max; inp.step = 1;
-  inp.style.setProperty('--def', ((d.def - d.min) / (d.max - d.min)) * 100 + '%');
-  inp.value = adjOf(adj.mode)[d.k];
+  inp.style.setProperty('--def', ((adj.ref[d.k] - d.min) / (d.max - d.min)) * 100 + '%');
+  inp.value = adj.vals[d.k];
   $('#adjLo').textContent = d.lo || ''; $('#adjHi').textContent = d.hi || '';
   showVal();
 }
@@ -1730,18 +1795,18 @@ function showVal() {
   const v = +$('#adjRange').value;
   const out = $('#adjVal');
   out.textContent = d.name + ' ' + (d.min < 0 && v > 0 ? '+' + v : String(v));
-  out.classList.toggle('chg', v !== d.def);
+  out.classList.toggle('chg', v !== adj.ref[d.k]);
   const tab = $(`#adjTabs .atab[data-k="${d.k}"]`);
-  if (tab) tab.classList.toggle('chg', v !== d.def);
+  if (tab) tab.classList.toggle('chg', v !== adj.ref[d.k]);
 }
 function setAdjValue(k, v, commit) {
-  (settings.adj[adj.mode] = settings.adj[adj.mode] || {})[k] = v;
+  adj.vals[k] = v;
   if (k === adj.active) $('#adjRange').value = v;
   showVal(); hideDetail(); renderAdj();
-  if (commit) { saveSettings(); scheduleRegion(); }
+  if (commit) scheduleRegion();
 }
 $('#adjRange').addEventListener('input', () => setAdjValue(adj.active, +$('#adjRange').value, false));
-$('#adjRange').addEventListener('change', () => { saveSettings(); scheduleRegion(); });
+$('#adjRange').addEventListener('change', () => scheduleRegion());
 
 function drawTo(canvas, r) {
   if (canvas.width !== r.width || canvas.height !== r.height) { canvas.width = r.width; canvas.height = r.height; }
@@ -1752,8 +1817,9 @@ async function renderAdj() {
   if (adj.busy) { adj.pending = true; return; }
   adj.busy = true;
   try {
-    const r = await wcall('render', { key: adj.key, mode: adj.mode, params: adjOf(adj.mode), rotation: adj.rotation });
-    if (adj.open) { drawTo($('#adjMain'), r); $('#adjMain').style.display = 'block'; }
+    const key = adj.key;
+    const r = await wcall('render', { key, mode: adj.mode, params: adj.vals, rotation: adj.rotation });
+    if (adj.open && key === adj.key) { drawTo($('#adjMain'), r); $('#adjMain').style.display = 'block'; }
   } catch (e) { console.warn(e); }
   adj.busy = false;
   if (adj.pending) { adj.pending = false; renderAdj(); }
@@ -1777,22 +1843,22 @@ async function doRegion() {
   if (!adj.open || !adj.ready || zoom.s <= 1.15) { if (zoom.s <= 1.15) hideDetail(); return; }
   const rect = visibleRect();
   if (!rect) return;
-  const seq = ++adj.regionSeq, pk = JSON.stringify(adjOf(adj.mode));
+  const seq = ++adj.regionSeq, pk = JSON.stringify(adj.vals);
   try {
-    const r = await wcall('region', { key: adj.key, mode: adj.mode, params: adjOf(adj.mode), rotation: adj.rotation, rect });
-    if (!adj.open || seq !== adj.regionSeq || pk !== JSON.stringify(adjOf(adj.mode))) return;
+    const r = await wcall('region', { key: adj.key, mode: adj.mode, params: adj.vals, rotation: adj.rotation, rect });
+    if (!adj.open || seq !== adj.regionSeq || pk !== JSON.stringify(adj.vals)) return;
     const c = $('#adjDetail');
     drawTo(c, r); placeIn(c, r.rect);
     adj.detailRect = r.rect;
   } catch (e) { console.warn(e); }
 }
-// 按住看預設數值
+// 按住看對照數值（單頁＝統一設定；統一調整＝App 預設值）
 async function startCompare() {
   if (!adj.ready || adj.comparing) return;
   adj.comparing = true;
   if (navigator.vibrate) navigator.vibrate(10);
   $('#cmpTag').style.display = 'block';
-  const defs = defaultsOf(adj.mode);
+  const defs = adj.ref;
   try {
     if (!adj.defImg) {
       const r = await wcall('render', { key: adj.key, mode: adj.mode, params: defs, rotation: adj.rotation });
@@ -1818,23 +1884,59 @@ function closeAdjust() {
   endCompare();
   adj.open = false; adj.ready = false;
   clearTimeout(regionTimer); hideDetail();
-  $('#page').classList.remove('adjusting');
+  $('#page').classList.remove('adjusting', 'adj-doc');
   wcall('release', {}).catch(() => {});
-  saveSettings();
   zoom.s = 1; zoom.x = 0; zoom.y = 0; zoom.cs = null;
-  const changed = JSON.stringify(adjOf(adj.mode)) !== adj.snap;
-  if (changed) {
-    if (viewPage) enqueue(viewPage.id); // 先處理正在看的這頁
-    getDocPages(state.docId).then(({ pages }) => ensureFresh(pages));
-    toast(`已更新「${MODES.find((m) => m.id === adj.mode).name}」的設定`);
+  const changed = JSON.stringify(adj.vals) !== adj.snap;
+  const mode = adj.mode, vals = Object.assign({}, adj.vals), name = MODES.find((m) => m.id === mode).name;
+  if (adj.scope === 'doc') {
+    // 統一調整：存到文件，也記成新文件的起始數值；單獨調過的頁面詢問要不要一起覆蓋
+    applyDocAdjust(state.docId, mode, vals, changed);
+    return; // popstate 會回到文件頁
+  }
+  if (changed && viewPage) {
+    const p = viewPage;
+    const same = JSON.stringify(vals) === JSON.stringify(docAdjOf(p.docId, mode));
+    DB.get('pages', p.id).then(async (pg) => {
+      if (!pg) return;
+      pg.adj = pg.adj || {};
+      if (same) delete pg.adj[mode]; else pg.adj[mode] = vals; // 和統一設定一樣就不算單獨調整
+      await DB.put('pages', pg);
+      viewPage = pg;
+      enqueue(pg.id);
+      if (current === 'page') renderPage();
+    });
+    toast(same ? '這一頁已回到統一設定' : '已更新這一頁的設定');
   }
   renderPage();
   fitView();
 }
+async function applyDocAdjust(docId, mode, vals, changed) {
+  const doc = await DB.get('docs', docId);
+  if (!doc) return;
+  const { pages } = await getDocPages(docId);
+  let overwrite = false;
+  if (changed) {
+    doc.adj = doc.adj || {};
+    doc.adj[mode] = vals;
+    docAdjCache.set(doc.id, doc.adj);
+    await DB.put('docs', doc);
+    settings.adj[mode] = Object.assign({}, vals); saveSettings();
+    const custom = pages.filter((p) => p.adj && p.adj[mode] && JSON.stringify(fillAdj(mode, p.adj[mode])) !== JSON.stringify(vals));
+    if (custom.length) overwrite = confirm(`有 ${custom.length} 頁單獨調整過。\n要一起套用新的統一設定嗎？\n\n確定：全部套用\n取消：保留那幾頁自己的設定`);
+    for (const p of pages) {
+      if (p.adj && p.adj[mode] && (overwrite || JSON.stringify(fillAdj(mode, p.adj[mode])) === JSON.stringify(vals))) { delete p.adj[mode]; await DB.put('pages', p); }
+    }
+  }
+  const { pages: fresh } = await getDocPages(docId);
+  ensureFresh(fresh);
+  if (current === 'doc') renderDoc();
+  toast(changed ? `已套用到全部頁面（${MODES.find((m) => m.id === mode).name}）` : `全部頁面已改成「${MODES.find((m) => m.id === mode).name}」`);
+}
 $('#adjDone').onclick = () => history.back();
 $('#adjReset').onclick = () => {
-  settings.adj[adj.mode] = {};
-  saveSettings(); buildPanel(); hideDetail(); renderAdj(); scheduleRegion();
+  adj.vals = Object.assign({}, adj.ref);
+  buildPanel(); hideDetail(); renderAdj(); scheduleRegion();
 };
 
 /* ---------- PDF 產生（自製，JPEG 原檔直嵌、黑白頁 1-bit 無損） ---------- */
@@ -2039,7 +2141,7 @@ $('#btnSettings').onclick = () => {
     <div class="seg" id="setUp">${[['auto', '自動'], ['always', '一律'], ['off', '關閉']].map(([k, n]) => `<button data-k="${k}" class="${settings.upscale === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會另外拍一張照片（最高 1500 萬畫素）；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.10</div>`, (s) => {
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.11</div>`, (s) => {
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));
@@ -2144,7 +2246,7 @@ function viewportInfo() {
 }
 
 /* ---------- 啟動 ---------- */
-renderHome();
 show('cover');
+loadDocAdj().catch((e) => console.error(e)).then(() => renderHome());
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});

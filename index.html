@@ -353,6 +353,12 @@ input[type=file]{display:none}
 .home-donate{flex:none;display:flex;justify-content:center;padding:6px 0 10px}
 .home-donate button{font-size:13.5px;font-weight:700;color:#fff;background:var(--danger);padding:8px 18px;border-radius:999px;box-shadow:0 3px 10px rgba(180,83,63,.25)}
 .home-donate button:active{filter:brightness(1.08)}
+
+/* 1.11 統一調整／單頁獨立 */
+#page.adjusting.adj-doc .navarrow{display:grid}
+#page.adj-doc #pageDel{visibility:hidden}
+.pg .custom{position:absolute;right:5px;top:5px;width:22px;height:22px;border-radius:50%;background:var(--caramel);color:#fff;display:grid;place-items:center;box-shadow:0 1px 4px rgba(0,0,0,.25)}
+.pg .custom svg{width:13px;height:13px}
 </style>
 </head>
 <body>
@@ -496,7 +502,7 @@ input[type=file]{display:none}
   </div>
   <div class="dock" id="docDock">
     <button class="tool" id="docAdd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新增頁面</button>
-    <button class="tool" id="docMode"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v18" /><path d="M12 3a9 9 0 0 1 0 18" fill="currentColor"/></svg>全部模式</button>
+    <button class="tool" id="docMode"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v18" /><path d="M12 3a9 9 0 0 1 0 18" fill="currentColor"/></svg>統一調整</button>
     <button class="tool" id="docPdf"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>匯出 PDF</button>
     <button class="tool" id="docImg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="M21 15l-5-5L5 21"/></svg>匯出圖片</button>
   </div>
