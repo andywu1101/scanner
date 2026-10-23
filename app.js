@@ -248,27 +248,28 @@ async function addPage(docId, blob, corners, curve) {
 }
 
 /* ---------- 畫面切換 ---------- */
-let current = 'home';
+let current = 'cover';
 const state = { docId: null, pageIndex: 0 };
 function show(name) {
   document.querySelectorAll('.screen').forEach((s) => s.classList.toggle('active', s.id === name));
   current = name;
   // 狀態列顏色跟著畫面：相機類畫面深色，其他米白
   const tc = document.querySelector('meta[name="theme-color"]');
-  if (tc) tc.setAttribute('content', ['live', 'crop', 'burst'].includes(name) ? '#1C130E' : '#FFFCF8');
+  if (tc) tc.setAttribute('content', ['live', 'crop', 'burst'].includes(name) ? '#1C130E' : name === 'cover' ? '#F6EFE6' : '#FFFCF8');
 }
 function go(name, push = true) {
   if (push) history.pushState({ s: name, doc: state.docId, i: state.pageIndex }, '');
   show(name);
 }
-history.replaceState({ s: 'home' }, '');
+history.replaceState({ s: 'cover' }, '');
 window.addEventListener('popstate', (e) => {
   const s = (e.state && e.state.s) || 'home';
   if (adj.open) closeAdjust();
   if (current === 'live') stopLive();
   if (current === 'crop' && cropCtx && cropCtx.onCancel) { const f = cropCtx.onCancel; cropCtx = null; f(true); }
   closeSheet();
-  if (s === 'home') { renderHome(); show('home'); }
+  if (s === 'cover') { show('cover'); }
+  else if (s === 'home') { renderHome(); show('home'); }
   else if (s === 'doc') { state.docId = e.state.doc; renderDoc(); show('doc'); }
   else if (s === 'library') { renderLibrary(); show('library'); }
   else if (s === 'burst') { renderBurst(); show('burst'); }
@@ -1976,7 +1977,10 @@ $('#btnSettings').onclick = () => {
     <div class="seg" id="setUp">${[['auto', '自動'], ['always', '一律'], ['off', '關閉']].map(([k, n]) => `<button data-k="${k}" class="${settings.upscale === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會以相機全解析度拍攝；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.7</div>`, (s) => {
+    <div class="set-links"><button class="donate" id="setDonate">❤ 小額贊助</button><button id="setCover">← 回封面</button></div>
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.8</div>`, (s) => {
+    s.querySelector('#setDonate').onclick = () => { closeSheet(); openDonate(); };
+    s.querySelector('#setCover').onclick = () => { closeSheet(); goCover(); };
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));
@@ -1994,6 +1998,46 @@ $('#btnSettings').onclick = () => {
   });
 };
 
+/* ---------- 封面、小額贊助、作者主頁（v1.8） ----------
+   封面不進瀏覽紀錄：開始掃描／回封面都用 replaceState，返回鍵行為和以前一樣 */
+function goCover() { history.replaceState({ s: 'cover' }, ''); show('cover'); }
+$('#cvStart').onclick = () => { history.replaceState({ s: 'home' }, ''); renderHome(); show('home'); };
+$('#cvDonate').onclick = () => openDonate();
+$('#cvAuthor').onclick = () => openModal('authorModal');
+
+/* 贊助者名單：要新增名字，複製下面的範例改名字即可（名單是空的時候不顯示「贊助者名單」按鈕）
+   例：{ name: '王小明' }, */
+const SPONSORS = [
+];
+function openModal(id) { $('#' + id).classList.add('open'); }
+function closeModal(id) { $('#' + id).classList.remove('open'); }
+function donatePanel(which) {
+  $('#donateIntro').style.display = which ? 'none' : '';
+  ['', 'Jko', 'Bank', 'Sponsors'].forEach((k) => { $('#donate' + (k || '_')).style.display = which === k ? 'flex' : 'none'; });
+  if (which === 'Sponsors') {
+    $('#sponsorList').innerHTML = SPONSORS.map((x) => `<span>${String(x.name).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))}</span>`).join('');
+  }
+  $('#donateModal').scrollTop = 0;
+}
+function openDonate() { donatePanel(''); openModal('donateModal'); }
+$('#sponsorEntry').style.display = SPONSORS.length ? '' : 'none';
+document.querySelectorAll('.dmodal').forEach((m) => {
+  m.addEventListener('click', (e) => {
+    if (e.target === m || e.target.closest('[data-close]')) { closeModal(m.id); return; }
+    const pb = e.target.closest('[data-panel]'); if (pb) { donatePanel(pb.dataset.panel); return; }
+    const cb = e.target.closest('[data-copy]'); if (cb) { copyText(cb, cb.dataset.copy); }
+  });
+});
+$('#donateToAuthor').onclick = () => { closeModal('donateModal'); openModal('authorModal'); };
+function copyText(btn, text) {
+  const done = () => { const t = btn.textContent; btn.textContent = '已複製'; setTimeout(() => { btn.textContent = t; }, 1400); };
+  const fallback = () => {
+    try { const ta = document.createElement('textarea'); ta.value = text; ta.style.cssText = 'position:fixed;opacity:0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); } catch (_) {}
+    done();
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
+}
+
 /* ---------- 畫面資訊（除錯用，顯示在設定最下方） ----------
    iOS 26 主畫面 App 底部空白的修正在 index.html 的 CSS（html min-height） */
 const isStandalone = () => navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
@@ -2008,5 +2052,6 @@ function viewportInfo() {
 
 /* ---------- 啟動 ---------- */
 renderHome();
+show('cover');
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});

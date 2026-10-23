@@ -1,7 +1,7 @@
 /* 伍敵樂譜掃描 — Service Worker（離線可用） */
-const VERSION = 'cocoscan-v8';
+const VERSION = 'cocoscan-v9';
 const ASSETS = [
-  './', 'index.html', 'app.js', 'worker.js', 'lib/opencv.js', 'lib/Sortable.min.js', 'manifest.webmanifest',
+  './', 'index.html', 'app.js', 'worker.js', 'lib/opencv.js', 'lib/Sortable.min.js', 'manifest.webmanifest', 'jkopay-qr.png',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png',
 ];
 

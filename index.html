@@ -271,12 +271,87 @@ input[type=file]{display:none}
 #burst .side svg{width:26px;height:26px}
 #burst .side[disabled]{opacity:.35}
 #burst .opt{display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.07);border-radius:12px;padding:10px 14px;font-size:14.5px}
+
+/* ===== 封面（v1.8，比照音樂聽力練習 App） ===== */
+#cover{background:var(--bg)}
+#cover .cv-scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column}
+.cv{flex:1;min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;position:relative;overflow:hidden;padding:calc(var(--st) + 28px) 20px calc(var(--sb) + 28px)}
+.cv-notes{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.cv-note{position:absolute;color:var(--cocoa);opacity:.10;line-height:1;font-family:"Times New Roman",serif;user-select:none}
+.cv-card{position:relative;z-index:1;max-width:540px;width:100%}
+.cv-art{display:block;margin:0 auto 25px}
+.cv-title{font-size:34px;font-weight:700;margin:0 0 6px;letter-spacing:.04em;color:var(--text)}
+.cv-sub{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;letter-spacing:.22em;color:var(--muted);margin-bottom:24px}
+.cv-msg{font-size:15px;line-height:1.95;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:18px;margin:0 auto 26px;box-shadow:0 4px 16px rgba(74,47,34,.06)}
+.cv-start{font-weight:700;font-size:18px;padding:16px 44px;border-radius:999px;background:var(--cocoa);color:#fff;box-shadow:0 6px 20px rgba(74,47,34,.28);transition:transform .15s,filter .15s;touch-action:manipulation}
+.cv-start:active{filter:brightness(1.12);transform:translateY(-2px)}
+.cv-foot{margin-top:20px;font-size:13.5px;color:var(--muted)}
+.cv-author{margin-top:14px;font-size:13.5px;color:var(--muted);border-bottom:1px dashed var(--caramel);padding-bottom:1px}
+.cv-donate{margin-top:12px;display:inline-flex;align-items:center;gap:7px;font-weight:700;font-size:14.5px;padding:11px 26px;border-radius:999px;background:var(--danger);color:#fff;box-shadow:0 4px 14px rgba(180,83,63,.28);touch-action:manipulation}
+.cv-donate:active{filter:brightness(1.08);transform:translateY(-1px)}
+@media (max-height:640px){.cv-title{font-size:30px}.cv-msg{font-size:14px;padding:14px}.cv-art{width:60px;height:80px;margin-bottom:18px}}
+/* 贊助／作者彈窗 */
+.dmodal{position:fixed;inset:0;z-index:25;background:rgba(40,26,18,.55);padding:calc(var(--st) + 20px) 16px calc(var(--sb) + 20px);overflow-y:auto;-webkit-overflow-scrolling:touch;display:none}
+.dmodal.open{display:flex;align-items:flex-start;justify-content:center}
+.dbox{background:var(--bg);border:1px solid var(--line);border-radius:16px;margin:auto;max-width:400px;width:100%;padding:28px 22px 22px;text-align:center;box-shadow:0 20px 50px rgba(0,0,0,.28);-webkit-user-select:text;user-select:text}
+.dbox .dico{font-size:38px;line-height:1;color:var(--danger)}
+.dbox h3{font-size:22px;font-weight:700;margin:10px 0 8px;color:var(--text)}
+.dbox p{font-size:15px;color:var(--muted);line-height:1.8;margin:0 0 16px}
+.dlinks{display:flex;flex-direction:column;gap:10px;margin:6px 0 14px}
+.ditem{display:flex;align-items:center;justify-content:center;gap:9px;font-weight:700;font-size:15.5px;padding:13px 18px;border-radius:14px;text-decoration:none;border:1px solid var(--line);background:var(--surface);color:var(--text);touch-action:manipulation}
+.ditem:active{border-color:var(--cocoa);background:var(--surface2)}
+.ditem .ico{display:inline-flex;align-items:center}
+.jko-card{display:block;text-decoration:none;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#fff}
+.jko-card img{display:block;width:100%;max-width:270px;margin:14px auto 6px}
+.jko-label{display:block;font-weight:700;font-size:15px;color:#fff;background:var(--cocoa);padding:11px}
+.jko-acct{display:flex;align-items:center;justify-content:center;gap:8px;font-size:14px;color:var(--muted);margin:10px 0 2px}
+.jko-acct b,.bank-row b{color:var(--text);font-family:ui-monospace,Menlo,Consolas,monospace;letter-spacing:.03em}
+.copy-btn{font-size:13px;font-weight:700;color:var(--cocoa);background:var(--surface2);border:1px solid var(--line);border-radius:999px;padding:3px 12px;touch-action:manipulation}
+.copy-btn:active{background:var(--cocoa);color:#fff}
+.pay-note{font-size:14px;color:var(--text)!important;line-height:1.8;margin:10px 2px 6px!important}
+.form-link{display:block;font-size:14px;font-weight:700;color:var(--cocoa);background:var(--surface2);border:1px solid var(--line);border-radius:12px;padding:11px 12px;text-decoration:none;margin-top:4px}
+.bank-row{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 14px;font-size:15.5px}
+.bank-row .bk{font-size:13px;color:var(--muted);flex-shrink:0;width:34px;text-align:left}
+.bank-row b{flex:1;text-align:left}
+.sponsor-list{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;padding:14px 10px;border:1px dashed var(--line);border-radius:12px}
+.sponsor-list span{display:inline-flex;align-items:center;min-height:34px;line-height:1;font-size:15px;font-weight:600;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:0 14px}
+.line-inline{color:var(--danger);text-decoration:underline;text-underline-offset:3px;font-weight:600;white-space:nowrap}
+.d-dismiss{font-size:15.5px;color:var(--muted);text-decoration:underline;padding:6px 12px;touch-action:manipulation}
+.author-invite{font-size:14px!important;line-height:1.9!important;margin:2px 4px 14px!important}
+/* 設定裡的連結列 */
+.set-links{display:flex;gap:10px;margin:16px 0 4px}
+.set-links button{flex:1;padding:12px 8px;border-radius:12px;font-weight:700;font-size:15px;border:1px solid var(--line);background:var(--surface2);color:var(--cocoa)}
+.set-links .donate{background:var(--danger);border-color:var(--danger);color:#fff}
 </style>
 </head>
 <body>
 
+<!-- 封面（每次打開 App 先顯示） -->
+<section class="screen active" id="cover">
+  <div class="cv-scroll"><div class="cv">
+    <div class="cv-notes" aria-hidden="true">
+      <span class="cv-note" style="top:8%;left:9%;font-size:72px">♪</span>
+      <span class="cv-note" style="top:18%;right:11%;font-size:56px">♫</span>
+      <span class="cv-note" style="top:52%;left:6%;font-size:48px">♩</span>
+      <span class="cv-note" style="bottom:14%;left:16%;font-size:64px">𝄞</span>
+      <span class="cv-note" style="bottom:9%;right:14%;font-size:50px">♬</span>
+      <span class="cv-note" style="top:40%;right:8%;font-size:40px">♪</span>
+    </div>
+    <div class="cv-card">
+      <svg class="cv-art" viewBox="0 0 120 160" width="75" height="100" aria-hidden="true"><defs><filter id="cvsh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#4A2F22" flood-opacity=".18"/></filter></defs><rect x="12" y="12" width="96" height="136" rx="7" fill="#FFFCF8" filter="url(#cvsh)"/><g stroke="#3A281E" stroke-width="0.9"><line x1="22" x2="98" y1="30.0" y2="30.0"/><line x1="22" x2="98" y1="33.2" y2="33.2"/><line x1="22" x2="98" y1="36.4" y2="36.4"/><line x1="22" x2="98" y1="39.6" y2="39.6"/><line x1="22" x2="98" y1="42.8" y2="42.8"/><line x1="22" x2="98" y1="56.0" y2="56.0"/><line x1="22" x2="98" y1="59.2" y2="59.2"/><line x1="22" x2="98" y1="62.4" y2="62.4"/><line x1="22" x2="98" y1="65.6" y2="65.6"/><line x1="22" x2="98" y1="68.8" y2="68.8"/><line x1="22" x2="98" y1="82.0" y2="82.0"/><line x1="22" x2="98" y1="85.2" y2="85.2"/><line x1="22" x2="98" y1="88.4" y2="88.4"/><line x1="22" x2="98" y1="91.6" y2="91.6"/><line x1="22" x2="98" y1="94.8" y2="94.8"/><line x1="22" x2="98" y1="108.0" y2="108.0"/><line x1="22" x2="98" y1="111.2" y2="111.2"/><line x1="22" x2="98" y1="114.4" y2="114.4"/><line x1="22" x2="98" y1="117.6" y2="117.6"/><line x1="22" x2="98" y1="120.8" y2="120.8"/><line x1="22" x2="98" y1="134.0" y2="134.0"/><line x1="22" x2="98" y1="137.2" y2="137.2"/><line x1="22" x2="98" y1="140.4" y2="140.4"/><line x1="22" x2="98" y1="143.6" y2="143.6"/><line x1="22" x2="98" y1="146.8" y2="146.8"/></g><path d="M2 20V2h18M100 2h18v18M118 140v18h-18M20 158H2v-18" fill="none" stroke="#C9935F" stroke-width="4"/><line x1="0" x2="120" y1="80" y2="80" stroke="#8FB38A" stroke-width="3.5"/></svg>
+      <h1 class="cv-title">伍敵樂譜掃描</h1>
+      <div class="cv-sub">SHEET MUSIC SCANNER</div>
+      <p class="cv-msg">這個工具完全免費，<br>掃描的資料只保存在本設備裡。<br>如果它對你瀏覽樂譜有幫助，<br>歡迎小額贊助支持後續開發與維護。</p>
+      <button class="cv-start" id="cvStart">開始掃描 →</button>
+      <div class="cv-foot">精確的攜帶式樂譜掃描神器</div>
+      <div><button class="cv-author" id="cvAuthor">作者：伍祐恆 Heng-Heng Wu ▸</button></div>
+      <div><button class="cv-donate" id="cvDonate">❤ 小額贊助</button></div>
+    </div>
+  </div></div>
+</section>
+
 <!-- 首頁 -->
-<section class="screen active" id="home">
+<section class="screen" id="home">
   <header class="bar">
     <h1>伍敵樂譜掃描</h1>
     <button class="ibtn" id="btnSettings" aria-label="設定"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
@@ -424,6 +499,67 @@ input[type=file]{display:none}
 </section>
 
 <div id="sheetWrap"><div id="sheet"></div></div>
+
+<!-- 小額贊助彈窗（內容比照音樂聽力練習 App；管道清單 / 街口 / 銀行 / 贊助者名單） -->
+<div class="dmodal" id="donateModal">
+  <div class="dbox">
+    <div class="dico">❤</div>
+    <h3>支持這個工具</h3>
+    <div id="donateIntro">
+      <p>這個工具完全免費，你的支持會用於後續開發與維護，感謝你 🙏</p>
+      <p>贊助者會列入贊助者名單。</p>
+    </div>
+    <div class="dlinks" id="donate_">
+      <a class="ditem" href="https://portaly.cc/heng-heng.music/support" target="_blank" rel="noopener"><span class="ico">❤</span> Portaly 小額贊助</a>
+      <button type="button" class="ditem" data-panel="Jko"><span class="ico">📱</span> 街口支付贊助</button>
+      <button type="button" class="ditem" data-panel="Bank"><span class="ico">🏦</span> 銀行轉帳贊助</button>
+      <button type="button" class="ditem" id="sponsorEntry" data-panel="Sponsors" style="display:none"><span class="ico">💛</span> 贊助者名單</button>
+    </div>
+    <div class="dlinks" id="donateJko" style="display:none">
+      <a class="jko-card" href="https://service.jkopay.com/r/transfer?j=Transfer:902103863" target="_blank" rel="noopener">
+        <img src="jkopay-qr.png" alt="街口支付 QR 碼，Heng-Heng Music，帳號 902103863">
+        <span class="jko-label">開啟街口支付</span>
+      </a>
+      <div class="jko-acct">街口帳號 <b>902103863</b><button class="copy-btn" type="button" data-copy="902103863">複製</button></div>
+      <p class="pay-note">此 QR 為 <b>TWQR 共通碼</b>，可用街口支付，或<b>任一家銀行的網銀 App</b> 掃描付款。</p>
+      <a class="form-link" href="https://forms.gle/72e7fguVdx6RT3RZ9" target="_blank" rel="noopener">請填寫贊助者表單，讓我將您放上贊助者名單 ❤</a>
+      <a class="ditem" href="https://line.me/ti/p/LF15Mk2vef" target="_blank" rel="noopener"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="#06C755" d="M12 2.6c-5.5 0-10 3.6-10 8.1 0 3.9 3.6 7.2 8.4 7.9.33.07.78.22.89.5.1.26.07.66.03.92 0 0-.12.72-.14.87-.05.26-.21 1 .88.55 1.1-.46 5.9-3.48 8.05-5.96 1.48-1.63 2.19-3.28 2.19-5.11 0-4.5-4.5-8.1-10-8.1z"/></svg></span> 祐恆的 LINE</a>
+      <button type="button" class="ditem" data-panel="">← 返回贊助管道</button>
+    </div>
+    <div class="dlinks" id="donateBank" style="display:none">
+      <div class="bank-row"><span class="bk">銀行</span><b>中國信託 (822)</b><button class="copy-btn" type="button" data-copy="822">複製代號</button></div>
+      <div class="bank-row"><span class="bk">帳號</span><b>163540424795</b><button class="copy-btn" type="button" data-copy="163540424795">複製</button></div>
+      <div class="bank-row"><span class="bk">戶名</span><b>伍○恆</b></div>
+      <p class="pay-note">轉帳僅需銀行代號與帳號；戶名供核對用。</p>
+      <a class="form-link" href="https://forms.gle/72e7fguVdx6RT3RZ9" target="_blank" rel="noopener">請填寫贊助者表單，讓我將您放上贊助者名單 ❤</a>
+      <a class="ditem" href="https://line.me/ti/p/LF15Mk2vef" target="_blank" rel="noopener"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="#06C755" d="M12 2.6c-5.5 0-10 3.6-10 8.1 0 3.9 3.6 7.2 8.4 7.9.33.07.78.22.89.5.1.26.07.66.03.92 0 0-.12.72-.14.87-.05.26-.21 1 .88.55 1.1-.46 5.9-3.48 8.05-5.96 1.48-1.63 2.19-3.28 2.19-5.11 0-4.5-4.5-8.1-10-8.1z"/></svg></span> 祐恆的 LINE</a>
+      <button type="button" class="ditem" data-panel="">← 返回贊助管道</button>
+    </div>
+    <div class="dlinks" id="donateSponsors" style="display:none">
+      <div class="sponsor-list" id="sponsorList"></div>
+      <p class="pay-note">每一位同意公開的贊助者，都會列在贊助者名單中，感謝你的支持 🙏</p>
+      <button type="button" class="ditem" data-panel="">← 返回贊助管道</button>
+    </div>
+    <button type="button" class="ditem" style="width:100%;margin-bottom:12px" id="donateToAuthor"><span class="ico">🔗</span> 作者主頁</button>
+    <button type="button" class="d-dismiss" data-close>關閉</button>
+  </div>
+</div>
+
+<!-- 作者主頁彈窗 -->
+<div class="dmodal" id="authorModal">
+  <div class="dbox">
+    <div class="dico" style="color:var(--cocoa)">🎼</div>
+    <h3>作者主頁</h3>
+    <p>伍祐恆 Heng-Heng Wu</p>
+    <p class="author-invite">如果想精進鋼琴演奏、樂理、視唱、聽寫能力，歡迎來找我上課，可以加 LINE 私訊喔！</p>
+    <div class="dlinks">
+      <a class="ditem" href="https://line.me/ti/p/LF15Mk2vef" target="_blank" rel="noopener"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="#06C755" d="M12 2.6c-5.5 0-10 3.6-10 8.1 0 3.9 3.6 7.2 8.4 7.9.33.07.78.22.89.5.1.26.07.66.03.92 0 0-.12.72-.14.87-.05.26-.21 1 .88.55 1.1-.46 5.9-3.48 8.05-5.96 1.48-1.63 2.19-3.28 2.19-5.11 0-4.5-4.5-8.1-10-8.1z"/></svg></span> 祐恆的 LINE</a>
+      <a class="ditem" href="https://portaly.cc/heng-heng.music" target="_blank" rel="noopener"><span class="ico">🔗</span> Portaly 主頁</a>
+      <a class="ditem" href="https://www.youtube.com/@HengHengWu" target="_blank" rel="noopener"><span class="ico"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="#FF0000" d="M23 7.6a3 3 0 0 0-2.1-2.1C19 5 12 5 12 5s-7 0-8.9.5A3 3 0 0 0 1 7.6 31.3 31.3 0 0 0 .5 12 31.3 31.3 0 0 0 1 16.4a3 3 0 0 0 2.1 2.1C5 19 12 19 12 19s7 0 8.9-.5a3 3 0 0 0 2.1-2.1A31.3 31.3 0 0 0 23.5 12 31.3 31.3 0 0 0 23 7.6z"/><path fill="#fff" d="M9.75 15.5l6-3.5-6-3.5z"/></svg></span> YouTube 頻道</a>
+    </div>
+    <button type="button" class="d-dismiss" data-close>關閉</button>
+  </div>
+</div>
 <div id="busy"><div class="box"><div class="spin"></div><div id="busyMsg">處理中…</div></div></div>
 <div id="toast"></div>
 <input type="file" id="fileCamera" accept="image/*" capture="environment">
