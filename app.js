@@ -23,7 +23,7 @@ const ADJ = {
 };
 const MAX_PIXELS = 16000000; // iOS canvas 上限約 16.7M 像素
 const MAX_PHOTO = 15000000;  // Android 即時掃描拍照上限 1500 萬畫素（1.10）
-const HAS_IC = 'ImageCapture' in window; // Android Chrome 有、iPhone 沒有
+const HAS_IC = 'ImageCapture' in window; // Android Chrome 有；新版 iPhone Safari 也開始有（1.21 起 iPhone 不用，見 startLive）
 
 /* ---------- 設定 ---------- */
 const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: false, confirmCrop: true, upscale: 'auto', v: 2 };
@@ -620,7 +620,7 @@ $('#fileGallery').addEventListener('change', async (e) => {
 /* ---------- 即時掃描 ---------- */
 const live = { running: false };
 const STABLE_MS = 500;   // 鎖定後大致不動多久就拍
-const STABLE_TOL = 0.03;  // 容許的手抖（畫面比例）
+const STABLE_TOL = 0.05;  // 容許的手抖（畫面比例；1.21 從 3% 放寬，作者覺得拿穩了還是拍不下去）
 const EDGE_MARGIN = 0.01; // 紙張四角至少離畫面邊緣 1%（1.4～1.15 是 3%，作者覺得要拿太遠，1.16 放寬）
 async function startLive(docId) {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -638,11 +638,14 @@ async function startLive(docId) {
   setRing(0);
   go('live');
   try {
+    // 1.21：iPhone 不另外拍照（ImageCapture 的 takePhoto 要等約 1 秒，作者覺得太慢、常想先拿走），
+    // 改回直接存畫面那一格（瞬間完成），所以預覽解析度要求最高；Android 維持另外拍照
+    const useIC = HAS_IC && !IS_IOS;
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       // Android（有 ImageCapture）另外用 takePhoto 拍照，預覽只用來找紙，要 1920×1440 就夠，弱手機偵測才跟得上（1.10）
-      // iPhone 沒有 ImageCapture，存下來的就是預覽那一格，所以維持最高解析度
-      video: HAS_IC
+      // iPhone（1.21 起不用 ImageCapture）存下來的就是預覽那一格，所以要求最高解析度
+      video: useIC
         ? { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } }
         : { facingMode: { ideal: 'environment' }, width: { ideal: 4096 }, height: { ideal: 3072 } },
     });
@@ -658,7 +661,7 @@ async function startLive(docId) {
       if (caps.focusMode && caps.focusMode.includes('continuous')) live.track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
     } catch (_) {}
     live.photoSettings = null;
-    if (HAS_IC) {
+    if (useIC) {
       try {
         live.ic = new ImageCapture(live.track);
         // 拍照尺寸：請相機用不超過 1500 萬畫素的大小拍（手機不支援時會選最接近的，拍完再縮）
@@ -716,7 +719,7 @@ function medianQuad(list) {
   return [0, 1, 2, 3].map((i) => [med(list.map((q) => q[i][0])), med(list.map((q) => q[i][1]))]);
 }
 function resetLock() {
-  Object.assign(live, { cand: [], acc: [], lockQ: null, outliers: 0, miss: 0, anchorQ: null, stableSince: 0, progress: 0, best: null, prevQs: null, lastQs: null, edge: false });
+  Object.assign(live, { cand: [], acc: [], lockQ: null, outliers: 0, miss: 0, anchorQ: null, stableSince: 0, progress: 0, best: null, prevQs: null, lastQs: null, edge: false, motionHits: 0, moveHits: 0 });
   live.lastQuad = null;
 }
 // 清晰度（梯度能量），用來從穩定期間挑最清楚的一格
@@ -785,7 +788,7 @@ function quadSig(gt, q) {
   return out;
 }
 function qsDiff(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / a.length; }
-const MOTION_TOL = 0.35;  // 倒數期間紙內容的變化上限（超過代表有手或東西在動）
+const MOTION_TOL = 0.5;   // 倒數期間紙內容的變化上限（超過代表有手或東西在動；1.21 從 0.35 放寬）
 const CHANGE_TOL = 0.45;  // 與上一張相比超過此值，代表換頁了
 
 // 兩張全解析度暫存畫布輪流使用：一張存目前最清楚的，一張給新的一格
@@ -835,7 +838,8 @@ function onDetect(r, sig, full, sharp, gt) {
   if (!live.armed) {
     const moved = ok && live.capturedQuad && maxDisp(r.corners, live.capturedQuad) > 0.08;
     const changed = qs && live.capturedQs && qsDiff(qs, live.capturedQs) > CHANGE_TOL;
-    if (!ok) live.miss++; else live.miss = 0;
+    // 1.21：拍照那一瞬間畫面會停住或變暗，連續幾格找不到紙會被誤當成「紙拿走了」而重拍同一頁；拍完 1.5 秒內找不到紙不算
+    if (!ok) { if (Date.now() - live.lastCapT > 1500) live.miss++; } else live.miss = 0;
     if (moved || changed || live.miss >= 3) { live.rearm = moved ? 'moved' : changed ? 'changed' : 'miss'; live.armed = true; resetLock(); }
     else { setHint('已拍好，請換下一頁', true); return; }
   }
@@ -875,11 +879,14 @@ function onDetect(r, sig, full, sharp, gt) {
   // 紙內容在動（手經過、正在翻頁）→ 重新倒數
   const motion = live.prevQs ? qsDiff(qs, live.prevQs) : 0; // qs 是依這一格實際四角取樣
   live.prevQs = qs;
-  if (motion > MOTION_TOL) { live.anchorQ = live.lockQ; live.stableSince = now; live.best = null; live.lastQs = null; }
+  // 1.21：單一格超過不算（多半是偵測誤差或一瞬間的手抖），連續兩格超過才重新倒數
+  live.motionHits = motion > MOTION_TOL ? (live.motionHits || 0) + 1 : 0;
+  if (live.motionHits >= 2) { live.anchorQ = live.lockQ; live.stableSince = now; live.best = null; live.lastQs = null; live.motionHits = 0; }
   live.lastQs = live.prevQs;
 
   // 穩定判斷：容許自然手抖（約 3%），超過就重新倒數
-  if (maxDisp(live.lockQ, live.anchorQ) > STABLE_TOL) { live.anchorQ = live.lockQ; live.stableSince = now; live.best = null; }
+  live.moveHits = maxDisp(live.lockQ, live.anchorQ) > STABLE_TOL ? (live.moveHits || 0) + 1 : 0;
+  if (live.moveHits >= 2) { live.anchorQ = live.lockQ; live.stableSince = now; live.best = null; live.moveHits = 0; }
   const progress = Math.min(1, (now - live.stableSince) / STABLE_MS);
   live.progress = progress;
 
@@ -2547,7 +2554,7 @@ $('#cvDonate').onclick = () => openDonate();
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.20';
+const APP_VER = '1.21';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   { v: 'v1', items: [
@@ -2566,6 +2573,7 @@ const CHANGELOG = [
     { t: '即時掃描更會找紙：紙上印有框線不會框錯，書本攤開時會沿著書溝只框一頁', since: '1.19' },
     { t: '手動拍攝不畫框、拍整張；可選「立即裁切」或「稍後裁切」，待裁切的頁會標上 ✂', since: '1.19' },
     { t: '即時掃描更會分辨兩頁：書本攤開或散頁疊在一起時，只框你要的那一頁', since: '1.20' },
+    { t: 'iPhone 即時掃描改成瞬間拍好，不用等「拍攝中」；拿穩時更容易自動拍下', since: '1.21' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
