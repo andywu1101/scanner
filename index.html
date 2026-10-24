@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>伍敵樂譜掃描｜精確的攜帶式 PDF 掃描神器</title>
+<title>小伍敵樂譜掃描｜精確的攜帶式 PDF 掃描神器</title>
 <meta name="description" content="用手機把樂譜、講義掃成清晰的 PDF：自動抓邊、彎曲書頁拉平、去雜點。免註冊，資料只存在自己的手機。">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="伍敵樂譜掃描">
-<meta property="og:title" content="伍敵樂譜掃描｜精確的攜帶式 PDF 掃描神器">
+<meta property="og:site_name" content="小伍敵樂譜掃描">
+<meta property="og:title" content="小伍敵樂譜掃描｜精確的攜帶式 PDF 掃描神器">
 <meta property="og:description" content="用手機把樂譜、講義掃成清晰的 PDF：自動抓邊、彎曲書頁拉平、去雜點。免註冊，資料只存在自己的手機。">
 <meta property="og:url" content="https://andywu1101.github.io/scanner/">
 <meta property="og:image" content="https://andywu1101.github.io/scanner/og-image.png">
@@ -15,13 +15,19 @@
 <meta property="og:image:height" content="630">
 <meta property="og:locale" content="zh_TW">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="伍敵樂譜掃描｜精確的攜帶式 PDF 掃描神器">
+<meta name="twitter:title" content="小伍敵樂譜掃描｜精確的攜帶式 PDF 掃描神器">
 <meta name="twitter:description" content="用手機把樂譜、講義掃成清晰的 PDF：自動抓邊、彎曲書頁拉平、去雜點。免註冊，資料只存在自己的手機。">
 <meta name="twitter:image" content="https://andywu1101.github.io/scanner/og-image.png">
 <meta name="theme-color" content="#FFFCF8">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="伍敵掃描">
+<meta name="apple-mobile-web-app-title" content="小伍敵掃描">
+<script>
+/* Android／桌機 Chromium 的安裝事件可能很早就觸發，要放在最前面接（事件物件只能用一次） */
+window.__a2hsPrompt = null;
+window.addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); window.__a2hsPrompt = e; });
+window.addEventListener('appinstalled', function () { window.__a2hsPrompt = null; });
+</script>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -391,6 +397,38 @@ input[type=file]{display:none}
   background-size:2px 12px,100% 4px;background-position:calc(var(--def) - (var(--def) / 100% * 26px) + 12px) center,0 center;background-repeat:no-repeat}
 .defrange::-webkit-slider-thumb{-webkit-appearance:none;width:26px;height:26px;border-radius:50%;background:var(--cocoa);border:3px solid var(--cream);box-shadow:0 1px 5px rgba(58,40,30,.35)}
 .defrange::-moz-range-thumb{width:22px;height:22px;border-radius:50%;background:var(--cocoa);border:3px solid var(--cream)}
+
+/* 加入主畫面（1.17） */
+.cv-a2hs{margin:0 auto 14px;display:none;align-items:center;justify-content:center;gap:8px;font-weight:700;font-size:16px;padding:13px 22px;border-radius:999px;background:var(--surface);color:var(--cocoa-d);border:2px solid var(--cocoa);box-shadow:0 4px 14px rgba(74,47,34,.12)}
+.cv-a2hs.on{display:inline-flex}
+.cv-desk{display:none;margin:0 auto 18px;background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:18px 20px;max-width:440px}
+.cv-desk.on{display:block}
+.cv-desk b{display:block;font-size:17px;color:var(--cocoa-d);margin-bottom:4px}
+.cv-desk p{margin:0 0 12px;font-size:14px;color:var(--muted);line-height:1.6}
+.cv-desk .qr{width:180px;height:180px;margin:0 auto 8px;display:block;image-rendering:pixelated}
+.cv-desk .url{font-size:13px;color:var(--muted);word-break:break-all}
+.a2-ico{width:18px;height:18px;display:inline-block;vertical-align:-3px}
+.a2-warn{background:#FBEDE6;border:1px solid #EBC3B5;color:var(--text);border-radius:12px;padding:10px 12px;font-size:14.5px;line-height:1.7;text-align:left;margin:0 0 14px}
+.a2-warn b{color:var(--danger)}
+.a2-hint{background:var(--surface2);border-radius:12px;padding:11px 12px;font-size:14.5px;line-height:1.75;text-align:left;margin:0 0 14px;color:var(--text)}
+.a2-copy{display:block;width:100%;margin-top:9px;padding:10px;border-radius:10px;background:var(--cocoa);color:#fff;font-weight:700;font-size:14.5px}
+.a2-steps{list-style:none;margin:0 0 6px;padding:0;text-align:left}
+.a2-steps li{display:flex;gap:10px;align-items:flex-start;font-size:15.5px;line-height:1.6;color:var(--text);padding:9px 2px;border-bottom:1px dashed var(--line)}
+.a2-steps li:last-child{border-bottom:0}
+.a2-num{flex:none;width:26px;height:26px;border-radius:50%;background:var(--cocoa);color:#fff;font-weight:700;font-size:14px;display:grid;place-items:center;margin-top:1px}
+.a2-done{font-size:15px;color:var(--sage-d);font-weight:700;margin:8px 0 12px}
+.a2hs-bar{display:flex;align-items:center;gap:8px;background:#FBEDE6;border:1px solid #EBC3B5;border-radius:12px;padding:10px 10px 10px 12px;margin:2px 0 14px;font-size:13.5px;line-height:1.55;color:var(--text)}
+.a2hs-bar span{flex:1}
+.a2hs-bar .how{flex:none;font-weight:700;color:#fff;background:var(--danger);border-radius:999px;padding:6px 12px;font-size:13px}
+.a2hs-bar .x{flex:none;width:26px;height:26px;border-radius:50%;color:var(--muted);font-size:18px;line-height:1}
+.help .a2-first{background:var(--surface2);border-radius:12px;padding:4px 12px 12px;margin-top:4px}
+.help .a2-first button{display:block;width:100%;margin-top:8px;padding:11px;border-radius:10px;background:var(--cocoa);color:#fff;font-weight:700}
+.cv-desk p{white-space:normal}
+.cv-start.desk{background:none;color:var(--muted);box-shadow:none;font-size:14px;font-weight:600;padding:6px 10px;text-decoration:underline}
+.a2-ok{color:var(--sage-d);font-weight:700;font-size:15px;margin:10px 4px 4px}
+#a2Bar{flex:none;padding:12px 16px 0;display:none}
+#a2Bar.on{display:block}
+#a2Bar .a2hs-bar{margin:0}
 </style>
 </head>
 <body>
@@ -408,9 +446,11 @@ input[type=file]{display:none}
     </div>
     <div class="cv-card">
       <svg class="cv-art" viewBox="0 0 120 160" width="75" height="100" aria-hidden="true"><defs><filter id="cvsh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#4A2F22" flood-opacity=".18"/></filter></defs><rect x="12" y="12" width="96" height="136" rx="7" fill="#FFFCF8" filter="url(#cvsh)"/><g stroke="#3A281E" stroke-width="0.9"><line x1="22" x2="98" y1="30.0" y2="30.0"/><line x1="22" x2="98" y1="33.2" y2="33.2"/><line x1="22" x2="98" y1="36.4" y2="36.4"/><line x1="22" x2="98" y1="39.6" y2="39.6"/><line x1="22" x2="98" y1="42.8" y2="42.8"/><line x1="22" x2="98" y1="56.0" y2="56.0"/><line x1="22" x2="98" y1="59.2" y2="59.2"/><line x1="22" x2="98" y1="62.4" y2="62.4"/><line x1="22" x2="98" y1="65.6" y2="65.6"/><line x1="22" x2="98" y1="68.8" y2="68.8"/><line x1="22" x2="98" y1="82.0" y2="82.0"/><line x1="22" x2="98" y1="85.2" y2="85.2"/><line x1="22" x2="98" y1="88.4" y2="88.4"/><line x1="22" x2="98" y1="91.6" y2="91.6"/><line x1="22" x2="98" y1="94.8" y2="94.8"/><line x1="22" x2="98" y1="108.0" y2="108.0"/><line x1="22" x2="98" y1="111.2" y2="111.2"/><line x1="22" x2="98" y1="114.4" y2="114.4"/><line x1="22" x2="98" y1="117.6" y2="117.6"/><line x1="22" x2="98" y1="120.8" y2="120.8"/><line x1="22" x2="98" y1="134.0" y2="134.0"/><line x1="22" x2="98" y1="137.2" y2="137.2"/><line x1="22" x2="98" y1="140.4" y2="140.4"/><line x1="22" x2="98" y1="143.6" y2="143.6"/><line x1="22" x2="98" y1="146.8" y2="146.8"/></g><path d="M2 20V2h18M100 2h18v18M118 140v18h-18M20 158H2v-18" fill="none" stroke="#C9935F" stroke-width="4"/><line x1="0" x2="120" y1="80" y2="80" stroke="#8FB38A" stroke-width="3.5"/></svg>
-      <h1 class="cv-title">伍敵樂譜掃描</h1>
+      <h1 class="cv-title">小伍敵樂譜掃描</h1>
       <div class="cv-sub">SHEET MUSIC SCANNER</div>
       <p class="cv-msg">這個工具完全免費，<br>掃描的資料只保存在本設備裡。<br>如果它對你瀏覽樂譜有幫助，<br>歡迎小額贊助支持後續開發與維護。</p>
+      <div><button class="cv-a2hs" id="cvA2hs">📲 請先加入主畫面，再開始掃描</button></div>
+      <div class="cv-desk" id="cvDesk"><b>這個 App 要用手機使用</b><p>請用手機的相機掃描下面的 QR Code，<br>用 Safari（iPhone）或 Chrome（Android）打開。</p><img class="qr" id="cvQr" alt="網址的 QR Code"><div class="url">andywu1101.github.io/scanner</div></div>
       <button class="cv-start" id="cvStart">開始掃描 →</button>
       <div class="cv-foot">精確的攜帶式樂譜掃描神器</div>
       <div><button class="cv-author" id="cvAuthor">作者：伍祐恆 Heng-Heng Wu ▸</button></div>
@@ -423,11 +463,12 @@ input[type=file]{display:none}
 <section class="screen" id="home">
   <header class="bar home-bar">
     <button class="cvback" id="homeCover" aria-label="回封面"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>封面</button>
-    <h1>伍敵樂譜掃描</h1>
+    <h1>小伍敵樂譜掃描</h1>
     <span class="sp1"></span>
     <button class="ibtn" id="btnHelp" aria-label="使用教學"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M9.3 9.2a2.8 2.8 0 0 1 5.4 1c0 1.9-2.7 2.4-2.7 4"/><circle cx="12" cy="17.4" r=".6" fill="currentColor"/></svg></button>
     <button class="ibtn" id="btnSettings" aria-label="設定"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
   </header>
+  <div id="a2Bar"><div class="a2hs-bar"><span>建議先加入主畫面，掃描才不會分散在瀏覽器和 App 兩邊。</span><button class="how" id="a2BarHow">怎麼做</button><button class="x" id="a2BarX" aria-label="暫時收起">×</button></div></div>
   <div class="scroll" id="homeScroll"><div id="homeBody"></div></div>
   <div class="home-donate"><button id="homeDonate">❤ 小額贊助</button></div>
   <nav class="actions">
@@ -621,6 +662,30 @@ input[type=file]{display:none}
       <button type="button" class="ditem" data-panel="">← 返回贊助管道</button>
     </div>
     <button type="button" class="ditem" style="width:100%;margin-bottom:12px" id="donateToAuthor"><span class="ico">🔗</span> 作者主頁</button>
+    <button type="button" class="d-dismiss" data-close>關閉</button>
+  </div>
+</div>
+
+<!-- 加入主畫面說明（1.17） -->
+<div class="dmodal" id="a2hsModal">
+  <div class="dbox">
+    <div class="dico" style="color:var(--cocoa)"><svg style="width:44px;height:44px;display:inline-block" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 10.5H6.6a1.6 1.6 0 0 0-1.6 1.6v7.3a1.6 1.6 0 0 0 1.6 1.6h10.8a1.6 1.6 0 0 0 1.6-1.6v-7.3a1.6 1.6 0 0 0-1.6-1.6H15.5"/><path d="M12 2.9v11.6"/><path d="M8.3 6.5 12 2.8l3.7 3.7"/></svg></div>
+    <h3>加入主畫面</h3>
+    <p style="margin-bottom:12px">加入之後就像一般 App：從主畫面直接打開、全螢幕使用、載入更快。</p>
+    <div class="a2-warn"><b>⚠ 請先加入主畫面，再開始掃描。</b><br>在瀏覽器裡掃描的資料，不會出現在主畫面的 App 裡。</div>
+    <div class="a2-hint" id="a2InApp" style="display:none">你現在是在 LINE 或其他 App 裡打開的，這裡<b>沒有</b>「加入主畫面」。<br>請按右上角或右下角的「⋯」或「⋮」，選<b>「在瀏覽器中開啟」</b>；或按下面的按鈕複製網址，貼到 <span class="a2Br">Safari</span> 的網址列。<button type="button" class="a2-copy" id="a2Copy">📋 複製網址</button></div>
+    <ol class="a2-steps" id="a2StepsIOS">
+      <li><span class="a2-num">1</span><span>點網址列旁的分享圖示 <svg class="a2-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 10.5H6.6a1.6 1.6 0 0 0-1.6 1.6v7.3a1.6 1.6 0 0 0 1.6 1.6h10.8a1.6 1.6 0 0 0 1.6-1.6v-7.3a1.6 1.6 0 0 0-1.6-1.6H15.5"/><path d="M12 2.9v11.6"/><path d="M8.3 6.5 12 2.8l3.7 3.7"/></svg>（可能在網址列上，或在「⋯」裡面）</span></li>
+      <li><span class="a2-num">2</span><span>往下找到並點「加入主畫面」</span></li>
+      <li><span class="a2-num">3</span><span>點右上角的「加入」</span></li>
+    </ol>
+    <ol class="a2-steps" id="a2StepsAndroid" style="display:none">
+      <li><span class="a2-num">1</span><span>點 Chrome 右上角的選單「⋮」</span></li>
+      <li><span class="a2-num">2</span><span>點「安裝應用程式」或「加到主畫面」（不同手機用詞不同）</span></li>
+      <li><span class="a2-num">3</span><span>點「安裝」或「新增」</span></li>
+    </ol>
+    <p class="a2-done">完成後，從主畫面的「小伍敵掃描」打開就可以了 🎉</p>
+    <p style="font-size:13.5px;margin:-4px 0 12px">如果已經加入過，請直接從主畫面的「小伍敵掃描」圖示打開。</p>
     <button type="button" class="d-dismiss" data-close>關閉</button>
   </div>
 </div>

@@ -1,4 +1,4 @@
-/* 伍敵樂譜掃描 — 影像處理 Worker（OpenCV.js） */
+/* 小伍敵樂譜掃描 — 影像處理 Worker（OpenCV.js） */
 self.importScripts('lib/opencv.js');
 
 let cvReady = null;

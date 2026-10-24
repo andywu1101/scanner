@@ -1,4 +1,4 @@
-/* 伍敵樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
+/* 小伍敵樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
@@ -297,6 +297,7 @@ let current = 'cover';
 const state = { docId: null, pageIndex: 0 };
 function show(name) {
   document.querySelectorAll('.screen').forEach((s) => s.classList.toggle('active', s.id === name));
+  if (name === 'home' && typeof needA2Bar === 'function' && needA2Bar()) $('#a2Bar').classList.add('on'); // 加入主畫面提示：每次回到首頁都再出現
   current = name;
   // 狀態列顏色跟著畫面：相機類畫面深色，其他米白
   const tc = document.querySelector('meta[name="theme-color"]');
@@ -2351,7 +2352,7 @@ $('#btnSettings').onclick = () => {
     <button class="srow" id="setDefAdj" style="margin-top:6px"><span>預設調整數值 ›<span class="sub">新文件一開始用的曝光、濃淡、銳利度等數值</span></span></button>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會另外拍一張照片（最高 1500 萬畫素）；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.16</div>`, (s) => {
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.17</div>`, (s) => {
     s.querySelector('#setDefAdj').onclick = () => openDefAdj('bw');
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
@@ -2384,7 +2385,9 @@ $('#btnHelp').onclick = () => openHelp();
 $('#homeCover').onclick = () => goCover();
 $('#homeDonate').onclick = () => openDonate();
 function openHelp() {
-  openSheet(`<div class="help"><h3>使用教學</h3>
+  const first = A2.standalone ? '<div class="a2-ok">✓ 已加入主畫面</div>'
+    : '<div class="a2-first"><h4>第一步：加入主畫面</h4><ul><li>先加入主畫面再開始掃描，用起來就像一般 App。</li><li>在瀏覽器裡掃描的資料，不會出現在主畫面的 App 裡。</li></ul><button id="helpA2">📲 教我怎麼加入</button></div>';
+  openSheet(`<div class="help"><h3>使用教學</h3>${first}
     <h4>三種拍法</h4><ul>
       <li><b>即時掃描</b>：對準樂譜就會自動拍，適合一次拍很多頁。</li>
       <li><b>高畫質拍照</b>：用手機相機拍，畫質最清楚，iPhone 特別建議用這個。</li>
@@ -2408,7 +2411,10 @@ function openHelp() {
     <div class="warn"><h4>⚠ 重要提醒</h4><ul>
       <li>掃描只存在這支手機裡，不會上傳。</li>
       <li>刪除主畫面上的 App，或清除瀏覽器資料，掃描就會全部消失。重要的樂譜請記得匯出 PDF 備份。</li></ul></div>
-    <button class="close-help" id="helpClose">我知道了</button></div>`, (sh) => { sh.querySelector('#helpClose').onclick = closeSheet; sh.scrollTop = 0; });
+    <button class="close-help" id="helpClose">我知道了</button></div>`, (sh) => {
+    sh.querySelector('#helpClose').onclick = closeSheet; sh.scrollTop = 0;
+    const a = sh.querySelector('#helpA2'); if (a) a.onclick = () => { closeSheet(); tryInstall(); };
+  });
 }
 $('#cvDonate').onclick = () => openDonate();
 $('#cvAuthor').onclick = () => openModal('authorModal');
@@ -2470,6 +2476,59 @@ function openDefAdj(mode) {
     s.querySelector('#defBack').onclick = closeSheet;
   });
 }
+
+/* ---------- 加入主畫面（1.17，做法比照音樂聽力練習 App） ----------
+   iPhone 沒有程式可以安裝，只能開說明視窗教使用者按；Android／Chromium 有 beforeinstallprompt 可一鍵安裝。
+   iPhone 上 Safari 和主畫面 App 的資料是分開的，所以提醒「先加入主畫面再開始掃描」。
+   從主畫面打開（standalone）時，封面按鈕、首頁提示條都不顯示；電腦則顯示 QR Code 請他用手機開 */
+function a2hsEnv() {
+  const ua = navigator.userAgent || '';
+  const isIOS = /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1);
+  const isAndroid = /Android/.test(ua);
+  const inApp = /\bLine\/|Instagram|FBAN|FBAV|FB_IAB|MicroMessenger|Twitter/i.test(ua);
+  const iosOther = isIOS && /CriOS|FxiOS|EdgiOS|OPiOS/i.test(ua);
+  return { isIOS, isAndroid, desktop: !isIOS && !isAndroid, standalone: navigator.standalone === true || matchMedia('(display-mode: standalone)').matches, needBrowser: inApp || iosOther };
+}
+const A2 = a2hsEnv();
+function showA2HS() {
+  const env = a2hsEnv();
+  $('#a2StepsIOS').style.display = env.isAndroid ? 'none' : '';
+  $('#a2StepsAndroid').style.display = env.isAndroid ? '' : 'none';
+  document.querySelectorAll('.a2Br').forEach((e) => { e.textContent = env.isAndroid ? 'Chrome' : 'Safari'; });
+  $('#a2InApp').style.display = env.needBrowser ? 'block' : 'none';
+  openModal('a2hsModal');
+}
+// 按「加入主畫面」：Android 有安裝事件就直接跳系統視窗，沒有（已裝過、瀏覽器不支援）就開說明
+function tryInstall() {
+  const e = window.__a2hsPrompt;
+  if (!e) { showA2HS(); return; }
+  window.__a2hsPrompt = null;
+  try { e.prompt(); } catch (_) { showA2HS(); }
+}
+$('#a2Copy').onclick = () => {
+  const b = $('#a2Copy'), url = location.origin + location.pathname;
+  const done = () => { b.textContent = '✓ 已複製，請貼到瀏覽器的網址列'; setTimeout(() => { b.textContent = '📋 複製網址'; }, 2600); };
+  const fail = () => { b.textContent = url; };
+  try { navigator.clipboard.writeText(url).then(done, fail); } catch (_) { fail(); }
+};
+$('#cvA2hs').onclick = () => tryInstall();
+$('#a2BarHow').onclick = () => tryInstall();
+$('#a2BarX').onclick = () => $('#a2Bar').classList.remove('on'); // 只是暫時收起，回到首頁會再出現
+const needA2Bar = () => !A2.standalone && !A2.desktop;
+(function setupCoverA2() {
+  if (A2.standalone) return;
+  if (!A2.desktop) { $('#cvA2hs').classList.add('on'); return; }
+  // 電腦：請他用手機開（QR Code 由 App 自己產生，函式庫只在電腦上載入）
+  $('#cvDesk').classList.add('on');
+  $('.cv-msg').style.display = 'none';
+  const st = $('#cvStart'); st.textContent = '仍要在電腦上開啟 →'; st.classList.add('desk');
+  const sc = document.createElement('script');
+  sc.src = 'lib/qrcode.js';
+  sc.onload = () => {
+    try { const q = qrcode(0, 'M'); q.addData('https://andywu1101.github.io/scanner/'); q.make(); $('#cvQr').src = q.createDataURL(6, 2); } catch (e) { console.warn('qr', e); }
+  };
+  document.head.appendChild(sc);
+})();
 
 /* ---------- 畫面資訊（除錯用，顯示在設定最下方） ----------
    iOS 26 主畫面 App 底部空白的修正在 index.html 的 CSS（html min-height） */
