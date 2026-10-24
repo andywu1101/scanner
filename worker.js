@@ -202,6 +202,110 @@ function splitGutter(cv, gray, q, w, h) {
   return { quad: pick, area: polyArea(pick) / (w * h) };
 }
 
+// 兩頁交界的凹口（1.20）：書本攤開或兩張紙疊在一起時，白色區塊（紙）的外緣在兩頁交界處會往內凹。
+// 想像用橡皮筋把整塊白色圍起來（凸包），外緣比橡皮筋凹進去的地方就是凹口。上下兩個凹口連成的線＝兩頁的分界。
+// 回傳 { kind: 2, p, q }（兩個凹口）、{ kind: 1, p, side, weak }（只有一個，旁邊那頁超出畫面）或 null
+function notchLine(cv, bin, w, h) {
+  const cs = new cv.MatVector(), hier = new cv.Mat();
+  cv.findContours(bin, cs, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE);
+  let c = null, ca = 0;
+  for (let i = 0; i < cs.size(); i++) { const t = cs.get(i), a = cv.contourArea(t); if (a > ca) { if (c) c.delete(); c = t; ca = a; } else t.delete(); }
+  hier.delete(); cs.delete();
+  if (!c || ca < w * h * 0.12) { if (c) c.delete(); return null; }
+  const P = []; for (let i = 0; i < c.rows; i++) P.push([c.data32S[i * 2], c.data32S[i * 2 + 1]]);
+  const hm = new cv.Mat(); cv.convexHull(c, hm, false, false);
+  const idx = Array.from(hm.data32S).sort((a, b) => a - b);
+  hm.delete(); c.delete();
+  // 每兩個相鄰的凸包點之間，離凸包邊最遠的輪廓點＝凹口（自己算，不依賴 OpenCV.js 有沒有 convexityDefects）
+  const m = Math.min(w, h), minDep = Math.max(3, m * 0.008), defs = [], weak = [];
+  for (let k = 0; k < idx.length; k++) {
+    const i = idx[k], j = idx[(k + 1) % idx.length];
+    const A = P[i], B = P[j], L = Math.hypot(B[0] - A[0], B[1] - A[1]); if (L < 1) continue;
+    let best = 0, bi = -1;
+    for (let t = (i + 1) % P.length; t !== j; t = (t + 1) % P.length) {
+      const d = Math.abs((B[0] - A[0]) * (A[1] - P[t][1]) - (A[0] - P[t][0]) * (B[1] - A[1])) / L;
+      if (d > best) { best = d; bi = t; }
+    }
+    if (bi >= 0 && best >= minDep) defs.push({ p: P[bi], d: best });
+    if (bi >= 0 && best >= 1.2) weak.push({ p: P[bi], d: best });
+  }
+  let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
+  for (const [x, y] of P) { if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y; }
+  const bh = by1 - by0, bw = bx1 - bx0;
+  // 兩個凹口連成接近直的線（左右偏不超過上下距離的 0.35 倍），而且上下相隔夠遠；手影造成的缺口在紙中間，連不成這種線
+  let best = null;
+  for (let a = 0; a < defs.length; a++) for (let b = a + 1; b < defs.length; b++) {
+    const p = defs[a].p, q = defs[b].p, dx = q[0] - p[0], dy = q[1] - p[1];
+    if (Math.abs(dy) < bh * 0.08 || Math.abs(dx) > Math.abs(dy) * 0.35) continue;
+    const sc = defs[a].d + defs[b].d;
+    if (!best || sc > best.sc) best = { sc, p, q };
+  }
+  if (best) return { kind: 2, p: best.p, q: best.q };
+  // 只有一個凹口：要在上緣或下緣附近、靠左右外側 30%，而且那一側的白色區塊延伸到畫面外
+  const touchL = bx0 <= 2, touchR = bx1 >= w - 3;
+  let one = null;
+  for (const d of defs) {
+    const [x, y] = d.p;
+    const nearTB = y - by0 < bh * 0.15 || by1 - y < bh * 0.15;
+    const side = x - bx0 < bw * 0.3 ? 'L' : bx1 - x < bw * 0.3 ? 'R' : '';
+    if (!nearTB || !side || (side === 'L' && !touchL) || (side === 'R' && !touchR)) continue;
+    if (!one || d.d > one.d.d) one = { d, side };
+  }
+  return one ? { kind: 1, p: one.d.p, side: one.side, weak } : null;
+}
+
+// 沿凹口分界切掉旁邊那頁（1.20）：在白色遮罩上沿分界線畫一條黑線把兩頁分開，再重新找框。
+// 保險：分界線往旁邊那頁多留 1.5%（寧可多框一點書溝，不要切到內容）；切掉超過 35%、或切完不像一頁（寬不到高的一半）就不切
+function cutAtNotch(cv, bin, r, w, h) {
+  const ns = Math.min(1, 480 / Math.max(w, h)); // 凹口一律在長邊約 480 的遮罩上找，即時與完整偵測結果才會一致
+  let nb = bin;
+  if (ns < 1) { nb = new cv.Mat(); cv.resize(bin, nb, new cv.Size(Math.round(w * ns), Math.round(h * ns)), 0, 0, cv.INTER_AREA); cv.threshold(nb, nb, 127, 255, cv.THRESH_BINARY); }
+  const nl = notchLine(cv, nb, nb.cols, nb.rows);
+  if (nb !== bin) nb.delete();
+  if (!nl) return null;
+  const up = (p) => [p[0] / ns, p[1] / ns];
+  const a = up(nl.p);
+  let b;
+  if (nl.kind === 2) b = up(nl.q);
+  else {
+    // 只有一個凹口：先假設分界線與框另一側的紙邊平行；再到另一端預估位置左右 10% 內找較淺的凹口當第二點
+    // （手機斜拿時，透視會讓同一頁左右兩邊在照片裡不平行，只靠平行會越往下越偏）
+    const e = nl.side === 'L' ? [r.quad[1], r.quad[2]] : [r.quad[0], r.quad[3]];
+    const vx = e[1][0] - e[0][0], vy = e[1][1] - e[0][1];
+    if (Math.abs(vy) < 1) return null;
+    b = [a[0] + vx, a[1] + vy];
+    const top = a[1] < h / 2;
+    let sec = null;
+    for (const d of nl.weak) {
+      const P2 = up(d.p);
+      const far = top ? P2[1] > h * 0.6 : P2[1] < h * 0.4;
+      const xAt = a[0] + vx * ((P2[1] - a[1]) / vy);
+      if (!far || Math.abs(P2[0] - xAt) > w * 0.10) continue;
+      if (!sec || d.d > sec.d) sec = { p: P2, d: d.d };
+    }
+    if (sec) b = sec.p;
+  }
+  let dx = b[0] - a[0], dy = b[1] - a[1];
+  if (Math.abs(dy) < 1) return null;
+  // 往旁邊那頁（遠離框中心的那一側）平移 1.5%
+  const Ln = Math.hypot(dx, dy), nx = dy / Ln, ny = -dx / Ln;
+  const cx = r.quad.reduce((s, p) => s + p[0], 0) / 4, cy = r.quad.reduce((s, p) => s + p[1], 0) / 4;
+  const sgn = (cx - a[0]) * nx + (cy - a[1]) * ny > 0 ? -1 : 1, sh = w * 0.015 * sgn;
+  const a2 = [a[0] + nx * sh, a[1] + ny * sh];
+  const t0 = -a2[1] / dy, t1 = (h - a2[1]) / dy;
+  const cut = bin.clone();
+  cv.line(cut, new cv.Point(Math.round(a2[0] + dx * t0), 0), new cv.Point(Math.round(a2[0] + dx * t1), h), new cv.Scalar(0), 3);
+  const nc = []; quadsFromEdges(cv, cut, w, h, nc); cut.delete();
+  let bestN = null; for (const c2 of nc) if (!bestN || c2.area > bestN.area) bestN = c2;
+  if (!bestN || bestN.area <= 0.1 || bestN.area >= r.area * 0.97) return null;
+  if (bestN.area < r.area * 0.62) return null; // 切掉太多（超過約 35%）
+  const Q = bestN.quad;
+  const wd = (Math.hypot(Q[1][0] - Q[0][0], Q[1][1] - Q[0][1]) + Math.hypot(Q[2][0] - Q[3][0], Q[2][1] - Q[3][1])) / 2;
+  const ht = (Math.hypot(Q[3][0] - Q[0][0], Q[3][1] - Q[0][1]) + Math.hypot(Q[2][0] - Q[1][0], Q[2][1] - Q[1][1])) / 2;
+  if (Math.min(wd, ht) / Math.max(wd, ht, 1) < 0.5) return null; // 切完不像一頁
+  return { quad: Q, area: bestN.area, notch: nl.kind };
+}
+
 function detectQuad(cv, rgba, w, h, fast) {
   const src = new cv.Mat(h, w, cv.CV_8UC4);
   src.data.set(rgba);
@@ -234,7 +338,6 @@ function detectQuad(cv, rgba, w, h, fast) {
   cv.threshold(blur, bin, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
   cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, k);
   quadsFromEdges(cv, bin, w, h, candidates);
-  bin.delete();
   // 策略 3：Canny（弱）；即時模式已經找到很像紙的框就省掉，弱手機才跟得上
   if (!fast || !confident()) {
     cv.Canny(blur, edges, 25, 75);
@@ -257,17 +360,20 @@ function detectQuad(cv, rgba, w, h, fast) {
   if (candidates.length) {
     scoreAll();
     for (const c of candidates) if (!r || c.score > r.score) r = c;
+    // 兩頁交界的凹口（1.20）：切掉旁邊那頁露出的一條（書本攤開、散頁疊在一起）
+    try { const nc = cutAtNotch(cv, bin, r, w, h); if (nc) r = Object.assign({}, r, nc); }
+    catch (e) { /* 失敗就用原本的框 */ }
     // 書溝：框裡有一條直的陰影谷線 → 只框其中一頁
     try { const sp = splitGutter(cv, blur, r.quad, w, h); if (sp && sp.area > 0.1) r = Object.assign({}, r, sp, { gutter: true }); }
     catch (e) { /* 找不到就算了 */ }
   }
-  src.delete(); gray.delete(); blur.delete(); k.delete(); edges.delete();
+  src.delete(); gray.delete(); blur.delete(); k.delete(); edges.delete(); bin.delete();
   if (!r) return null;
   // 往中心內縮約 0.6%，避免把紙張邊緣外的桌面拍進去
   const cx = r.quad.reduce((a, p) => a + p[0], 0) / 4, cy = r.quad.reduce((a, p) => a + p[1], 0) / 4;
   const inset = 0.006;
   const q = r.quad.map((p) => [p[0] + (cx - p[0]) * inset * 2, p[1] + (cy - p[1]) * inset * 2]);
-  return { corners: q.map((p) => [Math.min(1, Math.max(0, p[0] / w)), Math.min(1, Math.max(0, p[1] / h))]), area: r.area, gutter: !!r.gutter };
+  return { corners: q.map((p) => [Math.min(1, Math.max(0, p[0] / w)), Math.min(1, Math.max(0, p[1] / h))]), area: r.area, gutter: !!r.gutter, notch: r.notch || 0 };
 }
 
 /* ---------- 真實長寬比（Zhang & He 白板掃描法） ---------- */

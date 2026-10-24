@@ -674,7 +674,7 @@ async function startLive(docId) {
       $('#resChip').textContent = live.ic ? `預覽 ${v.videoWidth}×${v.videoHeight}・拍照最高 1500 萬畫素` : `${v.videoWidth}×${v.videoHeight}`;
     };
     v.onloadedmetadata = updRes; updRes();
-    setHint(!settings.autoShutter ? MANUAL_HINT : workerReady ? '將文件放進畫面中' : '影像引擎載入中…');
+    if (!settings.autoShutter) manualHint(); else setHint(workerReady ? '將文件放進畫面中' : '影像引擎載入中…');
     whenReady().then(() => { if (live.running && settings.autoShutter) setHint('將文件放進畫面中'); });
     liveLoop();
     requestAnimationFrame(drawOverlay);
@@ -693,7 +693,8 @@ function stopLive() {
   shotFx('');
   resumeQueue();
 }
-function setHint(t, good) { const h = $('#hint'); if (h.textContent !== t) h.textContent = t; h.classList.toggle('on', !!good); }
+function setHint(t, good) { const h = $('#hint'); if (h.textContent !== t) h.textContent = t; h.classList.toggle('on', !!good); h.style.visibility = ''; }
+function hideHint() { $('#hint').style.visibility = 'hidden'; }
 function setRing(p) { $('#ring').setAttribute('stroke-dashoffset', String(226.2 * (1 - p))); }
 const maxDisp = (a, b) => Math.max(...a.map((p, i) => Math.hypot(p[0] - b[i][0], p[1] - b[i][1])));
 
@@ -799,7 +800,8 @@ function grabFull(v) { return grabInto(fullCanvases[0], v); }
 async function liveLoop() {
   if (!live.running) return;
   const v = $('#video');
-  if (!settings.autoShutter && !live.paused && !live.capturing) setHint(MANUAL_HINT, true); // 手動模式不找框（1.19）
+  // 手動模式不找框（1.19）；提示語只顯示 3 秒（1.20，作者覺得一直掛著礙眼）
+  if (!settings.autoShutter && !live.paused && !live.capturing) { if (performance.now() < (live.manualHintUntil || 0)) setHint(MANUAL_HINT); else hideHint(); }
   if (workerReady && settings.autoShutter && !live.paused && !live.detecting && !live.capturing && v.videoWidth) {
     live.detecting = true;
     try {
@@ -1093,10 +1095,17 @@ async function removeLivePage(pageId) {
 function liveResume() {
   live.paused = false;
   if (!live.track || live.track.readyState === 'ended') { finishLive(); return; } // 中途被切到背景，相機已經關了
-  $('#video').play().catch(() => {});
-  setHint(settings.autoShutter ? (live.armed ? '將文件放進畫面中' : '已拍好，請換下一頁') : MANUAL_HINT, !settings.autoShutter || !live.armed);
+  // 1.20：iPhone 從裁切畫面回來時，相機畫面會用錯誤的大小重畫（縮成約四分之三、四周變黑）。
+  // 把串流重新接上一次、並讓影片元素重新排版，強制以正確大小重畫
+  const v = $('#video'), st = live.stream;
+  v.style.display = 'none'; void v.offsetHeight; v.style.display = '';
+  v.srcObject = null; v.srcObject = st;
+  v.play().catch(() => {});
+  if (settings.autoShutter) setHint(live.armed ? '將文件放進畫面中' : '已拍好，請換下一頁', !live.armed);
+  else hideHint();
 }
 const MANUAL_HINT = '手動拍攝：拍完後再自己調整範圍';
+function manualHint() { live.manualHintUntil = performance.now() + 3000; setHint(MANUAL_HINT); }
 function updateLiveBtns() {
   $('#autoBtn').classList.toggle('on', settings.autoShutter);
   $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
@@ -1126,7 +1135,7 @@ $('#autoBtn').onclick = () => {
   updateLiveBtns();
   live.armed = true; resetLock(); setRing(0);
   if (settings.autoShutter) { setHint('將文件放進畫面中'); liveTip('自動拍攝', '對準文件，穩定後自動拍下'); }
-  else { setHint(MANUAL_HINT, true); liveTip('手動拍攝', '不自動框選，拍完再自己調整範圍'); }
+  else { manualHint(); liveTip('手動拍攝', '不自動框選，拍完再自己調整範圍'); }
 };
 let torchOn = false;
 $('#torchBtn').onclick = async () => {
@@ -2538,7 +2547,7 @@ $('#cvDonate').onclick = () => openDonate();
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.19';
+const APP_VER = '1.20';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   { v: 'v1', items: [
@@ -2556,6 +2565,7 @@ const CHANGELOG = [
     { t: '問題回報與更新日誌', since: '1.18' },
     { t: '即時掃描更會找紙：紙上印有框線不會框錯，書本攤開時會沿著書溝只框一頁', since: '1.19' },
     { t: '手動拍攝不畫框、拍整張；可選「立即裁切」或「稍後裁切」，待裁切的頁會標上 ✂', since: '1.19' },
+    { t: '即時掃描更會分辨兩頁：書本攤開或散頁疊在一起時，只框你要的那一頁', since: '1.20' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
