@@ -72,16 +72,21 @@ function quadsFromEdges(cv, edges, w, h, out) {
     const hull = new cv.Mat();
     cv.convexHull(c, hull, false, true);
     const peri = cv.arcLength(hull, true);
-    let quad = null;
+    let quad = null, poly = null;
     for (const eps of [0.02, 0.03, 0.04, 0.06, 0.08]) {
       const approx = new cv.Mat();
       cv.approxPolyDP(hull, approx, eps * peri, true);
       const n = approx.rows; // 先讀出點數，再釋放
       if (n === 4) quad = matToPts(approx);
+      else if ((n === 5 || n === 6) && !poly) poly = matToPts(approx);
       approx.delete();
       if (n <= 4) break;
     }
     hull.delete(); c.delete();
+    // 角被遮住（1.24）：紙缺一角，外形變成五、六邊形（凸包會把缺角斜斜切掉），
+    // 4 點近似會把斜切的那段併進某個角而歪掉。改取最長的四條邊延長相交，推回被遮住的角
+    const rec = poly ? cornerFromPoly(poly, w, h) : null;
+    if (rec) quad = rec;
     if (!quad) continue;
     const q = orderCorners(quad);
     const a = polyArea(q);
@@ -92,6 +97,34 @@ function quadsFromEdges(cv, edges, w, h, out) {
     out.push({ quad: q, area: a / frame });
   }
   contours.delete(); hier.delete();
+}
+
+// 五、六邊形 → 四邊形：保留最長的四條邊（依原本順序），相鄰兩邊延長的交點當角。
+// 被去掉的邊要夠短（每條 ≤ 保留邊最短者的 45%），交點不能跑太遠，結果要是凸四邊形、面積比原本大但不超過 25%
+function cornerFromPoly(P, w, h) {
+  const n = P.length, E = [];
+  for (let i = 0; i < n; i++) { const a = P[i], b = P[(i + 1) % n]; E.push({ i, a, b, L: Math.hypot(b[0] - a[0], b[1] - a[1]) }); }
+  const keep = E.slice().sort((x, y) => y.L - x.L).slice(0, 4).sort((x, y) => x.i - y.i);
+  const minKeep = Math.min(...keep.map((e) => e.L));
+  if (E.some((e) => !keep.includes(e) && e.L > minKeep * 0.45)) return null;
+  const inter = (e1, e2) => {
+    const d1 = [e1.b[0] - e1.a[0], e1.b[1] - e1.a[1]], d2 = [e2.b[0] - e2.a[0], e2.b[1] - e2.a[1]];
+    const den = d1[0] * d2[1] - d1[1] * d2[0]; if (Math.abs(den) < 1e-6 * e1.L * e2.L) return null;
+    const t = ((e2.a[0] - e1.a[0]) * d2[1] - (e2.a[1] - e1.a[1]) * d2[0]) / den;
+    return [e1.a[0] + d1[0] * t, e1.a[1] + d1[1] * t];
+  };
+  const pts = [];
+  for (let k = 0; k < 4; k++) {
+    const X = inter(keep[k], keep[(k + 1) % 4]); if (!X) return null;
+    if (X[0] < -w * 0.05 || X[0] > w * 1.05 || X[1] < -h * 0.05 || X[1] > h * 1.05) return null;
+    pts.push(X);
+  }
+  let sg = 0;
+  for (let i = 0; i < 4; i++) { const a = pts[i], b = pts[(i + 1) % 4], c = pts[(i + 2) % 4]; const cr = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]); if (sg && Math.sign(cr) !== sg) return null; sg = Math.sign(cr); }
+  let pa = 0; for (let i = 0; i < n; i++) { const j = (i + 1) % n; pa += P[i][0] * P[j][1] - P[j][0] * P[i][1]; } pa = Math.abs(pa) / 2;
+  const qa = polyArea(orderCorners(pts));
+  if (qa < pa * 0.99 || qa > pa * 1.25) return null;
+  return pts.map((p) => [Math.min(w - 1, Math.max(0, p[0])), Math.min(h - 1, Math.max(0, p[1]))]);
 }
 
 // 框邊「裡亮外暗」的程度（1.19）：紙在桌上，邊框內側是白紙、外側是桌面 → 差很多；
@@ -429,14 +462,21 @@ function detectQuad(cv, rgba, w, h, fast) {
   if (candidates.length) {
     scoreAll();
     for (const c of candidates) if (!r || c.score > r.score) r = c;
-    // 兩頁交界的凹口（1.20）：切掉旁邊那頁露出的一條（書本攤開、散頁疊在一起）
-    try { const nc = cutAtNotch(cv, bin, r, w, h); if (nc) r = Object.assign({}, r, nc); }
-    catch (e) { /* 失敗就用原本的框 */ }
-    // 書溝：框裡有一條直的陰影谷線 → 只框其中一頁
-    try { const sp = splitGutter(cv, blur, r.quad, w, h); if (sp && sp.area > 0.1) r = Object.assign({}, r, sp, { gutter: true }); }
-    catch (e) { /* 找不到就算了 */ }
+    // 角被手遮住（1.24）：手的膚色和紙一樣亮，會和紙連成一塊，把那個角拉到畫面邊緣。
+    // 先試「三個角推第四個角」：成功就代表只是一個角被蓋住，不再做下面的凹口／書溝切割（手和紙的交界也會形成凹口，會切錯）
+    let early = null;
+    try { early = inferCorner(blur.data, w, h, r.quad); } catch (e) { early = null; }
+    if (early) r = Object.assign({}, r, { quad: early, area: polyArea(early) / (w * h), inferred: true });
+    else {
+      // 兩頁交界的凹口（1.20）：切掉旁邊那頁露出的一條（書本攤開、散頁疊在一起）
+      try { const nc = cutAtNotch(cv, bin, r, w, h); if (nc) r = Object.assign({}, r, nc); }
+      catch (e) { /* 失敗就用原本的框 */ }
+      // 書溝：框裡有一條直的陰影谷線 → 只框其中一頁
+      try { const sp = splitGutter(cv, blur, r.quad, w, h); if (sp && sp.area > 0.1) r = Object.assign({}, r, sp, { gutter: true }); }
+      catch (e) { /* 找不到就算了 */ }
+    }
   }
-  if (r) { try { const iq = inferCorner(blur.data, w, h, r.quad); if (iq) r = Object.assign({}, r, { quad: iq, area: polyArea(iq) / (w * h), inferred: true }); } catch (e) { /* 推不出來就用原本的 */ } }
+  if (r && !r.inferred) { try { const iq = inferCorner(blur.data, w, h, r.quad); if (iq) r = Object.assign({}, r, { quad: iq, area: polyArea(iq) / (w * h), inferred: true }); } catch (e) { /* 推不出來就用原本的 */ } }
   src.delete(); gray.delete(); blur.delete(); k.delete(); edges.delete(); bin.delete();
   if (!r) return null;
   // 往中心內縮約 0.6%，避免把紙張邊緣外的桌面拍進去

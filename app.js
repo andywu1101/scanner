@@ -838,11 +838,16 @@ function onDetect(r, sig, full, sharp, gt) {
 
   // 拍完後：等換頁／移開才重新開始，期間不顯示框
   if (!live.armed) {
-    const moved = ok && live.capturedQuad && maxDisp(r.corners, live.capturedQuad) > 0.08;
+    // 1.24：iPhone 改成瞬間拍好之後，同一頁會一直被重拍（偵測偶爾跳一格就被當成換頁）。
+    //  - 拍完 2 秒內不判斷換頁（作者：翻頁本來就要 1～2 秒）
+    //  - 換頁要「紙上內容變了」或「找不到紙」連續 3 格才算；紙只是被挪動、內容沒變不算
+    const since = Date.now() - live.lastCapT;
+    if (!live.capturedQs && qs) live.capturedQs = qs; // 拍的那一刻沒有內容指紋時，用拍完後第一格補上
+    if (since < 2000) { live.chgHits = 0; live.miss = 0; setHint('已拍好，請換下一頁', true); return; }
     const changed = qs && live.capturedQs && qsDiff(qs, live.capturedQs) > CHANGE_TOL;
-    // 1.21：拍照那一瞬間畫面會停住或變暗，連續幾格找不到紙會被誤當成「紙拿走了」而重拍同一頁；拍完 1.5 秒內找不到紙不算
-    if (!ok) { if (Date.now() - live.lastCapT > 1500) live.miss++; } else live.miss = 0;
-    if (moved || changed || live.miss >= 3) { live.rearm = moved ? 'moved' : changed ? 'changed' : 'miss'; live.armed = true; resetLock(); }
+    live.chgHits = changed ? (live.chgHits || 0) + 1 : 0;
+    if (!ok) live.miss++; else live.miss = 0;
+    if (live.chgHits >= 3 || live.miss >= 3) { live.rearm = live.chgHits >= 3 ? 'changed' : 'miss'; live.armed = true; live.chgHits = 0; resetLock(); }
     else { setHint('已拍好，請換下一頁', true); return; }
   }
 
@@ -2578,7 +2583,7 @@ $('#cvDonate').onclick = () => openDonate();
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.23';
+const APP_VER = '1.24';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   { v: 'v1', items: [
@@ -2599,6 +2604,7 @@ const CHANGELOG = [
     { t: '即時掃描更會分辨兩頁：書本攤開或散頁疊在一起時，只框你要的那一頁', since: '1.20' },
     { t: 'iPhone 即時掃描改成瞬間拍好，不用等「拍攝中」；拿穩時更容易自動拍下', since: '1.21' },
     { t: '光線不足時提示開閃光燈；一個角框不準時會自動推算修正', since: '1.23' },
+    { t: '同一頁不會再被連拍；角被手或東西遮住時也能推算出來', since: '1.24' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
