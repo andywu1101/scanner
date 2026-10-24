@@ -1,4 +1,4 @@
-/* 小伍敵樂譜掃描 — AI 框選 Worker（1.25）
+/* 伍線譜樂譜掃描 — AI 框選 Worker（1.25）
    U²-Net（u2netp，4.6 MB）找出畫面主體（紙張）的遮罩；用 ONNX Runtime Web（WebAssembly，單執行緒）執行。
    輸入：320×320 RGBA；輸出：320×320 的 0～255 遮罩。四個角由 worker.js 的 maskQuad 依遮罩與紙邊求出。 */
 self.importScripts('lib/ai/ort.wasm.min.js');
