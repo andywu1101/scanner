@@ -2350,10 +2350,14 @@ $('#btnSettings').onclick = () => {
     <div class="lbl" style="margin-top:12px">小圖平滑放大<small style="display:block;font-size:12px;margin-top:2px">讓解析度低的圖片（例如別人傳來的照片）轉黑白時邊緣更平順</small></div>
     <div class="seg" id="setUp">${[['auto', '自動'], ['always', '一律'], ['off', '關閉']].map(([k, n]) => `<button data-k="${k}" class="${settings.upscale === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     <button class="srow" id="setDefAdj" style="margin-top:6px"><span>預設調整數值 ›<span class="sub">新文件一開始用的曝光、濃淡、銳利度等數值</span></span></button>
+    <button class="srow" id="setReport"><span>🐞 回報問題或建議 ›</span></button>
+    <button class="srow" id="setLog"><span>更新日誌 ›<span class="sub">目前版本 v${APP_VER}</span></span></button>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會另外拍一張照片（最高 1500 萬畫素）；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v1.17</div>`, (s) => {
+    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
     s.querySelector('#setDefAdj').onclick = () => openDefAdj('bw');
+    s.querySelector('#setReport').onclick = () => window.open(REPORT_URL, '_blank', 'noopener');
+    s.querySelector('#setLog').onclick = () => { closeSheet(); showChangelog(); };
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));
@@ -2379,7 +2383,8 @@ $('#cvStart').onclick = () => {
   // 第一次使用自動打開教學
   let seen = false;
   try { seen = localStorage.getItem('cocoscan-help-seen') === '1'; localStorage.setItem('cocoscan-help-seen', '1'); } catch (_) {}
-  if (!seen) openHelp();
+  if (!seen) { openHelp(); logMarkSeen(); } // 第一次使用：只跳教學，日誌視為已看過
+  else if (hasNewLog()) setTimeout(showChangelog, 300);
 };
 $('#btnHelp').onclick = () => openHelp();
 $('#homeCover').onclick = () => goCover();
@@ -2390,33 +2395,81 @@ function openHelp() {
   openSheet(`<div class="help"><h3>使用教學</h3>${first}
     <h4>三種拍法</h4><ul>
       <li><b>即時掃描</b>：對準樂譜就會自動拍，適合一次拍很多頁。</li>
-      <li><b>高畫質拍照</b>：用手機相機拍，畫質最清楚，iPhone 特別建議用這個。</li>
-      <li><b>相簿匯入</b>：別人傳來的樂譜圖片也能整理成 PDF。</li></ul>
+      <li><b>高畫質拍照</b>：單張拍攝，使用手機相機拍，畫質會比即時掃描更清楚。</li>
+      <li><b>相簿匯入</b>：使用手機相簿中的相片進行編輯。</li></ul>
     <h4>即時掃描小技巧</h4><ul>
-      <li>紙張四周要留一點空間，太貼邊不會拍。</li>
-      <li>綠框出現後拿穩，看到中間的「✓ 已拍好」才算完成。</li>
+      <li>用正常距離拍就可以，建議讓畫面佔滿約8分滿，畫面比較清晰。</li>
+      <li>綠框出現後拿穩，看到中間的「✓ 已拍好」即完成拍攝。</li>
       <li>換下一頁時，讓紙張離開畫面或翻頁，就會自動拍下一張。</li></ul>
     <h4>裁切</h4><ul>
       <li>拖四個角或拖邊來調整範圍，放大鏡能幫你對準。</li>
-      <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平。</li></ul>
+      <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平。</li>
+      <li>拖動時，畫面的另一角會出現成品預覽，可以邊拉邊確認譜是不是平的；按下方的「成品」可以看大圖。</li></ul>
     <h4>模式與調整</h4><ul>
       <li>黑白最適合樂譜，灰階、彩色適合有照片或顏色的講義。</li>
-      <li>「調整」可以改曝光、濃淡、去雜點等。按住畫面，可以和預設值比較。</li>
-      <li>文件頁的「統一調整」可以一次調整全部頁面；在單頁裡調整只會影響那一頁。</li></ul>
+      <li>「調整」可以改曝光、濃淡、去雜點等。按住畫面，可以和原本的數值比較。</li>
+      <li>文件頁的「統一調整」可以一次調整全部頁面；在單頁裡調整只會影響那一頁。</li>
+      <li>常用的數值可以在「設定 → 預設調整數值」改好，之後的新文件都會從這組數值開始。</li></ul>
     <h4>管理文件</h4><ul>
       <li>長按頁面可以拖曳排序，也可以選取多頁刪除。</li>
-      <li>在「全部文件」裡可以合併或刪除文件。</li></ul>
+      <li>在「全部文件」裡可以合併或刪除文件。</li>
+      <li>點文件名稱就能改名，輸入框會自動全選，直接打新名字即可。</li></ul>
     <h4>匯出</h4><ul>
-      <li>匯出 PDF 或圖片，檔名可以自己改。</li></ul>
+      <li>匯出 PDF 或圖片，檔名可以自己改。</li>
+      <li>iPhone 匯出 PDF 後，按「分享／儲存到檔案」會打開 PDF，點右上角的分享圖示，就能傳到 LINE 或存到檔案。</li></ul>
     <div class="warn"><h4>⚠ 重要提醒</h4><ul>
       <li>掃描只存在這支手機裡，不會上傳。</li>
       <li>刪除主畫面上的 App，或清除瀏覽器資料，掃描就會全部消失。重要的樂譜請記得匯出 PDF 備份。</li></ul></div>
+    <h4>遇到問題？</h4><ul>
+      <li>封面最下方的「🐞 回報問題或建議」可以告訴我；右下角的版本號可以查看更新內容。</li></ul>
     <button class="close-help" id="helpClose">我知道了</button></div>`, (sh) => {
     sh.querySelector('#helpClose').onclick = closeSheet; sh.scrollTop = 0;
     const a = sh.querySelector('#helpA2'); if (a) a.onclick = () => { closeSheet(); tryInstall(); };
   });
 }
 $('#cvDonate').onclick = () => openDonate();
+
+/* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
+   APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
+   日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
+const APP_VER = '1.18';
+const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
+const CHANGELOG = [
+  { v: 'v1', items: [
+    { t: '三種拍法：即時掃描、高畫質拍照、相簿匯入' },
+    { t: '自動抓出紙張邊框並校正，有黑白、灰階、彩色、原圖四種模式' },
+    { t: '匯出 PDF 與圖片，檔名可以自己改' },
+    { t: '頁面可以拖曳排序；文件和頁面都能多選、合併、刪除' },
+    { t: '黑白模式自動去雜點、邊緣平滑；每種模式都能細部調整' },
+    { t: '「統一調整」可以一次調整整份文件，單頁調整只影響那一頁' },
+    { t: '「曲線」裁切，可以把彎曲的書頁拉平' },
+    { t: '裁切時有放大鏡，拖動時可以即時預覽成品' },
+    { t: '即時掃描拍好時會顯示「✓ 已拍好」' },
+    { t: '使用教學、加入主畫面教學' },
+    { t: '設定裡可以修改「預設調整數值」' },
+    { t: '問題回報與更新日誌', since: '1.18' },
+  ] },
+];
+const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
+const verNum = (v) => v.split('.').map(Number);
+const verGt = (a, b) => { const x = verNum(a), y = verNum(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); } return false; };
+function logSeen() { try { return localStorage.getItem(LOG_KEY); } catch (_) { return null; } }
+function logMarkSeen() { try { localStorage.setItem(LOG_KEY, APP_VER); } catch (_) {} }
+const isNewItem = (it, seen) => !!it.since && (!seen || verGt(it.since, seen));
+function showChangelog() {
+  const seen = logSeen();
+  const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  $('#logList').innerHTML = CHANGELOG.map((g) => `<div class="log-item"><div class="log-ver">${esc(g.v)}</div><ul>${g.items.map((it) => `<li${isNewItem(it, seen) ? ' class="log-hl"' : ''}>${esc(it.t)}</li>`).join('')}</ul></div>`).join('');
+  $('#logCurrent').textContent = '目前版本 v' + APP_VER;
+  logMarkSeen();
+  openModal('logModal');
+  setTimeout(() => { $('#logList').scrollTop = $('#logList').scrollHeight; }, 30);
+}
+// 有沒有「看過之後才新增」的項目
+function hasNewLog() { const seen = logSeen(); return CHANGELOG.some((g) => g.items.some((it) => isNewItem(it, seen))); }
+$('#cvVer').textContent = '▸ v' + APP_VER;
+$('#cvVer').onclick = () => showChangelog();
+$('#cvReport').onclick = () => window.open(REPORT_URL, '_blank', 'noopener');
 $('#cvAuthor').onclick = () => openModal('authorModal');
 
 /* 贊助者名單：要新增名字，複製下面的範例改名字即可（名單是空的時候顯示「目前尚未有人贊助」）
