@@ -232,13 +232,21 @@ function notchLine(cv, bin, w, h) {
   let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
   for (const [x, y] of P) { if (x < bx0) bx0 = x; if (x > bx1) bx1 = x; if (y < by0) by0 = y; if (y > by1) by1 = y; }
   const bh = by1 - by0, bw = bx1 - bx0;
-  // 兩個凹口連成接近直的線（左右偏不超過上下距離的 0.35 倍），而且上下相隔夠遠；手影造成的缺口在紙中間，連不成這種線
+  // 兩個凹口連成分界線（手影造成的缺口在紙中間，連不成這種線）：
+  //  第一輪找接近直的（左右偏 ≤ 上下距離 0.35 倍；書本、一般散頁）
+  //  找不到才接受較斜的（≤ 0.6 倍，1.22）：散頁斜斜壓在角落時紙邊是斜的；但兩個凹口都要在同一側外緣 30% 內，
+  //  否則會把紙中間的手影缺口誤配成一對（試過不加這條，作者 15 張照片有 4 張被誤切）
+  const sideOf = (x) => (x - bx0 < bw * 0.3 ? 'L' : bx1 - x < bw * 0.3 ? 'R' : '');
   let best = null;
-  for (let a = 0; a < defs.length; a++) for (let b = a + 1; b < defs.length; b++) {
-    const p = defs[a].p, q = defs[b].p, dx = q[0] - p[0], dy = q[1] - p[1];
-    if (Math.abs(dy) < bh * 0.08 || Math.abs(dx) > Math.abs(dy) * 0.35) continue;
-    const sc = defs[a].d + defs[b].d;
-    if (!best || sc > best.sc) best = { sc, p, q };
+  for (const lim of [0.35, 0.6]) {
+    for (let a = 0; a < defs.length; a++) for (let b = a + 1; b < defs.length; b++) {
+      const p = defs[a].p, q = defs[b].p, dx = q[0] - p[0], dy = q[1] - p[1];
+      if (Math.abs(dy) < bh * 0.08 || Math.abs(dx) > Math.abs(dy) * lim) continue;
+      if (lim > 0.35 && (!sideOf(p[0]) || sideOf(p[0]) !== sideOf(q[0]))) continue;
+      const sc = defs[a].d + defs[b].d;
+      if (!best || sc > best.sc) best = { sc, p, q };
+    }
+    if (best) break;
   }
   if (best) return { kind: 2, p: best.p, q: best.q };
   // 只有一個凹口：要在上緣或下緣附近、靠左右外側 30%，而且那一側的白色區塊延伸到畫面外
