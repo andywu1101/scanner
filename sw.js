@@ -1,5 +1,5 @@
 /* 小伍敵樂譜掃描 — Service Worker（離線可用） */
-const VERSION = 'cocoscan-v23';
+const VERSION = 'cocoscan-v24';
 const ASSETS = [
   './', 'index.html', 'app.js', 'worker.js', 'lib/opencv.js', 'lib/Sortable.min.js', 'lib/qrcode.js', 'manifest.webmanifest', 'jkopay-qr.png',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png',

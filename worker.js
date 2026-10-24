@@ -314,6 +314,67 @@ function cutAtNotch(cv, bin, r, w, h) {
   return { quad: Q, area: bestN.area, notch: nl.kind };
 }
 
+// 三個角推算第四個角（1.23）：只有一個角貼到畫面邊緣、另外三個角都在畫面內時，那個角多半找錯了
+// （例如散頁疊著，被旁邊的紙帶偏）。從兩個相鄰的好角出發，沿原本的邊在附近找真正的紙邊（裡亮外暗最明顯處），
+// 各擬合一條直線，兩線交點就是第四個角（照片有透視，兩邊不平行，所以不用平行四邊形去補）。
+function inferCorner(G, w, h, q) {
+  const m = 0.01, inner = 0.03;
+  const near = q.map(([x, y]) => x < w * m || x > w * (1 - m) || y < h * m || y > h * (1 - m));
+  const safe = q.map(([x, y]) => x > w * inner && x < w * (1 - inner) && y > h * inner && y < h * (1 - inner));
+  const bad = near.indexOf(true);
+  if (bad < 0 || near.filter(Boolean).length !== 1 || q.some((p, i) => i !== bad && !safe[i])) return null;
+  const cx = q.reduce((s, p) => s + p[0], 0) / 4, cy = q.reduce((s, p) => s + p[1], 0) / 4;
+  const at = (x, y) => { const xi = Math.round(x), yi = Math.round(y); return xi < 0 || yi < 0 || xi >= w || yi >= h ? -1 : G[yi * w + xi]; };
+  const range = Math.min(w, h) * 0.07, step = 2;
+  // 從好角 A 往壞角 B 的方向找紙邊，回傳擬合的直線 {p, d}
+  const fitEdge = (A, B) => {
+    const dx = B[0] - A[0], dy = B[1] - A[1], L = Math.hypot(dx, dy); if (L < 10) return null;
+    let nx = -dy / L, ny = dx / L;
+    if (nx * (A[0] + dx / 2 - cx) + ny * (A[1] + dy / 2 - cy) < 0) { nx = -nx; ny = -ny; } // 朝外
+    const pts = [];
+    for (let t = 0.06; t <= 0.62; t += 0.04) {
+      const px = A[0] + dx * t, py = A[1] + dy * t;
+      let best = 0, bo = null;
+      for (let o = -range; o <= range; o += 1) {
+        const ix = px + nx * (o - step), iy = py + ny * (o - step), ox = px + nx * (o + step), oy = py + ny * (o + step);
+        const vi = at(ix, iy), vo = at(ox, oy); if (vi < 0 || vo < 0) continue;
+        const d = vi - vo; if (d > best) { best = d; bo = o; }
+      }
+      if (bo !== null && best >= 12) pts.push([px + nx * bo, py + ny * bo]);
+    }
+    if (pts.length < 6) return null;
+    // 兩次最小平方，第二次去掉離太遠的點
+    let fit = null, use = pts;
+    for (let it = 0; it < 2; it++) {
+      const n = use.length, mx = use.reduce((s, p) => s + p[0], 0) / n, my = use.reduce((s, p) => s + p[1], 0) / n;
+      let sxx = 0, sxy = 0, syy = 0; for (const [x, y] of use) { sxx += (x - mx) ** 2; sxy += (x - mx) * (y - my); syy += (y - my) ** 2; }
+      const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+      fit = { p: [mx, my], d: [Math.cos(ang), Math.sin(ang)] };
+      const dist = (p) => Math.abs((p[0] - mx) * fit.d[1] - (p[1] - my) * fit.d[0]);
+      const tol = Math.max(2, Math.min(w, h) * 0.006);
+      const keep = pts.filter((p) => dist(p) <= tol);
+      if (keep.length < 5) return null;
+      use = keep;
+    }
+    // 方向要和原本的邊差不多（30 度內）
+    const cosA = Math.abs(fit.d[0] * dx + fit.d[1] * dy) / L; if (cosA < 0.87) return null;
+    return fit;
+  };
+  const prev = q[(bad + 3) % 4], next = q[(bad + 1) % 4], B = q[bad];
+  const e1 = fitEdge(prev, B), e2 = fitEdge(next, B);
+  if (!e1 || !e2) return null;
+  const den = e1.d[0] * e2.d[1] - e1.d[1] * e2.d[0]; if (Math.abs(den) < 0.2) return null;
+  const t = ((e2.p[0] - e1.p[0]) * e2.d[1] - (e2.p[1] - e1.p[1]) * e2.d[0]) / den;
+  const D = [e1.p[0] + e1.d[0] * t, e1.p[1] + e1.d[1] * t];
+  if (D[0] < w * m || D[0] > w * (1 - m) || D[1] < h * m || D[1] > h * (1 - m)) return null; // 推算的角也要在畫面內
+  const moved = Math.hypot((D[0] - B[0]) / w, (D[1] - B[1]) / h);
+  if (moved < 0.012 || moved > 0.2) return null;
+  const nq = q.map((p, i) => (i === bad ? D : p));
+  // 要是凸四邊形
+  let sg = 0; for (let i = 0; i < 4; i++) { const a = nq[i], b = nq[(i + 1) % 4], c = nq[(i + 2) % 4]; const cr = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]); if (sg && Math.sign(cr) !== sg) return null; sg = Math.sign(cr); }
+  return nq;
+}
+
 function detectQuad(cv, rgba, w, h, fast) {
   const src = new cv.Mat(h, w, cv.CV_8UC4);
   src.data.set(rgba);
@@ -375,13 +436,14 @@ function detectQuad(cv, rgba, w, h, fast) {
     try { const sp = splitGutter(cv, blur, r.quad, w, h); if (sp && sp.area > 0.1) r = Object.assign({}, r, sp, { gutter: true }); }
     catch (e) { /* 找不到就算了 */ }
   }
+  if (r) { try { const iq = inferCorner(blur.data, w, h, r.quad); if (iq) r = Object.assign({}, r, { quad: iq, area: polyArea(iq) / (w * h), inferred: true }); } catch (e) { /* 推不出來就用原本的 */ } }
   src.delete(); gray.delete(); blur.delete(); k.delete(); edges.delete(); bin.delete();
   if (!r) return null;
   // 往中心內縮約 0.6%，避免把紙張邊緣外的桌面拍進去
   const cx = r.quad.reduce((a, p) => a + p[0], 0) / 4, cy = r.quad.reduce((a, p) => a + p[1], 0) / 4;
   const inset = 0.006;
   const q = r.quad.map((p) => [p[0] + (cx - p[0]) * inset * 2, p[1] + (cy - p[1]) * inset * 2]);
-  return { corners: q.map((p) => [Math.min(1, Math.max(0, p[0] / w)), Math.min(1, Math.max(0, p[1] / h))]), area: r.area, gutter: !!r.gutter, notch: r.notch || 0 };
+  return { corners: q.map((p) => [Math.min(1, Math.max(0, p[0] / w)), Math.min(1, Math.max(0, p[1] / h))]), area: r.area, gutter: !!r.gutter, notch: r.notch || 0, inferred: !!r.inferred };
 }
 
 /* ---------- 真實長寬比（Zhang & He 白板掃描法） ---------- */

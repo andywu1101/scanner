@@ -819,8 +819,10 @@ async function liveLoop() {
       const d = smallFrame(v, 480);
       const sharp = sharpness(d);
       const gt = grayThumb(d);
+      const luma = meanLuma(d); // 要在 buffer 交給 worker 之前算
       const r = await wcall('detect', { buffer: d.data.buffer, width: d.width, height: d.height, fast: true }, [d.data.buffer]);
       onDetect(r, sig, full, sharp, gt);
+      darkCheck(luma);
     } catch (e) { console.warn(e); }
     live.detecting = false;
   }
@@ -908,6 +910,25 @@ function onDetect(r, sig, full, sharp, gt) {
     const b = live.best;
     capture(sig, b ? b.canvas : null, b ? b.quad : live.lockQ);
   }
+}
+// 光線不足提示（1.23）：畫面平均亮度偏低持續約 1 秒，而且手機支援閃光燈、燈還沒開，就提示開燈
+const DARK_LUMA = 70; // 0～255；實機覺得太常或太少跳出時調這個
+function meanLuma(d) {
+  const a = d.data; let s = 0, n = 0;
+  for (let i = 0; i < a.length; i += 64) { s += a[i] * 0.3 + a[i + 1] * 0.59 + a[i + 2] * 0.11; n++; }
+  return n ? s / n : 255;
+}
+function darkCheck(luma) {
+  const now = performance.now();
+  const canTorch = $('#torchBtn').style.display !== 'none';
+  if (luma < DARK_LUMA && canTorch && !torchOn) { if (!live.darkSince) live.darkSince = now; }
+  else live.darkSince = 0;
+  live.dark = !!live.darkSince && now - live.darkSince > 1000;
+  if (live.dark && settings.autoShutter && live.armed && !live.capturing && !live.paused) setHint('光線不足，可點左上角 ⚡ 開燈');
+}
+// 閃光燈在同一次掃描中保持開著：Android 另外拍照、或從裁切畫面回來時，系統可能把燈關掉，重新打開
+function reapplyTorch() {
+  if (torchOn && live.track && live.track.readyState === 'live') live.track.applyConstraints({ advanced: [{ torch: true }] }).catch(() => {});
 }
 function edgeBlocked(Q) {
   const E = EDGE_MARGIN;
@@ -1012,6 +1033,7 @@ async function capture(sig, full, quadAt, userPress) {
         if (live.photoSettings) { try { blob = await live.ic.takePhoto(); fromPhoto = !!blob; } catch (_) {} }
       }
       live.holdBox = false; shotFx('');
+      reapplyTorch();
     }
     if (!blob) {
       src = full || grabFull(v); // 畫面在這一刻已經固定
@@ -1108,6 +1130,7 @@ function liveResume() {
   v.style.display = 'none'; void v.offsetHeight; v.style.display = '';
   v.srcObject = null; v.srcObject = st;
   v.play().catch(() => {});
+  reapplyTorch();
   if (settings.autoShutter) setHint(live.armed ? '將文件放進畫面中' : '已拍好，請換下一頁', !live.armed);
   else hideHint();
 }
@@ -2522,7 +2545,8 @@ function openHelp() {
       <li>框一直對不到時，可以直接按快門，拍完再自己調整範圍。</li>
       <li>右上角可以切換「自動／手動拍攝」：手動拍攝不畫框，每張都拍整張，拍完再自己裁切。</li>
       <li>「立即裁切／稍後裁切」決定要自己裁切的照片怎麼處理：立即裁切會拍完直接進裁切畫面；稍後裁切會先存起來，頁面標上「✂」，之後再點進去裁。</li>
-      <li>光線不夠時，點左上角的 ⚡ 開燈（手機支援才會出現）。</li></ul>
+      <li>光線不夠時，點左上角的 ⚡ 開燈（手機支援才會出現）。</li>
+      <li>把樂譜放在深色、素面的桌面或布上（例如深色木桌、深色桌墊），紙和背景對比越明顯，框得越準。淺色或有花紋的背景（白桌、床單）容易框錯，這時可以直接按快門，拍完再自己裁切。</li></ul>
     <h4>裁切</h4><ul>
       <li>拖四個角或拖邊來調整範圍，放大鏡能幫你對準。</li>
       <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平。</li>
@@ -2554,7 +2578,7 @@ $('#cvDonate').onclick = () => openDonate();
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.22';
+const APP_VER = '1.23';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   { v: 'v1', items: [
@@ -2574,6 +2598,7 @@ const CHANGELOG = [
     { t: '手動拍攝不畫框、拍整張；可選「立即裁切」或「稍後裁切」，待裁切的頁會標上 ✂', since: '1.19' },
     { t: '即時掃描更會分辨兩頁：書本攤開或散頁疊在一起時，只框你要的那一頁', since: '1.20' },
     { t: 'iPhone 即時掃描改成瞬間拍好，不用等「拍攝中」；拿穩時更容易自動拍下', since: '1.21' },
+    { t: '光線不足時提示開閃光燈；一個角框不準時會自動推算修正', since: '1.23' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
