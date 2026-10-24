@@ -408,6 +408,109 @@ function inferCorner(G, w, h, q) {
   return nq;
 }
 
+// 四邊重新貼齊（1.25，AI 框選用）：每條邊只用中段（15%～85%，避開可能被隔壁紙、手、折角影響的角落）
+// 在原邊附近找「裡亮外暗」最明顯的位置，穩健擬合直線；四條線兩兩相交得到新的四個角
+function refineEdges(G, w, h, q) {
+  const cx = q.reduce((s, p) => s + p[0], 0) / 4, cy = q.reduce((s, p) => s + p[1], 0) / 4;
+  const at = (x, y) => { const xi = Math.round(x), yi = Math.round(y); return xi < 0 || yi < 0 || xi >= w || yi >= h ? -1 : G[yi * w + xi]; };
+  const range = Math.min(w, h) * 0.04, step = 2, tol = Math.max(2, Math.min(w, h) * 0.005);
+  const lines = [];
+  for (let i = 0; i < 4; i++) {
+    const A = q[i], B = q[(i + 1) % 4], dx = B[0] - A[0], dy = B[1] - A[1], L = Math.hypot(dx, dy);
+    let nx = -dy / L, ny = dx / L;
+    if (nx * (A[0] + dx / 2 - cx) + ny * (A[1] + dy / 2 - cy) < 0) { nx = -nx; ny = -ny; }
+    const pts = [];
+    for (let t = 0.15; t <= 0.851; t += 0.035) {
+      const px = A[0] + dx * t, py = A[1] + dy * t;
+      let best = 0, bo = null;
+      for (let o = -range; o <= range; o += 1) {
+        const vi = at(px + nx * (o - step), py + ny * (o - step)), vo = at(px + nx * (o + step), py + ny * (o + step));
+        if (vi < 0 || vo < 0) continue;
+        const d = vi - vo; if (d > best) { best = d; bo = o; }
+      }
+      if (bo !== null && best >= 12) pts.push([px + nx * bo, py + ny * bo]);
+    }
+    // 貼著畫面邊緣、看不到外側的邊：維持原線
+    if (pts.length < 8) { lines.push({ p: A, d: [dx / L, dy / L], keep: true }); continue; }
+    let use = pts, fit = null;
+    for (let it = 0; it < 3; it++) {
+      const n = use.length, mx = use.reduce((s, p) => s + p[0], 0) / n, my = use.reduce((s, p) => s + p[1], 0) / n;
+      let sxx = 0, sxy = 0, syy = 0; for (const [x, y] of use) { sxx += (x - mx) ** 2; sxy += (x - mx) * (y - my); syy += (y - my) ** 2; }
+      const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+      fit = { p: [mx, my], d: [Math.cos(ang), Math.sin(ang)] };
+      const keep = pts.filter((p) => Math.abs((p[0] - mx) * fit.d[1] - (p[1] - my) * fit.d[0]) <= tol * (it ? 1 : 2));
+      if (keep.length < 8) { fit = null; break; }
+      use = keep;
+    }
+    if (!fit || Math.abs(fit.d[0] * dx + fit.d[1] * dy) / L < 0.97) { lines.push({ p: A, d: [dx / L, dy / L], keep: true }); continue; }
+    lines.push(fit);
+  }
+  const X = (a, b) => { const den = a.d[0] * b.d[1] - a.d[1] * b.d[0]; if (Math.abs(den) < 0.2) return null; const t = ((b.p[0] - a.p[0]) * b.d[1] - (b.p[1] - a.p[1]) * b.d[0]) / den; return [a.p[0] + a.d[0] * t, a.p[1] + a.d[1] * t]; };
+  const nq = [];
+  for (let i = 0; i < 4; i++) { const c = X(lines[(i + 3) % 4], lines[i]); if (!c) return null; nq.push(c); }
+  for (let i = 0; i < 4; i++) {
+    const mv = Math.hypot((nq[i][0] - q[i][0]) / w, (nq[i][1] - q[i][1]) / h);
+    if (mv > 0.12) return null;
+    if (nq[i][0] < -w * 0.02 || nq[i][0] > w * 1.02 || nq[i][1] < -h * 0.02 || nq[i][1] > h * 1.02) return null;
+  }
+  let sg = 0; for (let i = 0; i < 4; i++) { const a = nq[i], b = nq[(i + 1) % 4], c = nq[(i + 2) % 4]; const cr = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]); if (sg && Math.sign(cr) !== sg) return null; sg = Math.sign(cr); }
+  return nq.map((p) => [Math.min(w - 1, Math.max(0, p[0])), Math.min(h - 1, Math.max(0, p[1]))]);
+}
+
+// AI 框選（1.25）：依 U²-Net 的遮罩（320×320）求紙張四角。遮罩只抓「哪一塊是紙」，邊緣較粗，
+// 先取遮罩最大區塊的外形近似成四邊形，再用 refineEdges 沿真正的紙邊貼齊。
+// 回傳 { corners } 或 { reject: 原因 }：形狀不像一頁、和遮罩差太多、或像攤開的書被整個框進去（書本交給原本的偵測）
+function maskQuad(cv, msg) {
+  const { width: w, height: h } = msg;
+  const rgba = new Uint8Array(msg.buffer);
+  const src = new cv.Mat(h, w, cv.CV_8UC4); src.data.set(rgba);
+  const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+  const blur = new cv.Mat(); cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+  const m0 = cv.matFromArray(320, 320, cv.CV_8UC1, Array.from(new Uint8Array(msg.mask)));
+  const m = new cv.Mat(); cv.resize(m0, m, new cv.Size(w, h), 0, 0, cv.INTER_LINEAR);
+  cv.threshold(m, m, 127, 255, cv.THRESH_BINARY);
+  const k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+  cv.morphologyEx(m, m, cv.MORPH_OPEN, k);
+  const cs = new cv.MatVector(), hier = new cv.Mat();
+  cv.findContours(m, cs, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  let c = null, ca = 0;
+  for (let i = 0; i < cs.size(); i++) { const t = cs.get(i), a = cv.contourArea(t); if (a > ca) { if (c) c.delete(); c = t; ca = a; } else t.delete(); }
+  const clean = () => { [src, gray, blur, m0, m, k, cs, hier].forEach((x) => x.delete()); if (c) c.delete(); };
+  if (!c || ca < w * h * 0.1) { clean(); return { reject: 'small' }; }
+  const hull = new cv.Mat(); cv.convexHull(c, hull, false, true);
+  const peri = cv.arcLength(hull, true);
+  let quad = null, poly = null;
+  for (const eps of [0.02, 0.03, 0.04, 0.06, 0.08, 0.1, 0.12]) {
+    const ap = new cv.Mat(); cv.approxPolyDP(hull, ap, eps * peri, true);
+    const n = ap.rows;
+    if (n === 4) quad = matToPts(ap); else if ((n === 5 || n === 6) && !poly) poly = matToPts(ap);
+    ap.delete();
+    if (n <= 4) break;
+  }
+  hull.delete();
+  if (!quad && poly) quad = cornerFromPoly(poly, w, h);
+  if (!quad) { clean(); return { reject: 'shape' }; }
+  let q = orderCorners(quad);
+  try { const rq = refineEdges(blur.data, w, h, q); if (rq) q = rq; } catch (e) { /* 貼不齊就用遮罩的 */ }
+  const qa = polyArea(q);
+  const asp = (() => {
+    const wd = (Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1]) + Math.hypot(q[2][0] - q[3][0], q[2][1] - q[3][1])) / 2;
+    const ht = (Math.hypot(q[3][0] - q[0][0], q[3][1] - q[0][1]) + Math.hypot(q[2][0] - q[1][0], q[2][1] - q[1][1])) / 2;
+    return Math.min(wd, ht) / Math.max(wd, ht, 1);
+  })();
+  clean();
+  if (qa < ca * 0.8 || qa > ca * 1.25) return { reject: 'mismatch' };
+  if (asp < 0.5) return { reject: 'aspect' };
+  // 攤開的書：原本的偵測切出單頁（凹口／書溝）時，AI 框得比它大很多就代表把整本書框進去了
+  try {
+    const r = detectQuad(cv, rgba, w, h, false);
+    if (r && (r.notch || r.gutter) && qa / (w * h) > r.area * 1.3) return { reject: 'book' };
+  } catch (e) { /* 比對失敗就不管 */ }
+  const cx = q.reduce((a, p) => a + p[0], 0) / 4, cy = q.reduce((a, p) => a + p[1], 0) / 4, inset = 0.006;
+  const qq = q.map((p) => [p[0] + (cx - p[0]) * inset * 2, p[1] + (cy - p[1]) * inset * 2]);
+  return { corners: qq.map((p) => [Math.min(1, Math.max(0, p[0] / w)), Math.min(1, Math.max(0, p[1] / h))]), area: qa / (w * h) };
+}
+
 function detectQuad(cv, rgba, w, h, fast) {
   const src = new cv.Mat(h, w, cv.CV_8UC4);
   src.data.set(rgba);
@@ -1051,6 +1154,8 @@ self.onmessage = async (e) => {
       const { buffer, width, height, fast } = e.data;
       const r = detectQuad(cv, new Uint8Array(buffer), width, height, !!fast);
       self.postMessage({ id, ok: true, result: r });
+    } else if (type === 'maskQuad') {
+      self.postMessage({ id, ok: true, result: maskQuad(cv, e.data) });
     } else if (type === 'process') {
       const r = processPage(cv, e.data);
       self.postMessage({ id, ok: true, result: r }, [r.buffer]);

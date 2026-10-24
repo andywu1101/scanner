@@ -1,0 +1,10 @@
+AI 框選使用的第三方檔案（1.25）
+
+ort.wasm.min.js、ort-wasm-simd.wasm
+  ONNX Runtime Web 1.17.3（Microsoft） — MIT License
+  https://github.com/microsoft/onnxruntime
+
+u2netp.onnx
+  U²-Net（Xuebin Qin 等） — Apache License 2.0
+  https://github.com/xuebinqin/U-2-Net
+  ONNX 檔取自 rembg（Daniel Gatis，MIT License） https://github.com/danielgatis/rembg

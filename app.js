@@ -300,6 +300,7 @@ function show(name) {
   document.querySelectorAll('.screen').forEach((s) => s.classList.toggle('active', s.id === name));
   if (name === 'home' && typeof needA2Bar === 'function' && needA2Bar()) $('#a2Bar').classList.add('on'); // 加入主畫面提示：每次回到首頁都再出現
   current = name;
+  if (name !== 'doc' && name !== 'home') { const ub = document.getElementById('undoBar'); if (ub) ub.classList.remove('show'); } // 還原列只在文件頁、首頁顯示
   // 狀態列顏色跟著畫面：相機類畫面深色，其他米白
   const tc = document.querySelector('meta[name="theme-color"]');
   if (tc) tc.setAttribute('content', ['live', 'crop', 'burst'].includes(name) ? '#1C130E' : name === 'cover' ? '#F6EFE6' : '#FFFCF8');
@@ -343,6 +344,7 @@ function closeSheet() { $('#sheetWrap').classList.remove('show'); }
 $('#sheetWrap').addEventListener('click', (e) => { if (e.target.id === 'sheetWrap') closeSheet(); });
 
 const ICON = {
+  ai: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.6L18.5 9l-4.7 1.6L12 15l-1.8-4.4L5.5 9l4.7-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>',
   live: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M7 12h10"/></svg>',
   camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>',
   gallery: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="M21 15l-5-5L5 21"/></svg>',
@@ -1802,16 +1804,18 @@ $('#docMore').onclick = () => openSheet(`<h3>文件</h3>
     history.back();
   };
 });
-$('#docMode').onclick = () => openSheet(`<h3>統一調整</h3><div class="note" style="margin:-6px 4px 10px">選一個模式套用到全部頁面，接著可以調整這份文件統一的數值</div>${MODES.map((m) => `<button class="srow" data-m="${m.id}"><span>${m.name}<span class="sub">${modeDesc(m.id)}</span></span></button>`).join('')}`, (s) => {
+$('#docMode').onclick = () => openSheet(`<h3>統一調整</h3><button class="srow" data-ai="1">${ICON.ai}<span>AI 框選<span class="sub">用 AI 重新找出每一頁的紙張範圍</span></span></button><div class="note" style="margin:4px 4px 10px">選一個模式套用到全部頁面，接著可以調整這份文件統一的數值</div>${MODES.map((m) => `<button class="srow" data-m="${m.id}"><span>${m.name}<span class="sub">${modeDesc(m.id)}</span></span></button>`).join('')}`, (s) => {
   s.querySelectorAll('.srow').forEach((b) => b.onclick = async () => {
     closeSheet();
-    openDocAdjust(b.dataset.m);
+    if (b.dataset.ai) aiFrameDoc(); else openDocAdjust(b.dataset.m);
   });
 });
 // 統一調整：全部頁面改成這個模式，再進入調整畫面（預覽第一頁，可左右切換預覽的頁面）
 async function openDocAdjust(mode) {
-  const { pages } = await getDocPages(state.docId);
+  const { doc, pages } = await getDocPages(state.docId);
   if (!pages.length) return;
+  // 1.25：記下調整前的狀態，完成後可以一鍵還原
+  docAdjSnap = { docId: doc.id, docAdj: doc.adj ? JSON.parse(JSON.stringify(doc.adj)) : null, pages: pages.map((p) => ({ id: p.id, mode: p.mode, adj: p.adj ? JSON.parse(JSON.stringify(p.adj)) : null })) };
   for (const p of pages) { if (p.mode !== mode) { p.mode = mode; await DB.put('pages', p); } } // 先不重算，按完成後一起處理
   state.pageIndex = 0;
   viewPage = pages[0];
@@ -1858,6 +1862,7 @@ async function renderPage(keepZoom) {
     `<button class="chip adj" id="adjBtn">${ICON.sliders}調整</button>`;
   $('#modeChips').querySelectorAll('.chip[data-m]').forEach((b) => b.onclick = () => updatePage({ mode: b.dataset.m }));
   $('#adjBtn').onclick = openAdjust;
+  updateHistBtns();
 }
 function fitView() {
   const img = $('#viewImg');
@@ -1961,6 +1966,7 @@ $('#nextBtn').onclick = () => (adj.open && adj.scope === 'doc' ? adjSwitch(1) : 
 $('#pageBack').onclick = () => history.back();
 async function updatePage(patch) {
   const p = await DB.get('pages', viewPage.id);
+  pushHist(p);
   Object.assign(p, patch);
   await DB.put('pages', p);
   viewPage = p;
@@ -1976,20 +1982,9 @@ $('#pgCrop').onclick = () => {
     onConfirm: async (c, cv) => { history.back(); await updatePage({ corners: c, curve: cv, needCrop: false }); },
   });
 };
-async function movePage(d) {
-  const doc = await DB.get('docs', state.docId);
-  const i = state.pageIndex, j = i + d;
-  if (j < 0 || j >= doc.pageIds.length) return;
-  [doc.pageIds[i], doc.pageIds[j]] = [doc.pageIds[j], doc.pageIds[i]];
-  doc.updated = Date.now();
-  await DB.put('docs', doc);
-  state.pageIndex = j;
-  history.replaceState({ s: 'page', doc: state.docId, i: j }, '');
-  renderPage(true);
-  toast(`已移到第 ${j + 1} 頁`);
-}
-$('#pgMoveL').onclick = () => movePage(-1);
-$('#pgMoveR').onclick = () => movePage(1);
+// 1.25：往前移／往後移拿掉（文件頁可以拖曳排序），換成上一步／下一步
+$('#pgUndo').onclick = () => undoPage(-1);
+$('#pgRedo').onclick = () => undoPage(1);
 $('#pageDel').onclick = async () => {
   if (!confirm('刪除這一頁？')) return;
   const doc = await DB.get('docs', state.docId);
@@ -2218,6 +2213,7 @@ function closeAdjust() {
     const same = JSON.stringify(vals) === JSON.stringify(docAdjOf(p.docId, mode));
     DB.get('pages', p.id).then(async (pg) => {
       if (!pg) return;
+      pushHist(pg);
       pg.adj = pg.adj || {};
       if (same) delete pg.adj[mode]; else pg.adj[mode] = vals; // 和統一設定一樣就不算單獨調整
       await DB.put('pages', pg);
@@ -2249,7 +2245,27 @@ async function applyDocAdjust(docId, mode, vals, changed) {
   const { pages: fresh } = await getDocPages(docId);
   ensureFresh(fresh);
   if (current === 'doc') renderDoc();
-  toast(changed ? `已套用到全部頁面（${MODES.find((m) => m.id === mode).name}）` : `全部頁面已改成「${MODES.find((m) => m.id === mode).name}」`);
+  const snap = docAdjSnap && docAdjSnap.docId === docId ? docAdjSnap : null;
+  docAdjSnap = null;
+  const msg = changed ? `已套用到全部頁面（${MODES.find((m) => m.id === mode).name}）` : `全部頁面已改成「${MODES.find((m) => m.id === mode).name}」`;
+  undoBar(msg, snap ? () => restoreDocAdjust(snap) : null);
+}
+let docAdjSnap = null;
+async function restoreDocAdjust(snap) {
+  const doc = await DB.get('docs', snap.docId);
+  if (!doc) return;
+  if (snap.docAdj) doc.adj = snap.docAdj; else delete doc.adj;
+  docAdjCache.set(doc.id, doc.adj);
+  await DB.put('docs', doc);
+  for (const s of snap.pages) {
+    const p = await DB.get('pages', s.id); if (!p) continue;
+    p.mode = s.mode; if (s.adj) p.adj = s.adj; else delete p.adj;
+    await DB.put('pages', p);
+  }
+  const { pages } = await getDocPages(doc.id);
+  ensureFresh(pages);
+  if (current === 'doc') renderDoc();
+  toast('已還原統一調整前的設定');
 }
 $('#adjDone').onclick = () => history.back();
 $('#adjReset').onclick = () => {
@@ -2543,19 +2559,17 @@ function openHelp() {
       <li><b>高畫質拍照</b>：單張拍攝，使用手機相機拍，畫質會比即時掃描更清楚。</li>
       <li><b>相簿匯入</b>：使用手機相簿中的相片進行編輯。</li></ul>
     <h4>即時掃描小技巧</h4><ul>
-      <li>用正常距離拍就可以，建議讓畫面佔滿約8分滿，畫面比較清晰。</li>
-      <li>綠框出現後拿穩，看到中間的「✓ 已拍好」即完成拍攝。</li>
-      <li>換下一頁時，讓紙張離開畫面或翻頁，就會自動拍下一張。</li>
-      <li>書本攤開時，對準要拍的那一頁就好，旁邊那頁超出畫面也沒關係。</li>
-      <li>框一直對不到時，可以直接按快門，拍完再自己調整範圍。</li>
-      <li>右上角可以切換「自動／手動拍攝」：手動拍攝不畫框，每張都拍整張，拍完再自己裁切。</li>
-      <li>「立即裁切／稍後裁切」決定要自己裁切的照片怎麼處理：立即裁切會拍完直接進裁切畫面；稍後裁切會先存起來，頁面標上「✂」，之後再點進去裁。</li>
-      <li>光線不夠時，點左上角的 ⚡ 開燈（手機支援才會出現）。</li>
-      <li>把樂譜放在深色、素面的桌面或布上（例如深色木桌、深色桌墊），紙和背景對比越明顯，框得越準。淺色或有花紋的背景（白桌、床單）容易框錯，這時可以直接按快門，拍完再自己裁切。</li></ul>
+      <li>樂譜放在<b>深色、素面</b>的桌面或布上，框得最準；白桌、床單等淺色或有花紋的背景容易框錯。</li>
+      <li>讓紙佔畫面約八分滿，綠框出現後拿穩，看到「✓ 已拍好」就完成；翻頁或換一張紙，會自動拍下一張。</li>
+      <li>書本攤開時，對準要拍的那一頁就好；釘起來的講義，把拍完的頁摺到背面再拍。</li>
+      <li>框不準時可以直接按快門，拍完再調整範圍，或在裁切畫面按「AI 框選」。</li>
+      <li>右上角可以切換「自動／手動拍攝」，以及「立即／稍後裁切」。</li>
+      <li>光線不足時，點左上角的 ⚡ 開燈。</li></ul>
     <h4>裁切</h4><ul>
       <li>拖四個角或拖邊來調整範圍，放大鏡能幫你對準。</li>
       <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平。</li>
-      <li>拖動時，畫面的另一角會出現成品預覽，可以邊拉邊確認譜是不是平的；按下方的「成品」可以看大圖。</li></ul>
+      <li>拖動時，畫面的另一角會出現成品預覽，可以邊拉邊確認譜是不是平的；按下方的「成品」可以看大圖。</li>
+      <li>框得很不準時，按「AI 框選」讓 AI 重新找紙；在「統一調整」裡按「AI 框選」，可以一次處理全部頁面。</li></ul>
     <h4>模式與調整</h4><ul>
       <li>黑白最適合樂譜，灰階、彩色適合有照片或顏色的講義。</li>
       <li>「調整」可以改曝光、濃淡、去雜點等。按住畫面，可以和原本的數值比較。</li>
@@ -2563,6 +2577,7 @@ function openHelp() {
       <li>常用的數值可以在「設定 → 預設調整數值」改好，之後的新文件都會從這組數值開始。</li></ul>
     <h4>管理文件</h4><ul>
       <li>長按頁面可以拖曳排序，也可以選取多頁刪除。</li>
+      <li>單頁編輯時，可以用「上一步／下一步」復原修改。</li>
       <li>在「全部文件」裡可以合併或刪除文件。</li>
       <li>點文件名稱就能改名，輸入框會自動全選，直接打新名字即可。</li></ul>
     <h4>匯出</h4><ul>
@@ -2580,10 +2595,180 @@ function openHelp() {
 }
 $('#cvDonate').onclick = () => openDonate();
 
+/* ---------- 上一步／下一步（1.25） ----------
+   每一頁各自記錄（轉向、裁切含 AI 框選、模式、單頁調整），最多 20 步；只在這次使用中有效（存在記憶體） */
+const hist = new Map();
+const HIST_MAX = 20;
+function snapOf(p) {
+  return JSON.parse(JSON.stringify({ corners: p.corners, curve: p.curve || null, rotation: p.rotation || 0, mode: p.mode, adj: p.adj || null, needCrop: !!p.needCrop }));
+}
+function pushHist(p, tag) {
+  let h = hist.get(p.id);
+  if (!h) { h = { past: [], fut: [] }; hist.set(p.id, h); }
+  const s = snapOf(p); s.tag = tag || null;
+  h.past.push(s); if (h.past.length > HIST_MAX) h.past.shift();
+  h.fut = [];
+}
+async function applySnap(pageId, s) {
+  const p = await DB.get('pages', pageId); if (!p) return null;
+  p.corners = s.corners; p.curve = s.curve; p.rotation = s.rotation; p.mode = s.mode;
+  if (s.adj) p.adj = s.adj; else delete p.adj;
+  if (s.needCrop) p.needCrop = true; else delete p.needCrop;
+  await DB.put('pages', p);
+  enqueue(p.id);
+  return p;
+}
+async function undoPage(dir) {
+  if (!viewPage) return;
+  const h = hist.get(viewPage.id);
+  const from = h && (dir < 0 ? h.past : h.fut);
+  if (!from || !from.length) return;
+  const cur = await DB.get('pages', viewPage.id); if (!cur) return;
+  const s = from.pop();
+  (dir < 0 ? h.fut : h.past).push(snapOf(cur));
+  const p = await applySnap(viewPage.id, s);
+  if (p) viewPage = p;
+  renderPage(true);
+  toast(dir < 0 ? '已回到上一步' : '已重做下一步');
+}
+function updateHistBtns() {
+  const h = viewPage && hist.get(viewPage.id);
+  $('#pgUndo').disabled = !(h && h.past.length);
+  $('#pgRedo').disabled = !(h && h.fut.length);
+}
+let undoT;
+function undoBar(msg, fn) {
+  const b = $('#undoBar');
+  b.querySelector('span').textContent = msg;
+  const btn = $('#undoBtn');
+  btn.style.display = fn ? '' : 'none';
+  btn.onclick = async () => { b.classList.remove('show'); clearTimeout(undoT); if (fn) await fn(); };
+  b.classList.add('show');
+  clearTimeout(undoT);
+  undoT = setTimeout(() => b.classList.remove('show'), fn ? 8000 : 3000);
+}
+
+/* ---------- AI 框選（1.25） ----------
+   U²-Net（u2netp，4.6 MB）在 ai-worker.js 以 ONNX Runtime Web 執行，找出「哪一塊是紙」；
+   worker.js 的 maskQuad 再把遮罩變成四個角並沿紙邊貼齊。模型與執行環境約 15 MB，第一次使用時才下載，
+   存在獨立的快取 cocoscan-ai（換版本不會被清掉），之後離線也能用 */
+const AI_FILES = [['lib/ai/ort.wasm.min.js', 'text/javascript', 145070], ['lib/ai/ort-wasm-simd.wasm', 'application/wasm', 10551547], ['lib/ai/u2netp.onnx', 'application/octet-stream', 4574861]];
+const AI_CACHE = 'cocoscan-ai';
+let aiWorker = null, aiSeq = 0;
+const aiPending = new Map();
+function aiCall(payload, transfer) {
+  if (!aiWorker) {
+    aiWorker = new Worker('ai-worker.js');
+    aiWorker.onmessage = (e) => { const p = aiPending.get(e.data.id); if (!p) return; aiPending.delete(e.data.id); e.data.ok ? p.res(e.data.result) : p.rej(new Error(e.data.error)); };
+    aiWorker.onerror = (e) => { for (const p of aiPending.values()) p.rej(new Error(e.message || 'AI 載入失敗')); aiPending.clear(); aiWorker = null; };
+  }
+  return new Promise((res, rej) => { const id = ++aiSeq; aiPending.set(id, { res, rej }); aiWorker.postMessage(Object.assign({ id }, payload), transfer || []); });
+}
+async function aiCached() {
+  try {
+    if (!('caches' in window)) return false;
+    const c = await caches.open(AI_CACHE);
+    for (const [f] of AI_FILES) if (!(await c.match(new URL(f, location.href).href))) return false;
+    return true;
+  } catch (_) { return false; }
+}
+async function aiEnsure() {
+  if (await aiCached()) return true;
+  if (!confirm('AI 框選需要先下載約 15 MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。要下載嗎？')) return false;
+  const total = AI_FILES.reduce((a, f) => a + f[2], 0);
+  let got = 0;
+  busy('下載 AI 資料中… 0%');
+  try {
+    const cache = 'caches' in window ? await caches.open(AI_CACHE) : null;
+    for (const [f, type] of AI_FILES) {
+      const res = await fetch(f, { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const rd = res.body.getReader(), parts = [];
+      for (;;) {
+        const { done, value } = await rd.read(); if (done) break;
+        parts.push(value); got += value.length;
+        $('#busyMsg').textContent = `下載 AI 資料中… ${Math.min(99, Math.round((got / total) * 100))}%`;
+      }
+      if (cache) await cache.put(new URL(f, location.href).href, new Response(new Blob(parts, { type }), { headers: { 'Content-Type': type } }));
+    }
+    unbusy();
+    return true;
+  } catch (e) {
+    console.warn('AI download', e); unbusy();
+    toast('下載失敗，請確認網路後再試一次');
+    return false;
+  }
+}
+// 一張圖 → { corners } 或 { reject }
+async function aiFrame(img) {
+  await whenReady();
+  const c = canvasOf(320, 320), x = c.getContext('2d', { willReadFrequently: true });
+  x.drawImage(img, 0, 0, 320, 320);
+  const d = x.getImageData(0, 0, 320, 320);
+  const mask = await aiCall({ type: 'mask', buffer: d.data.buffer }, [d.data.buffer]);
+  const f = smallFrame(img, 900);
+  return wcall('maskQuad', { buffer: f.data.buffer, width: f.width, height: f.height, mask }, [f.data.buffer, mask]);
+}
+function aiRejectMsg(r) {
+  return r && r.reject === 'book' ? '這頁看起來是攤開的書，AI 框選不適合，請用「自動偵測」或手動調整' : 'AI 找不到合適的紙張範圍，請手動調整';
+}
+$('#cropAI').onclick = async () => {
+  const c = cropCtx; if (!c) return;
+  if (!(await aiEnsure())) return;
+  busy('AI 框選中…');
+  try {
+    const r = await aiFrame($('#cropImg'));
+    if (cropCtx !== c) return;
+    if (!r || !r.corners) { toast(aiRejectMsg(r)); return; }
+    c.corners = r.corners;
+    if (c.curveMode) c.curve = straightCurve(c.corners);
+    drawCrop();
+    toast('已用 AI 框選，可以再微調');
+  } catch (e) { console.warn(e); toast('AI 框選失敗：' + e.message); }
+  finally { unbusy(); }
+};
+const nearSame = (a, b) => !!a && !!b && a.every((p, i) => Math.abs(p[0] - b[i][0]) < 0.004 && Math.abs(p[1] - b[i][1]) < 0.004);
+async function aiFrameDoc() {
+  const docId = state.docId;
+  const { pages } = await getDocPages(docId);
+  if (!pages.length) return;
+  if (!(await aiEnsure())) return;
+  const before = [], tag = 'ai:' + Date.now();
+  let changed = 0, kept = 0;
+  try {
+    for (let i = 0; i < pages.length; i++) {
+      busy(`AI 框選中 ${i + 1} / ${pages.length}`);
+      const p = await DB.get('pages', pages[i].id); if (!p) continue;
+      let r = null;
+      try { const { img, url } = await loadImg(p.original); try { r = await aiFrame(img); } finally { URL.revokeObjectURL(url); } }
+      catch (e) { console.warn('ai page', e); }
+      if (r && r.corners && !(nearSame(r.corners, p.corners) && !p.curve)) {
+        pushHist(p, tag);
+        before.push({ id: p.id, corners: p.corners, curve: p.curve || null, needCrop: !!p.needCrop });
+        p.corners = r.corners; p.curve = null; delete p.needCrop;
+        await DB.put('pages', p);
+        enqueue(p.id);
+        changed++;
+      } else kept++;
+    }
+  } finally { unbusy(); }
+  if (current === 'doc' && state.docId === docId) renderDoc();
+  undoBar(`AI 框選完成：${changed} 頁已重新框選${kept ? `，${kept} 頁維持原框` : ''}`, changed ? async () => {
+    for (const b of before) {
+      const p = await DB.get('pages', b.id); if (!p) continue;
+      p.corners = b.corners; p.curve = b.curve; if (b.needCrop) p.needCrop = true; else delete p.needCrop;
+      await DB.put('pages', p); enqueue(p.id);
+      const h = hist.get(b.id); if (h && h.past.length && h.past[h.past.length - 1].tag === tag) h.past.pop();
+    }
+    if (current === 'doc') renderDoc();
+    toast('已還原 AI 框選前的範圍');
+  } : null);
+}
+
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.24';
+const APP_VER = '1.25';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   { v: 'v1', items: [
@@ -2605,6 +2790,7 @@ const CHANGELOG = [
     { t: 'iPhone 即時掃描改成瞬間拍好，不用等「拍攝中」；拿穩時更容易自動拍下', since: '1.21' },
     { t: '光線不足時提示開閃光燈；一個角框不準時會自動推算修正', since: '1.23' },
     { t: '同一頁不會再被連拍；角被手或東西遮住時也能推算出來', since: '1.24' },
+    { t: '新增 AI 框選，可單頁或全部頁面；單頁編輯新增上一步／下一步', since: '1.25' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
