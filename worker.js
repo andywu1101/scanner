@@ -480,7 +480,7 @@ function maskQuad(cv, msg) {
   const hull = new cv.Mat(); cv.convexHull(c, hull, false, true);
   const peri = cv.arcLength(hull, true);
   let quad = null, poly = null;
-  for (const eps of [0.02, 0.03, 0.04, 0.06, 0.08, 0.1, 0.12]) {
+  for (const eps of [0.01, 0.015, 0.02, 0.03, 0.04, 0.06, 0.08, 0.1, 0.12]) { // 1.27：從 1% 開始，才抓得到被斜切的小角
     const ap = new cv.Mat(); cv.approxPolyDP(hull, ap, eps * peri, true);
     const n = ap.rows;
     if (n === 4) quad = matToPts(ap); else if ((n === 5 || n === 6) && !poly) poly = matToPts(ap);
@@ -488,7 +488,10 @@ function maskQuad(cv, msg) {
     if (n <= 4) break;
   }
   hull.delete();
-  if (!quad && poly) quad = cornerFromPoly(poly, w, h);
+  // 1.27：遮罩是五、六邊形（一個角被別張紙蓋住、被斜切掉）時，優先延長兩側的邊推回真正的角；
+  // 4 點近似會把斜切那段併進角，角就往內縮（作者照片：左上角壓著另一本譜）
+  const rec = poly ? cornerFromPoly(poly, w, h) : null;
+  if (rec) quad = rec;
   if (!quad) { clean(); return { reject: 'shape' }; }
   let q = orderCorners(quad);
   try { const rq = refineEdges(blur.data, w, h, q); if (rq) q = rq; } catch (e) { /* 貼不齊就用遮罩的 */ }
