@@ -26,7 +26,7 @@ const MAX_PHOTO = 15000000;  // Android 即時掃描拍照上限 1500 萬畫素�
 const HAS_IC = 'ImageCapture' in window; // Android Chrome 有、iPhone 沒有
 
 /* ---------- 設定 ---------- */
-const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, confirmCrop: true, upscale: 'auto', v: 2 };
+const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: false, confirmCrop: true, upscale: 'auto', v: 2 };
 const settings = (() => {
   let s = {};
   try { s = JSON.parse(localStorage.getItem('cocoscan-settings') || '{}'); } catch (_) {}
@@ -282,8 +282,9 @@ async function loadDocAdj() {
     settings.adjFix115 = true; saveSettings();
   }
 }
-async function addPage(docId, blob, corners, curve) {
+async function addPage(docId, blob, corners, curve, needCrop) {
   const page = { id: uid(), docId, original: blob, corners, curve: curve || null, rotation: 0, mode: settings.mode, created: Date.now() };
+  if (needCrop) page.needCrop = true; // 1.19：即時掃描時要自己裁切、還沒裁的頁
   await DB.put('pages', page);
   const doc = await DB.get('docs', docId);
   doc.pageIds.push(page.id); doc.updated = Date.now();
@@ -320,6 +321,7 @@ window.addEventListener('popstate', (e) => {
   else if (s === 'doc') { state.docId = e.state.doc; renderDoc(); show('doc'); }
   else if (s === 'library') { renderLibrary(); show('library'); }
   else if (s === 'burst') { renderBurst(); show('burst'); }
+  else if (s === 'live' && live.running) { show('live'); liveResume(); }
   else if (s === 'page') { state.docId = e.state.doc; state.pageIndex = e.state.i; renderPage(); show('page'); }
   else { renderHome(); show('home'); }
 });
@@ -382,7 +384,7 @@ async function renderHome() {
     <div class="sec">最近掃描</div>
     <div class="recent">
       <label class="rname">${ICON.edit}<input id="recentName" type="text" enterkeyhint="done" autocomplete="off" aria-label="文件名稱"></label>
-      <div class="rmeta">${pages.length} 頁・${fmtDate(doc.updated)}</div>
+      <div class="rmeta">${pages.length} 頁・${fmtDate(doc.updated)}${pages.some((p) => p.needCrop) ? `・<span class="w">✂ ${pages.filter((p) => p.needCrop).length} 頁待裁切</span>` : ''}</div>
       <div class="strip" id="homeStrip"></div>
       <div class="rbtns">
         <button class="bigbtn alt" id="recentOpen">開啟文件</button>
@@ -417,11 +419,12 @@ function updateHomeStrip(pages) {
     const b = document.createElement('button');
     b.className = 'sth';
     const src = p.thumb || p.original;
-    b.innerHTML = `<img src="${blobUrl('strip:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span>${i + 1}</span>${!p.thumb || processing.has(p.id) ? '<i class="spin sm"></i>' : ''}`;
+    b.innerHTML = `<img src="${blobUrl('strip:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span>${i + 1}</span>${p.needCrop ? '<i class="cut">✂</i>' : ''}${!p.thumb || processing.has(p.id) ? '<i class="spin sm"></i>' : ''}`;
     b.onclick = async () => {
       state.docId = docId; await renderDoc();
       history.pushState({ s: 'doc', doc: docId }, '');
       state.pageIndex = i; renderPage(); go('page');
+      if (p.needCrop) openPageCropSoon(p.id);
     };
     strip.appendChild(b);
   });
@@ -451,7 +454,7 @@ async function renderLibrary() {
     const n = lib.order.indexOf(doc.id);
     b.className = 'doc' + (n >= 0 ? ' sel' : '');
     const th = first && (first.thumb || first.original);
-    b.innerHTML = `<div class="th">${th ? `<img src="${blobUrl('lib:' + first.id, th, verOf(first, 'thumb'))}" alt="">` : ''}<span class="n">${doc.pageIds.length} 頁</span><span class="ck">${n >= 0 ? n + 1 : ''}</span></div><div class="meta"><div class="t"></div><div class="d">${fmtDate(doc.updated)}</div></div>`;
+    b.innerHTML = `<div class="th">${th ? `<img src="${blobUrl('lib:' + first.id, th, verOf(first, 'thumb'))}" alt="">` : ''}<span class="n">${doc.pageIds.length} 頁</span>${(() => { const w = doc.pageIds.filter((id) => (pages.get(id) || {}).needCrop).length; return w ? `<span class="w">✂ ${w} 頁待裁切</span>` : ''; })()}<span class="ck">${n >= 0 ? n + 1 : ''}</span></div><div class="meta"><div class="t"></div><div class="d">${fmtDate(doc.updated)}</div></div>`;
     b.querySelector('.t').textContent = doc.title;
     b.onclick = () => {
       if (!lib.selecting) { openDoc(doc.id); return; }
@@ -625,13 +628,13 @@ async function startLive(docId) {
   }
   Object.assign(live, {
     running: true, docId, fromDoc: !!docId, count: 0, stream: null, track: null, ic: null, lastQuad: null, shown: null,
-    hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0,
+    hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0, paused: false,
   });
   pauseQueue(); // 掃描期間暫停高解析度處理，讓抓邊保持流暢
   resetLock();
   $('#liveThumb').style.visibility = 'hidden';
-  $('#autoBtn').classList.toggle('on', settings.autoShutter);
-  $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
+  updateLiveBtns();
+  torchOn = false; $('#torchBtn').classList.remove('on');
   setRing(0);
   go('live');
   try {
@@ -671,8 +674,8 @@ async function startLive(docId) {
       $('#resChip').textContent = live.ic ? `預覽 ${v.videoWidth}×${v.videoHeight}・拍照最高 1500 萬畫素` : `${v.videoWidth}×${v.videoHeight}`;
     };
     v.onloadedmetadata = updRes; updRes();
-    setHint(workerReady ? '將文件放進畫面中' : '影像引擎載入中…');
-    whenReady().then(() => { if (live.running) setHint('將文件放進畫面中'); });
+    setHint(!settings.autoShutter ? MANUAL_HINT : workerReady ? '將文件放進畫面中' : '影像引擎載入中…');
+    whenReady().then(() => { if (live.running && settings.autoShutter) setHint('將文件放進畫面中'); });
     liveLoop();
     requestAnimationFrame(drawOverlay);
   } catch (err) {
@@ -796,7 +799,8 @@ function grabFull(v) { return grabInto(fullCanvases[0], v); }
 async function liveLoop() {
   if (!live.running) return;
   const v = $('#video');
-  if (workerReady && !live.detecting && !live.capturing && v.videoWidth) {
+  if (!settings.autoShutter && !live.paused && !live.capturing) setHint(MANUAL_HINT, true); // 手動模式不找框（1.19）
+  if (workerReady && settings.autoShutter && !live.paused && !live.detecting && !live.capturing && v.videoWidth) {
     live.detecting = true;
     try {
       // 進入穩定倒數後，每一格都先存全解析度畫面（與偵測用的是同一瞬間）
@@ -878,7 +882,8 @@ function onDetect(r, sig, full, sharp, gt) {
   live.progress = progress;
 
   // 紙張太靠近畫面邊緣：照片四周會沒有空間可以重新裁切，先不拍
-  live.edge = live.lockQ.some(([x, y]) => x < EDGE_MARGIN || x > 1 - EDGE_MARGIN || y < EDGE_MARGIN || y > 1 - EDGE_MARGIN);
+  // 1.19：只有「一整條邊」貼著畫面的一側（例如書本攤開，旁邊那頁超出畫面）照樣可以拍；兩側以上或只有一個角碰到才擋
+  live.edge = edgeBlocked(live.lockQ);
   if (live.edge) {
     live.stableSince = now; live.progress = 0; live.best = null;
     setRing(0); setHint('請稍微拉遠一點'); return;
@@ -894,6 +899,19 @@ function onDetect(r, sig, full, sharp, gt) {
     const b = live.best;
     capture(sig, b ? b.canvas : null, b ? b.quad : live.lockQ);
   }
+}
+function edgeBlocked(Q) {
+  const E = EDGE_MARGIN;
+  const hit = Q.map(([x, y]) => [x < E, x > 1 - E, y < E, y > 1 - E]);
+  const n = hit.filter((h) => h.some(Boolean)).length;
+  if (!n) return false;
+  if (n !== 2) return true;
+  // 兩個角都碰到：要是同一側、相鄰的兩個角，而且各自只碰到那一側
+  for (let s = 0; s < 4; s++) {
+    const idx = hit.map((h, i) => (h[s] ? i : -1)).filter((i) => i >= 0);
+    if (idx.length === 2 && (idx[1] - idx[0] === 1 || (idx[0] === 0 && idx[1] === 3)) && idx.every((i) => hit[i].filter(Boolean).length === 1)) return false;
+  }
+  return true;
 }
 function videoRect() {
   const st = $('#live .stage').getBoundingClientRect();
@@ -911,7 +929,7 @@ function drawOverlay() {
   const ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, R.cw, R.ch);
-  const target = live.armed && (!live.capturing || live.holdBox) ? live.lockQ : null;
+  const target = settings.autoShutter && live.armed && (!live.capturing || live.holdBox) ? live.lockQ : null;
   if (target) {
     if (!live.shown) { live.shown = target.map((p) => p.slice()); live.fade = 0; }
     else live.shown = live.shown.map((p, i) => [p[0] + (target[i][0] - p[0]) * 0.5, p[1] + (target[i][1] - p[1]) * 0.5]);
@@ -960,10 +978,16 @@ function flash() {
   const f = $('#flash'); f.classList.remove('go'); void f.offsetWidth; f.classList.add('go');
   if (navigator.vibrate) navigator.vibrate(30);
 }
-async function capture(sig, full, quadAt) {
-  if (live.capturing || !live.running) return;
+async function capture(sig, full, quadAt, userPress) {
+  if (live.capturing || !live.running || live.paused) return;
   live.capturing = true;
-  const quad = quadAt || live.lockQ;
+  // 1.19：哪些照片要交給使用者自己裁切
+  //  - 手動拍攝模式：每一張（不找框，存整張）
+  //  - 自動拍攝模式下自己按快門，而框還沒穩定（沒有鎖定，或被「請稍微拉遠一點」擋住）：用照片重新找一次框（C），找不到就整張
+  const manualMode = !settings.autoShutter;
+  const steady = !manualMode && !!live.lockQ && !live.edge;
+  const needUser = !!userPress && !steady;
+  const quad = needUser ? null : quadAt || live.lockQ;
   const v = $('#video');
   if (!sig) sig = frameSig(v);
   setRing(0);
@@ -1004,10 +1028,10 @@ async function capture(sig, full, quadAt) {
           const nb = await toBlob(c, 'image/jpeg', 0.95);
           if (nb) { blob = nb; srcImg = c; }
         }
-        r = await detectOn(srcImg);
+        if (!manualMode) r = await detectOn(srcImg);
         if (srcImg !== img) srcImg.width = srcImg.height = 0;
         URL.revokeObjectURL(url);
-      } else if (src) r = await detectOn(src);
+      } else if (src && !manualMode) r = await detectOn(src);
       // Android 照片：即時框在弱手機上可能偏掉，以照片上完整偵測的結果為準（只排除差太多的誤判）
       const okR = r && (fromPhoto ? r.area > 0.15 && (!quad || !sameAspect || maxDisp(r.corners, quad) < 0.25)
                                   : (!quad || !sameAspect || maxDisp(r.corners, quad) < 0.06));
@@ -1015,7 +1039,7 @@ async function capture(sig, full, quadAt) {
       else if (!r && !sameAspect) corners = FULL.map((p) => p.slice());
     } catch (_) {}
     if (!live.docId) live.docId = (await createDoc()).id;
-    const page = await addPage(live.docId, blob, corners);
+    const page = await addPage(live.docId, blob, corners, null, needUser);
     live.count++;
     { const tb = $('#liveThumb'); tb.classList.remove('bump'); void tb.offsetWidth; tb.classList.add('bump'); }
     const th = $('#liveThumb');
@@ -1024,21 +1048,85 @@ async function capture(sig, full, quadAt) {
     th.querySelector('img').src = blobUrl('live:last', blob, page.id);
     live.lastCapT = Date.now(); live.miss = 0; live.best = null;
     if (!quad) { live.armed = true; resetLock(); }
+    if (needUser && !settings.cropLater) { live.capturing = false; openLiveCrop(page, blob, corners); return; }
   } catch (e) {
     console.error(e); shotFx(''); toast('拍攝失敗：' + e.message);
     live.armed = true; resetLock();
   }
   live.capturing = false;
 }
-$('#shutter').onclick = () => { if (live.running) capture(); };
+$('#shutter').onclick = () => { if (live.running) capture(null, null, null, true); };
+
+/* 1.19 立即裁切：拍完直接進裁切畫面；相機不關，只暫停找框，回來就能接著拍 */
+function openLiveCrop(page, blob, corners) {
+  live.paused = true;
+  openCrop({
+    blob, corners, retake: true, liveCrop: true,
+    onConfirm: async (c, cv) => {
+      history.back(); // 回到拍攝畫面
+      const p = await DB.get('pages', page.id);
+      if (!p) return;
+      p.corners = c; p.curve = cv; delete p.needCrop;
+      await DB.put('pages', p);
+      enqueue(p.id);
+    },
+    onRetake: () => removeLivePage(page.id),
+    onCancel: () => {}, // 左上「稍後裁切」或返回鍵：整張留著，保留待裁切標記
+  });
+}
+async function removeLivePage(pageId) {
+  const doc = await DB.get('docs', live.docId);
+  await DB.del('pages', pageId);
+  live.count = Math.max(0, live.count - 1);
+  live.armed = true; resetLock();
+  if (doc) {
+    doc.pageIds = doc.pageIds.filter((id) => id !== pageId);
+    if (!doc.pageIds.length && !live.fromDoc) { await DB.del('docs', doc.id); live.docId = null; }
+    else { doc.updated = Date.now(); await DB.put('docs', doc); }
+  }
+  const th = $('#liveThumb');
+  if (!live.count) { th.style.visibility = 'hidden'; return; }
+  th.querySelector('span').textContent = live.count;
+  const last = doc && doc.pageIds.length ? await DB.get('pages', doc.pageIds[doc.pageIds.length - 1]) : null;
+  if (last) th.querySelector('img').src = blobUrl('live:last', last.original, last.id);
+}
+function liveResume() {
+  live.paused = false;
+  if (!live.track || live.track.readyState === 'ended') { finishLive(); return; } // 中途被切到背景，相機已經關了
+  $('#video').play().catch(() => {});
+  setHint(settings.autoShutter ? (live.armed ? '將文件放進畫面中' : '已拍好，請換下一頁') : MANUAL_HINT, !settings.autoShutter || !live.armed);
+}
+const MANUAL_HINT = '手動拍攝：拍完後再自己調整範圍';
+function updateLiveBtns() {
+  $('#autoBtn').classList.toggle('on', settings.autoShutter);
+  $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
+  $('#cropModeBtn').textContent = settings.cropLater ? '稍後裁切' : '立即裁切';
+  $('#cropModeBtn').classList.toggle('later', !!settings.cropLater);
+}
+let liveTipT;
+function liveTip(title, html) {
+  const t = $('#liveTip');
+  t.querySelector('b').textContent = title;
+  t.querySelector('span').innerHTML = html;
+  t.classList.add('show');
+  clearTimeout(liveTipT);
+  liveTipT = setTimeout(() => t.classList.remove('show'), 2200);
+}
+$('#cropModeBtn').onclick = () => {
+  settings.cropLater = !settings.cropLater; saveSettings();
+  updateLiveBtns();
+  if (settings.cropLater) liveTip('稍後裁切', '拍完先存起來，可以連續拍<br>之後在文件裡點「✂」那頁裁切');
+  else liveTip('立即裁切', '需要自己裁切的照片<br>拍完直接進入裁切畫面');
+};
 $('#liveClose').onclick = () => finishLive();
 $('#liveDone').onclick = () => finishLive();
 $('#liveThumb').onclick = () => finishLive();
 $('#autoBtn').onclick = () => {
   settings.autoShutter = !settings.autoShutter; saveSettings();
-  $('#autoBtn').classList.toggle('on', settings.autoShutter);
-  $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
-  resetLock(); setRing(0);
+  updateLiveBtns();
+  live.armed = true; resetLock(); setRing(0);
+  if (settings.autoShutter) { setHint('將文件放進畫面中'); liveTip('自動拍攝', '對準文件，穩定後自動拍下'); }
+  else { setHint(MANUAL_HINT, true); liveTip('手動拍攝', '不自動框選，拍完再自己調整範圍'); }
 };
 let torchOn = false;
 $('#torchBtn').onclick = async () => {
@@ -1140,6 +1228,7 @@ async function openCrop(opts) {
   const ci = $('#cropImg'); ci.src = url;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
   $('#cropNext').style.display = opts.burst ? '' : 'none';
+  $('#cropCancel').textContent = opts.liveCrop ? '稍後裁切' : '取消';
   updateCurveBtn();
   go('crop');
   requestAnimationFrame(layoutCrop);
@@ -1544,9 +1633,11 @@ async function renderDoc() {
       if (Date.now() - lastDragEnd < 300) return;
       state.pageIndex = [...g.querySelectorAll('.pg:not(.add)')].indexOf(b);
       renderPage(); go('page');
+      if (p.needCrop) openPageCropSoon(p.id); // 待裁切的頁：直接打開裁切
     };
     g.appendChild(b);
   });
+  updateCropNote(pages);
   const add = document.createElement('button');
   add.className = 'pg add';
   add.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新增頁面';
@@ -1605,7 +1696,17 @@ function setupSort(g) {
 function fillPageThumb(el, p, i) {
   const src = p.thumb || p.original;
   const wait = !p.thumb || processing.has(p.id);
-  el.innerHTML = `<img src="${blobUrl('t:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span class="no">${i + 1}</span>${pageCustom(p) ? `<span class="custom" title="這一頁單獨調整過">${ICON.sliders}</span>` : ''}${wait ? '<span class="wait"><span class="spin sm"></span></span>' : ''}`;
+  el.innerHTML = `<img src="${blobUrl('t:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span class="no">${i + 1}</span>${pageCustom(p) ? `<span class="custom" title="這一頁單獨調整過">${ICON.sliders}</span>` : ''}${p.needCrop ? '<i class="cut" title="待裁切">✂</i>' : ''}${wait ? '<span class="wait"><span class="spin sm"></span></span>' : ''}`;
+}
+function updateCropNote(pages) {
+  const n = pages.filter((p) => p.needCrop).length, el = $('#cropNote');
+  el.classList.toggle('on', n > 0);
+  el.textContent = n ? `✂ 有 ${n} 頁待裁切，點一下那頁就能調整範圍` : '';
+}
+// 打開頁面後直接進裁切（等頁面資料載入）
+async function openPageCropSoon(pageId) {
+  for (let i = 0; i < 40 && !(viewPage && viewPage.id === pageId); i++) await new Promise((r) => setTimeout(r, 25));
+  if (current === 'page' && viewPage && viewPage.id === pageId) $('#pgCrop').onclick();
 }
 async function onPageUpdated(pageId) {
   if (current === 'doc') {
@@ -1828,7 +1929,7 @@ $('#pgCrop').onclick = () => {
   const p = viewPage;
   openCrop({
     blob: p.original, corners: p.corners, curve: p.curve || null,
-    onConfirm: async (c, cv) => { history.back(); await updatePage({ corners: c, curve: cv }); },
+    onConfirm: async (c, cv) => { history.back(); await updatePage({ corners: c, curve: cv, needCrop: false }); },
   });
 };
 async function movePage(d) {
@@ -2400,7 +2501,12 @@ function openHelp() {
     <h4>即時掃描小技巧</h4><ul>
       <li>用正常距離拍就可以，建議讓畫面佔滿約8分滿，畫面比較清晰。</li>
       <li>綠框出現後拿穩，看到中間的「✓ 已拍好」即完成拍攝。</li>
-      <li>換下一頁時，讓紙張離開畫面或翻頁，就會自動拍下一張。</li></ul>
+      <li>換下一頁時，讓紙張離開畫面或翻頁，就會自動拍下一張。</li>
+      <li>書本攤開時，對準要拍的那一頁就好，旁邊那頁超出畫面也沒關係。</li>
+      <li>框一直對不到時，可以直接按快門，拍完再自己調整範圍。</li>
+      <li>右上角可以切換「自動／手動拍攝」：手動拍攝不畫框，每張都拍整張，拍完再自己裁切。</li>
+      <li>「立即裁切／稍後裁切」決定要自己裁切的照片怎麼處理：立即裁切會拍完直接進裁切畫面；稍後裁切會先存起來，頁面標上「✂」，之後再點進去裁。</li>
+      <li>光線不夠時，點左上角的 ⚡ 開燈（手機支援才會出現）。</li></ul>
     <h4>裁切</h4><ul>
       <li>拖四個角或拖邊來調整範圍，放大鏡能幫你對準。</li>
       <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平。</li>
@@ -2432,7 +2538,7 @@ $('#cvDonate').onclick = () => openDonate();
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.18';
+const APP_VER = '1.19';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   { v: 'v1', items: [
@@ -2448,6 +2554,8 @@ const CHANGELOG = [
     { t: '使用教學、加入主畫面教學' },
     { t: '設定裡可以修改「預設調整數值」' },
     { t: '問題回報與更新日誌', since: '1.18' },
+    { t: '即時掃描更會找紙：紙上印有框線不會框錯，書本攤開時會沿著書溝只框一頁', since: '1.19' },
+    { t: '手動拍攝不畫框、拍整張；可選「立即裁切」或「稍後裁切」，待裁切的頁會標上 ✂', since: '1.19' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號

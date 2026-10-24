@@ -59,12 +59,12 @@ function matToPts(m) {
   return pts;
 }
 
-function bestQuadFromEdges(cv, edges, w, h) {
+// 從邊緣圖收集所有「像一張紙」的四邊形（1.19 起全部收集，交給 detectQuad 評分挑選）
+function quadsFromEdges(cv, edges, w, h, out) {
   const contours = new cv.MatVector();
   const hier = new cv.Mat();
   cv.findContours(edges, contours, hier, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
   const frame = w * h;
-  let best = null, bestArea = 0;
   for (let i = 0; i < contours.size(); i++) {
     const c = contours.get(i);
     const area = cv.contourArea(c);
@@ -89,10 +89,117 @@ function bestQuadFromEdges(cv, edges, w, h) {
     const m = 3;
     const touching = q.filter((p) => p[0] <= m || p[1] <= m || p[0] >= w - 1 - m || p[1] >= h - 1 - m).length;
     if (touching === 4 && a > frame * 0.93) continue;
-    if (a > bestArea) { bestArea = a; best = q; }
+    out.push({ quad: q, area: a / frame });
   }
   contours.delete(); hier.delete();
-  return best ? { quad: best, area: bestArea / frame } : null;
+}
+
+// 框邊「裡亮外暗」的程度（1.19）：紙在桌上，邊框內側是白紙、外側是桌面 → 差很多；
+// 紙上印的框線、譜表區塊，框內外都是紙 → 差不多或裡面反而比較暗。貼著畫面邊緣的那一邊看不到外側，不算。
+function edgeContrast(g, w, h, q) {
+  const cx = q.reduce((s, p) => s + p[0], 0) / 4, cy = q.reduce((s, p) => s + p[1], 0) / 4;
+  const d = Math.max(3, Math.round(Math.min(w, h) * 0.02)), m = 3;
+  const at = (x, y) => g[Math.round(y) * w + Math.round(x)];
+  let sum = 0, sides = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) % 4];
+    const onBorder = (a[0] <= m && b[0] <= m) || (a[1] <= m && b[1] <= m) || (a[0] >= w - 1 - m && b[0] >= w - 1 - m) || (a[1] >= h - 1 - m && b[1] >= h - 1 - m);
+    if (onBorder) continue;
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+    let nx = -(b[1] - a[1]) / L, ny = (b[0] - a[0]) / L;
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+    if (nx * (mx - cx) + ny * (my - cy) < 0) { nx = -nx; ny = -ny; } // 法向量朝外
+    let s = 0, n = 0;
+    for (let k = 1; k <= 12; k++) {
+      const t = 0.08 + 0.84 * (k - 0.5) / 12;
+      const px = a[0] + (b[0] - a[0]) * t, py = a[1] + (b[1] - a[1]) * t;
+      const ix = px - nx * d, iy = py - ny * d, ox = px + nx * d, oy = py + ny * d;
+      if (ox < 0 || oy < 0 || ox > w - 1 || oy > h - 1 || ix < 0 || iy < 0 || ix > w - 1 || iy > h - 1) continue;
+      s += at(ix, iy) - at(ox, oy); n++;
+    }
+    if (n >= 4) { sum += s / n; sides++; }
+  }
+  return sides ? sum / sides : null;
+}
+
+// 書溝（1.19）：在框裡找一條從上到下的陰影谷線，找到就把框切成左右兩頁，回傳比較完整的那一頁
+function splitGutter(cv, gray, q, w, h) {
+  const RW = 240, RH = 320;
+  const from = cv.matFromArray(4, 1, cv.CV_32FC2, [].concat(...q));
+  const to = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, RW, 0, RW, RH, 0, RH]);
+  const M = cv.getPerspectiveTransform(from, to);
+  const Minv = cv.getPerspectiveTransform(to, from);
+  const r = new cv.Mat();
+  cv.warpPerspective(gray, r, M, new cv.Size(RW, RH), cv.INTER_AREA, cv.BORDER_REPLICATE);
+  const prof = (y0, y1, R) => {
+    const out = new Float32Array(RW), Y0 = Math.round(RH * y0), Y1 = Math.round(RH * y1);
+    for (let x = 0; x < RW; x++) { let s = 0; for (let y = Y0; y < Y1; y++) s += r.data[y * RW + x]; out[x] = s / (Y1 - Y0); }
+    if (!R) return out;
+    const sm = new Float32Array(RW); // 平滑（R=4 約 3.5%），抹掉小節線這類細線
+    for (let x = 0; x < RW; x++) { let s = 0, n = 0; for (let k = -R; k <= R; k++) { const j = x + k; if (j >= 0 && j < RW) { s += out[j]; n++; } } sm[x] = s / n; }
+    return sm;
+  };
+  const mid = prof(0.15, 0.85, 4), topB = prof(0.02, 0.12, 1), botB = prof(0.88, 0.98, 1);
+  const Minv64 = Minv.data64F.slice();
+  from.delete(); to.delete(); M.delete(); Minv.delete(); r.delete();
+  const depthAt = (P, k, thr) => {
+    const w1 = Math.round(RW * 0.25), w0 = Math.round(RW * 0.03);
+    let lm = -1, rm = -1, v = 1e9;
+    for (let j = k - 3; j <= k + 3; j++) if (j >= 0 && j < RW) v = Math.min(v, P[j]);
+    for (let j = k - w1; j <= k - w0; j++) if (j >= 0) lm = Math.max(lm, P[j]);
+    for (let j = k + w0; j <= k + w1; j++) if (j < RW) rm = Math.max(rm, P[j]);
+    if (lm < 0 || rm < 0) return 0;
+    const side = Math.min(lm, rm);
+    return side - v >= thr && v < side * 0.9 ? side - v : 0;
+  };
+  // 書溝陰影有寬度：在留白帶裡，比「一半深度」還暗的範圍至少要 2%（印刷框線只有 1、2 像素寬）
+  const wideAt = (P, k) => {
+    let v = 1e9, kk = k;
+    for (let j = k - 4; j <= k + 4; j++) if (j >= 0 && j < RW && P[j] < v) { v = P[j]; kk = j; }
+    const dpt = depthAt(P, kk, 8);
+    if (!dpt) return false;
+    const half = v + dpt / 2;
+    let a = kk, b = kk;
+    while (a > 0 && P[a - 1] < half) a--;
+    while (b < RW - 1 && P[b + 1] < half) b++;
+    return b - a + 1 >= Math.max(4, RW * 0.02);
+  };
+  // 中段的谷（局部最低點）由深到淺逐一檢查；上下留白也要看得到同一條寬陰影才算書溝
+  // （譜號、大括號造成的暗帶只出現在譜表區，留白沒有，這樣可避免誤判）
+  const vals = [];
+  for (let k = Math.round(RW * 0.06); k <= Math.round(RW * 0.94); k++) {
+    let isMin = true;
+    for (let j = k - 3; j <= k + 3; j++) if (j !== k && j >= 0 && j < RW && mid[j] < mid[k]) { isMin = false; break; }
+    if (!isMin) continue;
+    const dpt = depthAt(mid, k, 18);
+    if (dpt) vals.push([dpt, k]);
+  }
+  vals.sort((a, b) => b[0] - a[0]);
+  let best = -1;
+  for (const [, k] of vals) {
+    if (wideAt(topB, k) && wideAt(botB, k)) { best = k; break; }
+  }
+  if (best < 0) return null;
+  const map = (x, y) => {
+    const H = Minv64, z = H[6] * x + H[7] * y + H[8];
+    return [(H[0] * x + H[1] * y + H[2]) / z, (H[3] * x + H[4] * y + H[5]) / z];
+  };
+  const gt = map(best, 0), gb = map(best, RH);
+  const L = [q[0], gt, gb, q[3]], R = [gt, q[1], q[2], gb];
+  const m = Math.min(w, h) * 0.015;
+  const touch = (Q) => Q.filter((p) => p[0] <= m || p[1] <= m || p[0] >= w - 1 - m || p[1] >= h - 1 - m).length;
+  // 切出來的那一頁要像一頁樂譜（寬至少是高的一半）；對折過的單張紙，半邊太窄，不算書溝
+  const asp = (Q) => {
+    const wd = (Math.hypot(Q[1][0] - Q[0][0], Q[1][1] - Q[0][1]) + Math.hypot(Q[2][0] - Q[3][0], Q[2][1] - Q[3][1])) / 2;
+    const ht = (Math.hypot(Q[3][0] - Q[0][0], Q[3][1] - Q[0][1]) + Math.hypot(Q[2][0] - Q[1][0], Q[2][1] - Q[1][1])) / 2;
+    return Math.min(wd, ht) / Math.max(wd, ht, 1);
+  };
+  const ctr = (Q) => Math.hypot(Q.reduce((a, p) => a + p[0], 0) / 4 / w - 0.5, Q.reduce((a, p) => a + p[1], 0) / 4 / h - 0.5);
+  const tL = touch(L), tR = touch(R);
+  // 優先：沒有超出畫面的那頁 → 比較靠近畫面中央的那頁
+  const pick = tL !== tR ? (tL < tR ? L : R) : (ctr(L) <= ctr(R) ? L : R);
+  if (asp(pick) < 0.5) return null;
+  return { quad: pick, area: polyArea(pick) / (w * h) };
 }
 
 function detectQuad(cv, rgba, w, h, fast) {
@@ -106,19 +213,33 @@ function detectQuad(cv, rgba, w, h, fast) {
   const candidates = [];
   const edges = new cv.Mat();
 
-  // 策略 1、2：Canny（強 / 弱）
-  for (const [lo, hi] of [[60, 160], [25, 75]]) {
-    cv.Canny(blur, edges, lo, hi);
+  // 評分（1.19）：面積 ×「裡亮外暗」程度。紙張與桌面的交界最高分，紙上的框線、譜表區塊分數低
+  const g = blur.data;
+  const scoreAll = () => {
+    for (const c of candidates) {
+      if (c.score !== undefined) continue;
+      const ec = edgeContrast(g, w, h, c.quad);
+      c.contrast = ec;
+      c.f = ec === null ? 0.6 : 0.3 + 0.7 * Math.min(1, Math.max(0, ec / 30));
+      c.score = c.area * c.f;
+    }
+  };
+  const confident = () => { scoreAll(); return candidates.some((c) => c.f >= 0.95 && c.area > 0.15); };
+  // 策略 1：Canny（強）
+  cv.Canny(blur, edges, 60, 160);
+  cv.dilate(edges, edges, k);
+  quadsFromEdges(cv, edges, w, h, candidates);
+  // 策略 2：Otsu 二值化（白紙在深色桌面；紙超出畫面時也只有這個找得到）
+  const bin = new cv.Mat();
+  cv.threshold(blur, bin, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
+  cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, k);
+  quadsFromEdges(cv, bin, w, h, candidates);
+  bin.delete();
+  // 策略 3：Canny（弱）；即時模式已經找到很像紙的框就省掉，弱手機才跟得上
+  if (!fast || !confident()) {
+    cv.Canny(blur, edges, 25, 75);
     cv.dilate(edges, edges, k);
-    const r = bestQuadFromEdges(cv, edges, w, h);
-    if (r) candidates.push(r);
-    if (fast && r && r.area > 0.15) break; // 即時模式：找到就停，省時間也讓框更穩定
-  }
-  // 策略 3：Otsu 二值化（白紙在深色桌面）
-  if (!(fast && candidates.length)) {
-  cv.threshold(blur, edges, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU);
-  cv.morphologyEx(edges, edges, cv.MORPH_CLOSE, k);
-  { const r = bestQuadFromEdges(cv, edges, w, h); if (r) candidates.push(r); }
+    quadsFromEdges(cv, edges, w, h, candidates);
   }
   // 策略 4：飽和度通道（白紙在有色桌面）
   if (!candidates.length) {
@@ -128,20 +249,25 @@ function detectQuad(cv, rgba, w, h, fast) {
     const sat = ch.get(1);
     cv.GaussianBlur(sat, sat, new cv.Size(5, 5), 0);
     cv.threshold(sat, edges, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU);
-    const r = bestQuadFromEdges(cv, edges, w, h); if (r) candidates.push(r);
+    quadsFromEdges(cv, edges, w, h, candidates);
     sat.delete(); ch.delete(); hsv.delete(); rgb.delete();
   }
 
+  let r = null;
+  if (candidates.length) {
+    scoreAll();
+    for (const c of candidates) if (!r || c.score > r.score) r = c;
+    // 書溝：框裡有一條直的陰影谷線 → 只框其中一頁
+    try { const sp = splitGutter(cv, blur, r.quad, w, h); if (sp && sp.area > 0.1) r = Object.assign({}, r, sp, { gutter: true }); }
+    catch (e) { /* 找不到就算了 */ }
+  }
   src.delete(); gray.delete(); blur.delete(); k.delete(); edges.delete();
-  if (!candidates.length) return null;
-  // 取面積最大但不貼滿畫面的
-  candidates.sort((a, b) => b.area - a.area);
-  const r = candidates[0];
+  if (!r) return null;
   // 往中心內縮約 0.6%，避免把紙張邊緣外的桌面拍進去
   const cx = r.quad.reduce((a, p) => a + p[0], 0) / 4, cy = r.quad.reduce((a, p) => a + p[1], 0) / 4;
   const inset = 0.006;
   const q = r.quad.map((p) => [p[0] + (cx - p[0]) * inset * 2, p[1] + (cy - p[1]) * inset * 2]);
-  return { corners: q.map((p) => [Math.min(1, Math.max(0, p[0] / w)), Math.min(1, Math.max(0, p[1] / h))]), area: r.area };
+  return { corners: q.map((p) => [Math.min(1, Math.max(0, p[0] / w)), Math.min(1, Math.max(0, p[1] / h))]), area: r.area, gutter: !!r.gutter };
 }
 
 /* ---------- 真實長寬比（Zhang & He 白板掃描法） ---------- */
