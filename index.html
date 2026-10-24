@@ -223,7 +223,7 @@ input[type=file]{display:none}
 .atab{flex:none;padding:7px 13px;border-radius:18px;background:var(--surface2);color:var(--cocoa);font-size:14px;font-weight:600;position:relative}
 .atab.on{background:var(--cocoa);color:var(--cream)}
 .atab.chg::after{content:"";position:absolute;right:5px;top:5px;width:6px;height:6px;border-radius:50%;background:var(--caramel)}
-.adjone{padding:2px 2px 0}
+.adjone{padding:2px 16px 0} /* 1.28：拉桿往內收，離螢幕邊緣約 30px，避免誤觸返回手勢 */
 .adjval{display:flex;align-items:center;font-size:12px;color:var(--muted)}
 .adjval output{flex:1;text-align:center;font-size:14.5px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
 .adjval output.chg{color:var(--cocoa)}
@@ -460,6 +460,12 @@ input[type=file]{display:none}
 #undoBar{position:fixed;left:50%;bottom:calc(var(--sb) + 86px);transform:translateX(-50%) translateY(12px);background:rgba(58,40,30,.95);color:#fff;border-radius:16px;padding:10px 10px 10px 16px;display:flex;align-items:center;gap:12px;font-size:14px;z-index:41;opacity:0;pointer-events:none;transition:all .25s;max-width:92vw}
 #undoBar.show{opacity:1;pointer-events:auto;transform:translateX(-50%)}
 #undoBar button{background:var(--caramel);color:#fff;font-weight:700;border-radius:12px;padding:7px 14px;flex:none}
+
+/* 1.28 防止誤觸：長按不跳選單、不選字、不出放大鏡；不能雙擊放大頁面（輸入框照樣可以選字） */
+*{-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+body{touch-action:manipulation}
+input[type=range]{-webkit-user-select:none;user-select:none;touch-action:none}
+input[type=text],input:not([type]),textarea{-webkit-touch-callout:default;-webkit-user-select:text;user-select:text}
 </style>
 </head>
 <body>

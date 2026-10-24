@@ -1303,9 +1303,24 @@ function layoutCrop() {
   pipPlace(false);
   drawCrop();
 }
+// 邊的中點（畫面座標）：有彎度時取曲線上的中點
+function edgeMid(i, w, h) {
+  const C = cropCtx.corners, a = C[i], b = C[(i + 1) % 4], k = cropCtx.curve && cropCtx.curve[i];
+  const p = k ? edgePoint(a, k, b, 0.5) : [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  return [p[0] * w, p[1] * h];
+}
+// 曲線是否其實是直的（存檔時直的就不存曲線）
+function curveIsStraight(C, curve) {
+  if (!curve) return true;
+  return curve.every((k, i) => {
+    const a = C[i], b = C[(i + 1) % 4];
+    return k.every((p, j) => { const t = (j + 1) / (k.length + 1); return Math.hypot(p[0] - (a[0] + (b[0] - a[0]) * t), p[1] - (a[1] + (b[1] - a[1]) * t)) < 0.0015; });
+  });
+}
 function drawCrop() {
   const { w, h } = cropCtx.rect;
-  const C = cropCtx.corners, curve = cropCtx.curveMode ? cropCtx.curve : null;
+  // 1.28：彎度不管在哪個模式都保留、都畫出來；模式只決定顯示哪一種把手
+  const C = cropCtx.corners, curve = cropCtx.curve;
   const P = C.map((p) => [p[0] * w, p[1] * h]);
   const poly = cropOutline(C, curve).map((p) => (p[0] * w).toFixed(1) + ',' + (p[1] * h).toFixed(1)).join(' ');
   const g = cropCtx.drag;
@@ -1315,17 +1330,17 @@ function drawCrop() {
   $('#cropSvg').innerHTML = html;
   // 控制點另外畫在最上層（1.12）：預覽小視窗蓋到時也看得到、拖得到
   html = '';
-  if (curve) {
+  if (cropCtx.curveMode && curve) {
     // 正在拉的那一點
     if (g && g.type === 'rope') {
       const p = ropePoint(g);
       html += `<circle cx="${p[0] * w}" cy="${p[1] * h}" r="15" fill="rgba(242,196,141,.35)" stroke="#fff" stroke-width="2.5"/><circle cx="${p[0] * w}" cy="${p[1] * h}" r="3.5" fill="#fff"/>`;
     }
   } else {
-    // 四條邊的中點把手（拖動只移動那一條邊）
+    // 四條邊的中點把手（拖動只移動那一條邊；邊彎曲時把手放在曲線中點）
     for (let i = 0; i < 4; i++) {
       const a = P[i], b = P[(i + 1) % 4];
-      const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+      const [mx, my] = edgeMid(i, w, h);
       const ang = Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI;
       const on = g && g.type === 'edge' && g.i === i;
       html += `<rect x="${mx - 15}" y="${my - 4.5}" width="30" height="9" rx="4.5" transform="rotate(${ang} ${mx} ${my})" fill="${on ? '#F2C48D' : '#fff'}" stroke="rgba(28,19,14,.35)" stroke-width="1"/>`;
@@ -1369,8 +1384,8 @@ function drawCrop() {
     if (!best && !curveOn) {
       bd = 34;
       for (let i = 0; i < 4; i++) {
-        const a = P[i], b = P[(i + 1) % 4];
-        const d = Math.hypot((a[0] + b[0]) / 2 - lx, (a[1] + b[1]) / 2 - ly);
+        const [mx, my] = edgeMid(i, w, h);
+        const d = Math.hypot(mx - lx, my - ly);
         if (d < bd) { bd = d; best = { type: 'edge', i }; }
       }
     }
@@ -1398,8 +1413,8 @@ function drawCrop() {
       const c = g.c0[g.i];
       const n = [clamp(c[0] + dx / w), clamp(c[1] + dy / h)];
       cropCtx.corners[g.i] = n;
-      // 曲線模式：相鄰兩條邊的彎曲點跟著按比例移動，保持原本的彎度
-      if (g.k0 && cropCtx.curveMode) {
+      // 有彎度時（兩種模式都一樣）：相鄰兩條邊的彎曲點跟著按比例移動，保持原本的彎度
+      if (g.k0 && cropCtx.curve) {
         const ddx = n[0] - c[0], ddy = n[1] - c[1];
         const prev = (g.i + 3) % 4;
         const mv = (ei, j, f) => { const p = g.k0[ei][j]; cropCtx.curve[ei][j] = [clamp(p[0] + ddx * f), clamp(p[1] + ddy * f)]; };
@@ -1423,13 +1438,30 @@ function drawCrop() {
       const dn = dx * nx + dy * ny;
       cropCtx.corners[i] = [clamp(g.c0[i][0] + (dn * nx) / w), clamp(g.c0[i][1] + (dn * ny) / h)];
       cropCtx.corners[j] = [clamp(g.c0[j][0] + (dn * nx) / w), clamp(g.c0[j][1] + (dn * ny) / h)];
+      // 1.28：有彎度時，這條邊整條平移；相鄰兩條邊靠近這兩個角的部分按比例跟著移
+      if (g.k0 && cropCtx.curve) {
+        const ddx = (dn * nx) / w, ddy = (dn * ny) / h, prev = (i + 3) % 4;
+        const mv = (ei, jj, f) => { const p = g.k0[ei][jj]; cropCtx.curve[ei][jj] = [clamp(p[0] + ddx * f), clamp(p[1] + ddy * f)]; };
+        for (let jj = 0; jj < CURVE_N; jj++) { const u = (jj + 1) / (CURVE_N + 1); mv(i, jj, 1); mv(prev, jj, u); mv(j, jj, 1 - u); }
+      }
     }
     drawCrop(); loupe(lx, ly);
     pipAvoid(lx + cropCtx.rect.x, ly + cropCtx.rect.y);
   });
+  let lastRope = null; // 1.28：曲線模式點兩下某條邊＝把那條邊拉直
   const end = (e) => {
     if (!cropCtx) return;
-    const was = !!cropCtx.drag;
+    const g = cropCtx.drag, was = !!g;
+    if (g && g.type === 'rope' && e.type === 'pointerup') {
+      const [lx, ly] = local(e), now = Date.now();
+      if (Math.hypot(lx - g.start[0], ly - g.start[1]) < 8) {
+        if (lastRope && lastRope.i === g.i && now - lastRope.t < 400) {
+          const C = cropCtx.corners, a = C[g.i], b = C[(g.i + 1) % 4];
+          cropCtx.curve[g.i] = cropCtx.curve[g.i].map((_, j) => { const t = (j + 1) / (CURVE_N + 1); return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]; });
+          lastRope = null; toast('已把這條邊拉直');
+        } else lastRope = { i: g.i, t: now };
+      } else lastRope = null;
+    }
     cropCtx.drag = null; $('#loupe').style.display = 'none'; drawCrop();
     if (was) { pipRequest(true); pipHideSoon(); }
   };
@@ -1463,7 +1495,7 @@ function drawCrop() {
       ctx.drawImage(src, sx0, sy0, sx1 - sx0, sy1 - sy0, (sx0 - cx) * scale + half, (sy0 - cy) * scale + half, (sx1 - sx0) * scale, (sy1 - sy0) * scale);
     }
     const toL = (p) => [(p[0] * SW - cx) * scale + half, (p[1] * SH - cy) * scale + half];
-    const Q = cropOutline(C, cropCtx.curveMode ? cropCtx.curve : null).map(toL);
+    const Q = cropOutline(C, cropCtx.curve).map(toL);
     const path = () => { ctx.moveTo(Q[0][0], Q[0][1]); for (let k = 1; k < Q.length; k++) ctx.lineTo(Q[k][0], Q[k][1]); ctx.closePath(); };
     ctx.beginPath(); ctx.rect(-10, -10, R + 20, R + 20); path();
     ctx.fillStyle = 'rgba(28,19,14,.5)'; ctx.fill('evenodd');
@@ -1481,7 +1513,7 @@ function drawCrop() {
 window.addEventListener('resize', () => { if (current === 'crop') layoutCrop(); if (current === 'page') { if (adj.open) { fitAdj(); scheduleRegion(); } else fitView(); } });
 $('#cropFull').onclick = () => {
   cropCtx.corners = FULL.map((p) => p.slice());
-  if (cropCtx.curveMode) cropCtx.curve = straightCurve(cropCtx.corners);
+  cropCtx.curve = cropCtx.curveMode ? straightCurve(cropCtx.corners) : null;
   drawCrop();
 };
 $('#cropAuto').onclick = async () => {
@@ -1495,20 +1527,21 @@ $('#cropAuto').onclick = async () => {
       const cv = await detectCurveOn($('#cropImg'), c.corners);
       c.curve = cv ? normCurve(c.corners, cv) : straightCurve(c.corners);
       toast(cv ? '已依紙張邊緣擺好曲線，可再拉邊微調' : '沒有偵測到明顯彎曲，可以按住邊拉彎');
-    }
+    } else c.curve = null;
     if (cropCtx === c) drawCrop();
   } finally { unbusy(); }
 };
-// 直線／曲線切換：第一次切到曲線時自動偵測彎曲
+// 直線／曲線切換（1.28）：只切換把手，彎度一律保留。
+// 直線＝拖角、拖邊的中點整條平移；曲線＝抓邊上任何一點拉彎，點兩下某條邊把它拉直
 $('#cropCurve').onclick = async () => {
   const c = cropCtx; if (!c) return;
   if (c.curveMode) {
-    c.savedCurve = c.curve; c.savedCorners = c.corners.map((p) => p.slice()); c.curve = null; c.curveMode = false;
+    c.curveMode = false;
+    if (curveIsStraight(c.corners, c.curve)) c.curve = null;
   } else {
-    // 從目前框好的範圍開始：之前彎過就沿用，否則四條邊先維持直線，由使用者拉彎
     c.curveMode = true;
-    if (!c.curve) c.curve = c.savedCurve && sameCorners(c.savedCorners, c.corners) ? c.savedCurve : straightCurve(c.corners);
-    toast('按住任何一條邊拉動，就能把邊拉彎');
+    if (!c.curve) c.curve = straightCurve(c.corners);
+    toast('按住邊拉動可以拉彎，點兩下邊可以拉直');
   }
   if (cropCtx === c) { updateCurveBtn(); drawCrop(); }
 };
@@ -1520,7 +1553,7 @@ $('#cropOk').onclick = async () => {
   cropCtx = null;
   URL.revokeObjectURL(c.url);
   pipClose();
-  await c.onConfirm(q, c.curveMode && c.curve ? c.curve : null);
+  await c.onConfirm(q, c.curve && !curveIsStraight(q, c.curve) ? c.curve : null);
 };
 $('#cropCancel').onclick = () => history.back();
 $('#cropNext').onclick = () => { if (!cropCtx) return; openCamera(); $('#cropOk').onclick(); };
@@ -1579,7 +1612,7 @@ function pipHideSoon() {
 function pipRequest(hq) {
   const c = cropCtx;
   if (!c || !c.pipReady) return;
-  pip.want = { c, hq, corners: c.corners.map((p) => p.slice()), curve: c.curveMode && c.curve ? c.curve.map((e) => e.map((p) => p.slice())) : null };
+  pip.want = { c, hq, corners: c.corners.map((p) => p.slice()), curve: c.curve ? c.curve.map((e) => e.map((p) => p.slice())) : null };
   if (!pip.busy) pipRun();
 }
 async function pipRun() {
@@ -2116,27 +2149,28 @@ function showVal() {
 function setAdjValue(k, v, commit) {
   adj.vals[k] = v;
   if (k === adj.active) $('#adjRange').value = v;
-  showVal(); hideDetail(); renderAdj();
+  showVal(); hideDetail(); renderAdj(!commit);
   if (commit) scheduleRegion();
 }
+// 1.28：拖動中用小圖即時預覽（draft），放開後補一張清楚的
 $('#adjRange').addEventListener('input', () => setAdjValue(adj.active, +$('#adjRange').value, false));
-$('#adjRange').addEventListener('change', () => scheduleRegion());
+$('#adjRange').addEventListener('change', () => { renderAdj(false); scheduleRegion(); });
 
 function drawTo(canvas, r) {
   if (canvas.width !== r.width || canvas.height !== r.height) { canvas.width = r.width; canvas.height = r.height; }
   canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
 }
-async function renderAdj() {
+async function renderAdj(draft) {
   if (!adj.open || !adj.ready) return;
-  if (adj.busy) { adj.pending = true; return; }
+  if (adj.busy) { adj.pending = draft && adj.pending !== 'full' ? 'draft' : 'full'; return; }
   adj.busy = true;
   try {
     const key = adj.key;
-    const r = await wcall('render', { key, mode: adj.mode, params: adj.vals, rotation: adj.rotation });
+    const r = await wcall('render', { key, mode: adj.mode, params: adj.vals, rotation: adj.rotation, draft: !!draft });
     if (adj.open && key === adj.key) { drawTo($('#adjMain'), r); $('#adjMain').style.display = 'block'; }
   } catch (e) { console.warn(e); }
   adj.busy = false;
-  if (adj.pending) { adj.pending = false; renderAdj(); }
+  if (adj.pending) { const p = adj.pending; adj.pending = false; renderAdj(p === 'draft'); }
 }
 // 放大時，看得到的區域改用全解析度計算
 let regionTimer = null;
@@ -2567,9 +2601,9 @@ function openHelp() {
       <li>光線不足時，點左上角的 ⚡ 開燈。</li></ul>
     <h4>裁切</h4><ul>
       <li>拖四個角或拖邊來調整範圍，放大鏡能幫你對準。</li>
-      <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平。</li>
+      <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平；點兩下某條邊可以把它拉直。切回「直線」時彎度會保留，方便拖角或整條邊。</li>
       <li>拖動時，畫面的另一角會出現成品預覽，可以邊拉邊確認譜是不是平的；按下方的「成品」可以看大圖。</li>
-      <li>框得很不準時，按「AI 框選」讓 AI 重新找紙；在「統一調整」裡按「AI 框選」，可以一次處理全部頁面。</li></ul>
+      <li>框得很不準時，按「AI 框選」讓 AI 重新找紙；書頁的上下邊有彎曲時，AI 會自動切到「曲線」並貼合彎度。在「統一調整」裡按「AI 框選」，可以一次處理全部頁面。</li></ul>
     <h4>模式與調整</h4><ul>
       <li>黑白最適合樂譜，灰階、彩色適合有照片或顏色的講義。</li>
       <li>「調整」可以改曝光、濃淡、去雜點等。按住畫面，可以和原本的數值比較。</li>
@@ -2721,9 +2755,11 @@ $('#cropAI').onclick = async () => {
     if (cropCtx !== c) return;
     if (!r || !r.corners) { toast(aiRejectMsg(r)); return; }
     c.corners = r.corners;
-    if (c.curveMode) c.curve = straightCurve(c.corners);
+    // 1.28：AI 找到書頁彎曲時，直接切到曲線並擺好彎度
+    if (r.curve) { c.curve = normCurve(c.corners, r.curve); c.curveMode = true; updateCurveBtn(); }
+    else c.curve = c.curveMode ? straightCurve(c.corners) : null;
     drawCrop();
-    toast('已用 AI 框選，可以再微調');
+    toast(r.curve ? '已用 AI 框選，並依書頁彎曲貼合，可以再微調' : '已用 AI 框選，可以再微調');
   } catch (e) { console.warn(e); toast('AI 框選失敗：' + e.message); }
   finally { unbusy(); }
 };
@@ -2742,10 +2778,10 @@ async function aiFrameDoc() {
       let r = null;
       try { const { img, url } = await loadImg(p.original); try { r = await aiFrame(img); } finally { URL.revokeObjectURL(url); } }
       catch (e) { console.warn('ai page', e); }
-      if (r && r.corners && !(nearSame(r.corners, p.corners) && !p.curve)) {
+      if (r && r.corners && !(nearSame(r.corners, p.corners) && !p.curve && !r.curve)) {
         pushHist(p, tag);
         before.push({ id: p.id, corners: p.corners, curve: p.curve || null, needCrop: !!p.needCrop });
-        p.corners = r.corners; p.curve = null; delete p.needCrop;
+        p.corners = r.corners; p.curve = r.curve ? normCurve(r.corners, r.curve) : null; delete p.needCrop;
         await DB.put('pages', p);
         enqueue(p.id);
         changed++;
@@ -2765,10 +2801,25 @@ async function aiFrameDoc() {
   } : null);
 }
 
+/* ---------- 1.28 防止誤觸 ----------
+   長按不跳出系統選單（輸入框除外）、iPhone 不能雙指或雙擊放大整個頁面（App 自己的放大用 pointer 事件，不受影響）、
+   裁切與調整畫面攔截從螢幕最左右邊緣開始的滑動，避免誤觸返回手勢 */
+(() => {
+  const isField = (t) => t && t.closest && t.closest('input:not([type=range]),textarea,[contenteditable]');
+  document.addEventListener('contextmenu', (e) => { if (!isField(e.target)) e.preventDefault(); });
+  document.addEventListener('selectstart', (e) => { if (!isField(e.target)) e.preventDefault(); });
+  for (const t of ['gesturestart', 'gesturechange']) document.addEventListener(t, (e) => e.preventDefault());
+  document.addEventListener('touchstart', (e) => {
+    if (current !== 'crop' && current !== 'page') return;
+    const x = e.touches[0] && e.touches[0].clientX;
+    if (x != null && (x < 20 || x > window.innerWidth - 20) && !(e.target.closest && e.target.closest('button,a,label,input,textarea,select'))) e.preventDefault();
+  }, { passive: false });
+})();
+
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.27';
+const APP_VER = '1.28';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   { v: 'v1', items: [
@@ -2791,6 +2842,7 @@ const CHANGELOG = [
     { t: '光線不足時提示開閃光燈；一個角框不準時會自動推算修正', since: '1.23' },
     { t: '同一頁不會再被連拍；角被手或東西遮住時也能推算出來', since: '1.24' },
     { t: '新增 AI 框選，可單頁或全部頁面；單頁編輯新增上一步／下一步', since: '1.25' },
+    { t: 'AI 框選會貼合書頁上下邊的彎曲；調整數值時畫面即時跟著拉桿變化', since: '1.28' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號

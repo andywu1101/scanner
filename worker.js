@@ -494,6 +494,7 @@ function maskQuad(cv, msg) {
   if (rec) quad = rec;
   if (!quad) { clean(); return { reject: 'shape' }; }
   let q = orderCorners(quad);
+  const G0 = blur.data.slice(); // 1.28：彎曲貼合要用（clean 之後 blur 就釋放了）
   try { const rq = refineEdges(blur.data, w, h, q); if (rq) q = rq; } catch (e) { /* 貼不齊就用遮罩的 */ }
   const qa = polyArea(q);
   const asp = (() => {
@@ -511,7 +512,88 @@ function maskQuad(cv, msg) {
   } catch (e) { /* 比對失敗就不管 */ }
   const cx = q.reduce((a, p) => a + p[0], 0) / 4, cy = q.reduce((a, p) => a + p[1], 0) / 4, inset = 0.006;
   const qq = q.map((p) => [p[0] + (cx - p[0]) * inset * 2, p[1] + (cy - p[1]) * inset * 2]);
-  return { corners: qq.map((p) => [Math.min(1, Math.max(0, p[0] / w)), Math.min(1, Math.max(0, p[1] / h))]), area: qa / (w * h) };
+  let cq = qq, curve = null;
+  try { const mc = maskCurve(G0, new Uint8Array(msg.mask), w, h, qq); if (mc) { cq = mc.corners; curve = mc.curve; } } catch (e) { /* 彎曲貼合失敗就維持直線 */ }
+  const nz = (p) => [Math.min(1, Math.max(0, p[0] / w)), Math.min(1, Math.max(0, p[1] / h))];
+  return { corners: cq.map(nz), curve: curve ? curve.map((e) => e.map(nz)) : null, area: qa / (w * h) };
+}
+
+// 1.28：AI 框選後的彎曲貼合（只處理上下邊）。
+// 沿著每條橫向的邊取樣：先在 AI 遮罩上找紙張的分界，再用照片「裡亮外暗」修準位置；
+// 只用明暗清楚的點（被別張紙蓋住的那段兩邊都白，自動不算），排除離群點後擬合平滑的曲線。
+// 角附近沒有可信的點時，那個角固定不動（保留 1.27 推回來的角）。回傳 null＝維持直線。
+function maskCurve(G, mask, w, h, Q) {
+  const bil = (A, W, H, x, y) => {
+    if (x < 0 || y < 0 || x >= W - 1 || y >= H - 1) return -1;
+    const x0 = x | 0, y0 = y | 0, fx = x - x0, fy = y - y0, i = y0 * W + x0;
+    return (A[i] * (1 - fx) + A[i + 1] * fx) * (1 - fy) + (A[i + W] * (1 - fx) + A[i + W + 1] * fx) * fy;
+  };
+  const M = (x, y) => bil(mask, 320, 320, (x * 320) / w, (y * 320) / h), I = (x, y) => bil(G, w, h, x, y);
+  const S = Math.max(w, h), R = Math.round(0.05 * S), INS = 0.006 * S, MAXC = 0.05 * S;
+  const N = [], F = [];
+  for (let e = 0; e < 4; e++) {
+    const A = Q[e], B = Q[(e + 1) % 4], ex = B[0] - A[0], ey = B[1] - A[1], L = Math.hypot(ex, ey) || 1;
+    const nx = ey / L, ny = -ex / L; // 往紙張外側
+    N.push([nx, ny]); F.push(null);
+    if (Math.abs(ex) <= Math.abs(ey)) continue; // 左右邊維持直線
+    const ts = [], ds = [];
+    for (let k = 0; k <= 48; k++) {
+      const t = 0.01 + (0.98 * k) / 48, bx = A[0] + ex * t, by = A[1] + ey * t;
+      let dm = null;
+      for (let r = 0; r <= R && dm === null; r++) for (const sg of [r, -r]) {
+        const a = M(bx + nx * (sg - 1), by + ny * (sg - 1)), b = M(bx + nx * (sg + 1), by + ny * (sg + 1));
+        if (a >= 128 && b < 128 && b >= 0) { dm = sg; break; }
+      }
+      if (dm === null) continue;
+      let best = 0, bd = dm;
+      for (let sg = dm - 7; sg <= dm + 7; sg++) {
+        const a = I(bx + nx * (sg - 2), by + ny * (sg - 2)), b = I(bx + nx * (sg + 2), by + ny * (sg + 2));
+        if (a < 0 || b < 0) continue;
+        if (a - b > best) { best = a - b; bd = sg; }
+      }
+      if (best >= 18) { ts.push(t); ds.push(bd - INS); }
+    }
+    if (ts.length < 25) continue;
+    // 角附近有可信的點，那一端才能移動
+    const freeA = ts.filter((t) => t < 0.12).length >= 3, freeB = ts.filter((t) => t > 0.88).length >= 3;
+    const row = (t) => [...(freeA ? [1 - t] : []), ...(freeB ? [t] : []), t * (1 - t), t * t * (1 - t)];
+    const val = (p, t) => { const r = row(t); return r.reduce((a, v, i) => a + v * p[i], 0); };
+    let idx = ts.map((_, i) => i), fit = null;
+    for (let it = 0; it < 4 && idx.length >= 20; it++) {
+      fit = lsq(idx.map((i) => row(ts[i])), idx.map((i) => ds[i]));
+      if (!fit) break;
+      const res = idx.map((i) => Math.abs(ds[i] - val(fit, ts[i])));
+      const mad = res.slice().sort((a, b) => a - b)[res.length >> 1] || 1;
+      const keep = idx.filter((_, k) => res[k] <= Math.max(2, 3 * mad));
+      if (keep.length === idx.length) break;
+      idx = keep;
+    }
+    if (!fit || idx.length < 20 || idx.length < ts.length * 0.8) continue; // 離群點太多＝紙邊不單純（框錯或被遮住），不彎
+    const tk = idx.map((i) => ts[i]);
+    if (Math.min(...tk) > 0.2 || Math.max(...tk) < 0.8) continue;
+    const f = (t) => val(fit, t);
+    if (Math.abs(f(0)) > MAXC || Math.abs(f(1)) > MAXC) continue; // 角要移太多：不可信
+    F[e] = f;
+  }
+  if (!F.some(Boolean)) return null;
+  const off = (e, t) => (F[e] ? F[e](t) : 0);
+  const C = Q.map((A, i) => { const p = (i + 3) % 4; return [A[0] + N[i][0] * off(i, 0) + N[p][0] * off(p, 1), A[1] + N[i][1] * off(i, 0) + N[p][1] * off(p, 1)]; });
+  let bulge = 0;
+  const curve = [];
+  for (let e = 0; e < 4; e++) {
+    const A = Q[e], B = Q[(e + 1) % 4], A2 = C[e], B2 = C[(e + 1) % 4], [nx, ny] = N[e], ctrl = [];
+    for (let k = 1; k <= 5; k++) {
+      const u = k / 6, o = off(e, u);
+      const p = [A[0] + (B[0] - A[0]) * u + nx * o, A[1] + (B[1] - A[1]) * u + ny * o];
+      const lx = A2[0] + (B2[0] - A2[0]) * u, ly = A2[1] + (B2[1] - A2[1]) * u;
+      if (!F[e]) { ctrl.push([lx, ly]); continue; } // 直線邊：跟著移動後的角
+      bulge = Math.max(bulge, Math.hypot(p[0] - lx, p[1] - ly) / S);
+      ctrl.push(p);
+    }
+    curve.push(ctrl);
+  }
+  if (bulge > 0.06) return null; // 彎得不合理，多半是框錯
+  return { corners: C, curve: bulge > 0.004 ? curve : null };
 }
 
 function detectQuad(cv, rgba, w, h, fast) {
@@ -1061,7 +1143,7 @@ let previewCache = null;
 function releaseCache() {
   if (!previewCache) return;
   const c = previewCache;
-  c.full.delete(); c.small.delete();
+  c.full.delete(); c.small.delete(); if (c.tiny) c.tiny.delete();
   for (const k of ['gray', 'rgb']) if (c.bg[k]) c.bg[k].delete();
   previewCache = null;
 }
@@ -1088,10 +1170,21 @@ function cacheFor(key) {
 }
 function renderPreview(cv, msg) {
   const c = cacheFor(msg.key);
-  const ctx = { minSide: Math.min(c.full.cols, c.full.rows), bg: c.bg, scale: c.small.cols / c.full.cols };
+  // 1.28：拖拉桿途中（draft）用更小的版本（約 1/4 像素），才跟得上手指；放開後再算正常版
+  let src = c.small;
+  if (msg.draft) {
+    if (!c.tiny) {
+      const s = Math.min(1, 640 / Math.max(c.small.cols, c.small.rows));
+      c.tiny = new cv.Mat();
+      if (s < 1) cv.resize(c.small, c.tiny, new cv.Size(Math.max(1, Math.round(c.small.cols * s)), Math.max(1, Math.round(c.small.rows * s))), 0, 0, cv.INTER_AREA);
+      else c.small.copyTo(c.tiny);
+    }
+    src = c.tiny;
+  }
+  const ctx = { minSide: Math.min(c.full.cols, c.full.rows), bg: c.bg, scale: src.cols / c.full.cols };
   // 縮小版的模糊半徑、雜點面積要依縮小比例換算，所以傳「整頁短邊 × 縮小比例」
   ctx.minSide *= ctx.scale;
-  return finish(cv, enhance(cv, c.small.clone(), msg.mode, msg.params, ctx), msg.rotation);
+  return finish(cv, enhance(cv, src.clone(), msg.mode, msg.params, ctx), msg.rotation);
 }
 // rect：旋轉後畫面上的區域（0~1）。換回未旋轉的座標
 function unrotateRect(r, rot) {
