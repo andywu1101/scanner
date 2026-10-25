@@ -15,8 +15,8 @@ const S_SAT = { k: 'saturation', name: '飽和度', min: -100, max: 100, def: 0,
 const S_TMP = { k: 'temp', name: '色溫', min: -100, max: 100, def: 0, lo: '冷', hi: '暖' };
 const ADJ = {
   bw: [S_EXP, S_CON, { k: 'density', name: '濃淡', min: -100, max: 100, def: 0, lo: '淡', hi: '濃' },
-    { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 82, lo: '柔', hi: '銳' }, { k: 'despeckle', name: '去雜點', min: 0, max: 100, def: 35, lo: '少', hi: '多' }, // 1.15 起 82／35（原 35／20）
-    { k: 'smooth', name: '邊緣平滑', min: 0, max: 100, def: 50, lo: '關', hi: '強' }],
+    { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 40, lo: '柔', hi: '銳' }, { k: 'despeckle', name: '去雜點', min: 0, max: 100, def: 35, lo: '少', hi: '多' }, // 1.30 起 40／35（1.15～1.29 為 82／35，更早 35／20）
+    { k: 'smooth', name: '邊緣平滑', min: 0, max: 100, def: 80, lo: '關', hi: '強' }], // 1.30 起 80（原 50）
   gray: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50, lo: '柔', hi: '銳' }],
   color: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50, lo: '柔', hi: '銳' }, S_SAT, S_TMP],
   original: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 0, lo: '柔', hi: '銳' }, S_SAT, S_TMP],
@@ -282,9 +282,16 @@ async function createDoc() {
 // 啟動時載入每份文件的統一設定；1.10 以前的文件沒有 doc.adj，以當時的數值（settings.adj）為起點，看起來不會變
 async function loadDocAdj() {
   const fix115 = !settings.adjFix115;
+  // 1.30 黑白出廠值改成銳利度 40、邊緣平滑 80（原 82／50，iPhone 即時掃描會有鋸齒）：已有的文件與單頁把沒設定過的這兩項固定成舊值，看起來不變
+  const fix130 = !settings.adjFix130;
   for (const d of await DB.all('docs')) {
     let dirty = false;
     if (!d.adj) { d.adj = cloneAdj(settings.adj); dirty = true; }
+    if (fix130) {
+      const b = d.adj.bw = d.adj.bw || {};
+      if (b.sharp === undefined && !fix115) { b.sharp = 82; dirty = true; } // 1.15 以前的文件下面會固定成 35
+      if (b.smooth === undefined) { b.smooth = 50; dirty = true; }
+    }
     // 1.15 黑白出廠值改成 82／35：已有的文件把沒設定過的這兩項固定成舊值 35／20，看起來不變、也不用重算
     if (fix115) {
       const b = d.adj.bw = d.adj.bw || {};
@@ -306,6 +313,17 @@ async function loadDocAdj() {
     }
     settings.adj = {}; // 預設調整數值改回新的出廠值（作者選擇）
     settings.adjFix115 = true; saveSettings();
+  }
+  if (fix130) {
+    for (const p of await DB.all('pages')) {
+      const b = p.adj && p.adj.bw;
+      if (b && (b.sharp === undefined || b.smooth === undefined)) {
+        if (b.sharp === undefined) b.sharp = 82;
+        if (b.smooth === undefined) b.smooth = 50;
+        await DB.put('pages', p);
+      }
+    }
+    settings.adjFix130 = true; saveSettings();
   }
 }
 async function addPage(docId, blob, corners, curve, needCrop) {
@@ -1362,7 +1380,7 @@ async function openCrop(opts) {
   const lc = canvasOf(Math.round(img.naturalWidth * ls), Math.round(img.naturalHeight * ls));
   const lctx = lc.getContext('2d'); lctx.imageSmoothingQuality = 'high';
   lctx.drawImage(img, 0, 0, lc.width, lc.height);
-  cropCtx = Object.assign({}, opts, { url, nat: [img.naturalWidth, img.naturalHeight], loupeSrc: lc, corners: opts.corners.map((p) => p.slice()), curve, curveMode: !!curve, drag: null, pipKey: 'crop:' + Date.now() });
+  cropCtx = Object.assign({}, opts, { url, nat: [img.naturalWidth, img.naturalHeight], loupeSrc: lc, corners: opts.corners.map((p) => p.slice()), curve, curveMode: false, drag: null, pipKey: 'crop:' + Date.now() });
   pipInit(cropCtx);
   const ci = $('#cropImg'); ci.src = url;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
@@ -1401,6 +1419,46 @@ function edgeMid(i, w, h) {
   const C = cropCtx.corners, a = C[i], b = C[(i + 1) % 4], k = cropCtx.curve && cropCtx.curve[i];
   const p = k ? edgePoint(a, k, b, 0.5) : [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
   return [p[0] * w, p[1] * h];
+}
+// 1.30：相鄰的邊沿著自己原本的弧線截短或延長。A→B 是那條邊（ctrl 為內部點，0～1 座標），
+// 新的角落在「通過 Q、方向 D 的直線」（被拖那條邊平移後的位置，畫面像素）與這條弧線（兩端順著切線延長）的交點上。
+// atEnd＝被拖的那個角是 B（否則是 A）。回傳 { corner, ctrl }，找不到交點回傳 null
+function slideAlong(A, ctrl, B, Q, D, atEnd, w, h) {
+  const px = (p) => [p[0] * w, p[1] * h];
+  const path = edgePath(A, ctrl, B, 16).map(px);
+  const n = path.length, L = 2 * Math.max(w, h);
+  const ext = (p, q) => { const vx = p[0] - q[0], vy = p[1] - q[1], l = Math.hypot(vx, vy) || 1; return [p[0] + (vx / l) * L, p[1] + (vy / l) * L]; };
+  const full = [ext(path[0], path[1]), ...path, ext(path[n - 1], path[n - 2])]; // full[1]＝A、full[n]＝B
+  const side = (p) => (p[0] - Q[0]) * D[1] - (p[1] - Q[1]) * D[0];
+  const corner0 = atEnd ? full[n] : full[1];
+  let best = null;
+  for (let s = 0; s < full.length - 1; s++) {
+    const f0 = side(full[s]), f1 = side(full[s + 1]);
+    if ((f0 > 0) === (f1 > 0) && f0 !== 0) continue;
+    const t = f0 === f1 ? 0 : f0 / (f0 - f1);
+    const p = [full[s][0] + (full[s + 1][0] - full[s][0]) * t, full[s][1] + (full[s + 1][1] - full[s][1]) * t];
+    const d = Math.hypot(p[0] - corner0[0], p[1] - corner0[1]);
+    if (!best || d < best.d) best = { p, s, d };
+  }
+  if (!best) return null;
+  // 留下「固定的那個角 → 交點」這一段
+  if (atEnd && best.s < 1) return null;
+  if (!atEnd && best.s + 1 > n) return null;
+  const pts = atEnd ? [...full.slice(1, best.s + 1), best.p] : [best.p, ...full.slice(best.s + 1, n + 1)];
+  if (pts.length < 2) return null;
+  const cum = [0];
+  for (let k = 1; k < pts.length; k++) cum.push(cum[k - 1] + Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]));
+  const tot = cum[cum.length - 1];
+  if (tot < 4) return null;
+  const at = (target) => {
+    let k = 1; while (k < pts.length - 1 && cum[k] < target) k++;
+    const seg = cum[k] - cum[k - 1] || 1, f = Math.min(1, Math.max(0, (target - cum[k - 1]) / seg));
+    return [pts[k - 1][0] + (pts[k][0] - pts[k - 1][0]) * f, pts[k - 1][1] + (pts[k][1] - pts[k - 1][1]) * f];
+  };
+  const cl = (v) => Math.min(1, Math.max(0, v));
+  const nz = (p) => [cl(p[0] / w), cl(p[1] / h)];
+  const ctrlOut = Array.from({ length: CURVE_N }, (_, k) => nz(at(((k + 1) / (CURVE_N + 1)) * tot)));
+  return { corner: nz(best.p), ctrl: ctrlOut };
 }
 // 曲線是否其實是直的（存檔時直的就不存曲線）
 function curveIsStraight(C, curve) {
@@ -1531,11 +1589,21 @@ function drawCrop() {
       const dn = dx * nx + dy * ny;
       cropCtx.corners[i] = [clamp(g.c0[i][0] + (dn * nx) / w), clamp(g.c0[i][1] + (dn * ny) / h)];
       cropCtx.corners[j] = [clamp(g.c0[j][0] + (dn * nx) / w), clamp(g.c0[j][1] + (dn * ny) / h)];
-      // 1.28：有彎度時，這條邊整條平移；相鄰兩條邊靠近這兩個角的部分按比例跟著移
+      // 有彎度時：這條邊整條平移（1.28）；相鄰兩條邊的弧線留在原位，兩個角沿著弧線滑動、弧線只截短或延長（1.30，
+      // 作者：拖左右邊時上下邊的弧度會跟著變形、不再貼合紙邊）。找不到交點時才退回按比例移動
       if (g.k0 && cropCtx.curve) {
         const ddx = (dn * nx) / w, ddy = (dn * ny) / h, prev = (i + 3) % 4;
-        const mv = (ei, jj, f) => { const p = g.k0[ei][jj]; cropCtx.curve[ei][jj] = [clamp(p[0] + ddx * f), clamp(p[1] + ddy * f)]; };
-        for (let jj = 0; jj < CURVE_N; jj++) { const u = (jj + 1) / (CURVE_N + 1); mv(i, jj, 1); mv(prev, jj, u); mv(j, jj, 1 - u); }
+        cropCtx.curve[i] = g.k0[i].map((p) => [clamp(p[0] + ddx), clamp(p[1] + ddy)]);
+        const Q = [a[0] + dn * nx, a[1] + dn * ny], D = [ex, ey];
+        const sp = slideAlong(g.c0[prev], g.k0[prev], g.c0[i], Q, D, true, w, h);
+        const sn = slideAlong(g.c0[j], g.k0[j], g.c0[(j + 1) % 4], Q, D, false, w, h);
+        if (sp && sn) {
+          cropCtx.corners[i] = sp.corner; cropCtx.curve[prev] = sp.ctrl;
+          cropCtx.corners[j] = sn.corner; cropCtx.curve[j] = sn.ctrl;
+        } else {
+          const mv = (ei, jj, f) => { const p = g.k0[ei][jj]; cropCtx.curve[ei][jj] = [clamp(p[0] + ddx * f), clamp(p[1] + ddy * f)]; };
+          for (let jj = 0; jj < CURVE_N; jj++) { const u = (jj + 1) / (CURVE_N + 1); mv(prev, jj, u); mv(j, jj, 1 - u); }
+        }
       }
     }
     drawCrop(); loupe(lx, ly);
@@ -2696,7 +2764,7 @@ function openHelp() {
       <li>拖四個角或拖邊來調整範圍，放大鏡能幫你對準。</li>
       <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平；點兩下某條邊可以把它拉直。切回「直線」時彎度會保留，方便拖角或整條邊。</li>
       <li>拖動時，畫面的另一角會出現成品預覽，可以邊拉邊確認譜是不是平的；按下方的「成品」可以看大圖。</li>
-      <li>框得很不準時，按「AI 框選」讓 AI 重新找紙；書頁的上下邊有彎曲時，AI 會自動切到「曲線」並貼合彎度。在「統一調整」裡按「AI 框選」，可以一次處理全部頁面。</li>
+      <li>框得很不準時，按「AI 框選」讓 AI 重新找紙；書頁的上下邊有彎曲時，AI 會自動貼合彎度。在「統一調整」裡按「AI 框選」，可以一次處理全部頁面。</li>
       <li>即時掃描左上角的「AI」按鈕可以開啟「自動 AI 框選」：拍完自動用 AI 框好（iPhone 邊拍邊處理；Android 按「完成」後一次處理，立即裁切時先框好再進裁切畫面）。</li></ul>
     <h4>模式與調整</h4><ul>
       <li>黑白最適合樂譜，灰階、彩色適合有照片或顏色的講義。</li>
@@ -2849,11 +2917,11 @@ $('#cropAI').onclick = async () => {
     if (cropCtx !== c) return;
     if (!r || !r.corners) { toast(aiRejectMsg(r)); return; }
     c.corners = r.corners;
-    // 1.28：AI 找到書頁彎曲時，直接切到曲線並擺好彎度
-    if (r.curve) { c.curve = normCurve(c.corners, r.curve); c.curveMode = true; updateCurveBtn(); }
+        // 1.28：AI 找到書頁彎曲時擺好彎度；1.30：維持目前的模式（預設直線），彎度照樣顯示、保留
+    if (r.curve) c.curve = normCurve(c.corners, r.curve);
     else c.curve = c.curveMode ? straightCurve(c.corners) : null;
     drawCrop();
-    toast(r.curve ? '已用 AI 框選，並依書頁彎曲貼合，可以再微調' : '已用 AI 框選，可以再微調');
+    toast(r.curve ? '已用 AI 框選，並貼合書頁彎曲' : '已用 AI 框選，可以再微調');
   } catch (e) { console.warn(e); toast('AI 框選失敗：' + e.message); }
   finally { unbusy(); }
 };
@@ -2913,7 +2981,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.29';
+const APP_VER = '1.30';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 1.29：上線前總整理成 11 條基本功能（都是黑字）；之後新增的項目加 since，只有目前這一版的才是紅字
@@ -2930,6 +2998,7 @@ const CHANGELOG = [
     { t: '光線不足時提示開閃光燈' },
     { t: '使用教學、加入主畫面教學、問題回報、自訂預設調整數值' },
     { t: '即時掃描新增「自動 AI 框選」開關：拍完自動用 AI 框好', since: '1.29' },
+    { t: '黑白模式預設值調整：線條更平滑、不再有鋸齒（已掃好的文件維持原樣）', since: '1.30' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
