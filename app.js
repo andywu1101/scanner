@@ -26,7 +26,7 @@ const MAX_PHOTO = 15000000;  // Android 即時掃描拍照上限 1500 萬畫素�
 const HAS_IC = 'ImageCapture' in window; // Android Chrome 有；新版 iPhone Safari 也開始有（1.21 起 iPhone 不用，見 startLive）
 
 /* ---------- 設定 ---------- */
-const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: false, confirmCrop: true, upscale: 'auto', v: 2 };
+const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: false, autoAI: false, confirmCrop: true, upscale: 'auto', v: 2 };
 const settings = (() => {
   let s = {};
   try { s = JSON.parse(localStorage.getItem('cocoscan-settings') || '{}'); } catch (_) {}
@@ -54,7 +54,9 @@ const userDefOf = (mode) => fillAdj(mode, settings.adj[mode]);
 const userDefAll = () => Object.fromEntries(MODES.map((m) => [m.id, userDefOf(m.id)]));
 // 處理結果的「身分」：模式、旋轉、四角、這一頁實際用的調整數值，任何一項變了就要重算
 function procKey(p) { return JSON.stringify([p.mode, p.rotation || 0, p.corners, p.curve || null, pageAdjOf(p), settings.upscale]); }
-function isStale(p) { return !p.processed || p.pkey !== procKey(p); }
+// 1.29：沒有照片資料的壞頁面（弱手機轉檔失敗留下的）不處理，避免每個畫面一直跳錯誤
+const isBroken = (p) => !(p && p.original instanceof Blob && p.original.size > 0);
+function isStale(p) { if (isBroken(p)) return false; return !p.processed || p.pkey !== procKey(p); }
 function saveSettings() { try { localStorage.setItem('cocoscan-settings', JSON.stringify(settings)); } catch (_) {} }
 
 /* ---------- IndexedDB ---------- */
@@ -132,6 +134,7 @@ function whenReady() {
 /* ---------- 影像工具 ---------- */
 function loadImg(blob) {
   return new Promise((res, rej) => {
+    if (!(blob instanceof Blob) || !blob.size) { rej(new Error('這一頁沒有照片資料（拍攝失敗），請刪除後重拍')); return; }
     const url = URL.createObjectURL(blob);
     const img = new Image();
     img.onload = () => res({ img, url });
@@ -140,7 +143,23 @@ function loadImg(blob) {
   });
 }
 function canvasOf(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
-function toBlob(canvas, type, q) { return new Promise((r) => canvas.toBlob(r, type, q)); }
+function toBlob(canvas, type, q) { return new Promise((r) => { try { canvas.toBlob(r, type, q); } catch (_) { r(null); } }); }
+// 1.29：即時掃描存照片。Y31 等弱手機偶爾 toBlob 交回空的結果：先重試，再改用 dataURL，最後縮小 0.7 倍再試
+async function canvasBlob(c) {
+  if (!c || !c.width || !c.height) return null;
+  let b = await toBlob(c, 'image/jpeg', 0.97);
+  if (b && b.size) return b;
+  b = await toBlob(c, 'image/jpeg', 0.9);
+  if (b && b.size) return b;
+  try { const r = await fetch(c.toDataURL('image/jpeg', 0.9)); b = await r.blob(); if (b && b.size > 1000) return b; } catch (_) {}
+  try {
+    const s = canvasOf(Math.round(c.width * 0.7), Math.round(c.height * 0.7));
+    s.getContext('2d').drawImage(c, 0, 0, s.width, s.height);
+    b = await toBlob(s, 'image/jpeg', 0.92); s.width = s.height = 0;
+    if (b && b.size) return b;
+  } catch (_) {}
+  return null;
+}
 function sourceSize(src) {
   return src.videoWidth ? [src.videoWidth, src.videoHeight] : [src.naturalWidth || src.width, src.naturalHeight || src.height];
 }
@@ -182,7 +201,10 @@ async function detectBlob(blob) {
 
 /* ---------- 物件網址快取 ---------- */
 const urlCache = new Map();
+// 1.29：拍攝失敗的頁面沒有照片，縮圖改顯示提示圖
+const BROKEN_IMG = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="210" height="297" viewBox="0 0 210 297"><rect width="210" height="297" fill="#F3E3DE"/><text x="105" y="140" text-anchor="middle" font-family="sans-serif" font-size="26" font-weight="700" fill="#B4533F">拍攝失敗</text><text x="105" y="178" text-anchor="middle" font-family="sans-serif" font-size="19" fill="#B4533F">請刪除後重拍</text></svg>');
 function blobUrl(key, blob, ver) {
+  if (!(blob instanceof Blob)) return BROKEN_IMG;
   const old = urlCache.get(key);
   if (old && old.ver === ver) return old.url;
   if (old) URL.revokeObjectURL(old.url);
@@ -210,7 +232,7 @@ function enqueue(pageId) {
 }
 async function processPageNow(pageId) {
   const page = await DB.get('pages', pageId);
-  if (!page || !isStale(page)) return;
+  if (!page || isBroken(page) || !isStale(page)) return;
   const key = procKey(page);
   await whenReady();
   const d = await decodeFull(page.original);
@@ -239,7 +261,11 @@ async function processPageNow(pageId) {
 async function waitQueue() { await queue; }
 // 舊頁面不主動重算，打開或匯出時才依目前的數值更新
 function ensureFresh(pages) {
-  for (const p of pages) if (p && isStale(p) && !processing.has(p.id)) enqueue(p.id);
+  for (const p of pages) {
+    // 1.29：拍攝失敗的頁沒辦法裁切，拿掉 ✂ 標記（只能刪除重拍）
+    if (p && isBroken(p) && p.needCrop) { delete p.needCrop; DB.put('pages', p).catch(() => {}); }
+    if (p && isStale(p) && !processing.has(p.id)) enqueue(p.id);
+  }
 }
 
 async function createDoc() {
@@ -283,6 +309,7 @@ async function loadDocAdj() {
   }
 }
 async function addPage(docId, blob, corners, curve, needCrop) {
+  if (!(blob instanceof Blob) || !blob.size) throw new Error('照片沒有存成功，請再拍一次');
   const page = { id: uid(), docId, original: blob, corners, curve: curve || null, rotation: 0, mode: settings.mode, created: Date.now() };
   if (needCrop) page.needCrop = true; // 1.19：即時掃描時要自己裁切、還沒裁的頁
   await DB.put('pages', page);
@@ -421,7 +448,7 @@ function updateHomeStrip(pages) {
     const b = document.createElement('button');
     b.className = 'sth';
     const src = p.thumb || p.original;
-    b.innerHTML = `<img src="${blobUrl('strip:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span>${i + 1}</span>${p.needCrop ? '<i class="cut">✂</i>' : ''}${!p.thumb || processing.has(p.id) ? '<i class="spin sm"></i>' : ''}`;
+    b.innerHTML = `<img src="${blobUrl('strip:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span>${i + 1}</span>${p.needCrop ? '<i class="cut">✂</i>' : ''}${!isBroken(p) && (!p.thumb || processing.has(p.id)) ? '<i class="spin sm"></i>' : ''}`;
     b.onclick = async () => {
       state.docId = docId; await renderDoc();
       history.pushState({ s: 'doc', doc: docId }, '');
@@ -631,6 +658,7 @@ async function startLive(docId) {
   Object.assign(live, {
     running: true, docId, fromDoc: !!docId, count: 0, stream: null, track: null, ic: null, lastQuad: null, shown: null,
     hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0, paused: false,
+    aiLater: [],
   });
   pauseQueue(); // 掃描期間暫停高解析度處理，讓抓邊保持流暢
   resetLock();
@@ -1047,7 +1075,11 @@ async function capture(sig, full, quadAt, userPress) {
       flash(); shotFx('ok'); // 這一格已經固定下來，手可以移開了
       setHint('已拍好，請換下一頁', true);
       live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; // 立刻隱藏框
-      blob = await toBlob(src, 'image/jpeg', 0.97);
+      blob = await canvasBlob(src);
+      if (!blob) { // 1.29：弱手機記憶體不足時轉檔會失敗，不要存成沒有照片的頁面
+        toast('這張沒拍成功，請再拍一次'); shotFx('');
+        live.armed = true; resetLock(); live.capturing = false; return;
+      }
     } else { flash(); shotFx('ok'); setHint('已拍好，請換下一頁', true); live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; }
     let corners = quad ? quad.map((p) => p.slice()) : FULL.map((p) => p.slice());
     // 用較高解析度重新精算四個角（只在結果相近時採用，避免抓錯）
@@ -1086,7 +1118,17 @@ async function capture(sig, full, quadAt, userPress) {
     th.querySelector('img').src = blobUrl('live:last', blob, page.id);
     live.lastCapT = Date.now(); live.miss = 0; live.best = null;
     if (!quad) { live.armed = true; resetLock(); }
-    if (needUser && !settings.cropLater) { live.capturing = false; openLiveCrop(page, blob, corners); return; }
+    if (needUser && !settings.cropLater) {
+      // 1.29：自動 AI 框選開著時，先用 AI 框好再進裁切畫面（兩種手機都一樣）
+      let curve = null;
+      if (settings.autoAI && (await aiCached())) {
+        live.paused = true; busy('AI 框選中…');
+        try { const r = await aiFixPage(page.id, blob, corners, true); if (r) { corners = r.corners; curve = r.curve; } } finally { unbusy(); }
+      }
+      live.capturing = false; openLiveCrop(page, blob, corners, curve); return;
+    }
+    // 1.29：不進裁切畫面的頁：iPhone 邊拍邊在背景跑 AI；Android 等按「完成」再一次跑（避免弱手機拍攝變卡）
+    if (settings.autoAI) { if (IS_IOS) aiBg(page.id, blob, corners); else live.aiLater.push(page.id); }
   } catch (e) {
     console.error(e); shotFx(''); toast('拍攝失敗：' + e.message);
     live.armed = true; resetLock();
@@ -1096,10 +1138,10 @@ async function capture(sig, full, quadAt, userPress) {
 $('#shutter').onclick = () => { if (live.running) capture(null, null, null, true); };
 
 /* 1.19 立即裁切：拍完直接進裁切畫面；相機不關，只暫停找框，回來就能接著拍 */
-function openLiveCrop(page, blob, corners) {
+function openLiveCrop(page, blob, corners, curve) {
   live.paused = true;
   openCrop({
-    blob, corners, retake: true, liveCrop: true,
+    blob, corners, curve: curve || null, retake: true, liveCrop: true,
     onConfirm: async (c, cv) => {
       history.back(); // 回到拍攝畫面
       const p = await DB.get('pages', page.id);
@@ -1144,6 +1186,7 @@ function liveResume() {
 const MANUAL_HINT = '手動拍攝：拍完後再自己調整範圍';
 function manualHint() { live.manualHintUntil = performance.now() + 3000; setHint(MANUAL_HINT); }
 function updateLiveBtns() {
+  $('#aiBtn').classList.toggle('on', !!settings.autoAI);
   $('#autoBtn').classList.toggle('on', settings.autoShutter);
   $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
   $('#cropModeBtn').textContent = settings.cropLater ? '稍後裁切' : '立即裁切';
@@ -1174,6 +1217,54 @@ $('#autoBtn').onclick = () => {
   if (settings.autoShutter) { setHint('將文件放進畫面中'); liveTip('自動拍攝', '對準文件，穩定後自動拍下'); }
   else { manualHint(); liveTip('手動拍攝', '不自動框選，拍完再自己調整範圍'); }
 };
+// 1.29 自動 AI 框選開關（記住上次的狀態）；第一次開啟要先下載 AI 資料
+$('#aiBtn').onclick = async () => {
+  if (!settings.autoAI) {
+    live.paused = true;
+    const ok = await aiEnsure();
+    live.paused = false;
+    if (!ok) return;
+    settings.autoAI = true; saveSettings(); updateLiveBtns();
+    liveTip('自動 AI 框選', IS_IOS ? '拍完自動用 AI 重新框好' : '拍完自動用 AI 重新框好<br>按「完成」後一次處理');
+  } else {
+    settings.autoAI = false; saveSettings(); updateLiveBtns();
+    liveTip('自動 AI 框選', '已關閉');
+  }
+};
+// 用 AI 重新框一頁。c0＝拍下時的框：使用者已經自己改過範圍就不動。keepCrop＝要進裁切畫面，保留待裁切標記
+async function aiFixPage(pageId, blob, c0, keepCrop) {
+  try {
+    if (!(await aiCached())) return null;
+    const { img, url } = await loadImg(blob);
+    let r = null;
+    try { r = await aiFrame(img); } finally { URL.revokeObjectURL(url); }
+    if (!r || !r.corners) return null;
+    const p = await DB.get('pages', pageId); if (!p) return null;
+    if (c0 && JSON.stringify(p.corners) !== JSON.stringify(c0)) return null;
+    pushHist(p, 'autoai');
+    p.corners = r.corners; p.curve = r.curve ? normCurve(r.corners, r.curve) : null;
+    if (!keepCrop) delete p.needCrop;
+    await DB.put('pages', p);
+    enqueue(p.id);
+    if (current === 'doc' && state.docId === p.docId) onPageUpdated(p.id);
+    return { corners: p.corners, curve: p.curve };
+  } catch (e) { console.warn('auto AI', e); return null; }
+}
+let aiLiveQ = Promise.resolve();
+function aiBg(pageId, blob, c0) { aiLiveQ = aiLiveQ.then(() => aiFixPage(pageId, blob, c0, false)); }
+// Android：按「完成」後把這次拍的頁一次用 AI 框好
+async function aiRunLater(ids) {
+  let done = 0;
+  try {
+    for (let i = 0; i < ids.length; i++) {
+      busy(`AI 框選中 ${i + 1} / ${ids.length}`);
+      const p = await DB.get('pages', ids[i]); if (!p || isBroken(p)) continue;
+      if (await aiFixPage(p.id, p.original, p.corners, false)) done++;
+    }
+  } finally { unbusy(); }
+  if (current === 'doc') renderDoc();
+  toast(`AI 框選完成：${done} / ${ids.length} 頁`);
+}
 let torchOn = false;
 $('#torchBtn').onclick = async () => {
   torchOn = !torchOn;
@@ -1182,13 +1273,15 @@ $('#torchBtn').onclick = async () => {
 };
 function finishLive() {
   const docId = live.docId, count = live.count;
+  const later = (live.aiLater || []).slice(); live.aiLater = [];
   stopLive();
-  if (live.fromDoc) { history.back(); return; }
-  if (count && docId) {
+  if (live.fromDoc) { history.back(); }
+  else if (count && docId) {
     state.docId = docId;
     history.replaceState({ s: 'doc', doc: docId }, '');
     renderDoc(); show('doc');
   } else history.back();
+  if (later.length) setTimeout(() => aiRunLater(later), 300);
 }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && current === 'live') finishLive();
@@ -1774,7 +1867,7 @@ function setupSort(g) {
 }
 function fillPageThumb(el, p, i) {
   const src = p.thumb || p.original;
-  const wait = !p.thumb || processing.has(p.id);
+  const wait = !isBroken(p) && (!p.thumb || processing.has(p.id));
   el.innerHTML = `<img src="${blobUrl('t:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span class="no">${i + 1}</span>${pageCustom(p) ? `<span class="custom" title="這一頁單獨調整過">${ICON.sliders}</span>` : ''}${p.needCrop ? '<i class="cut" title="待裁切">✂</i>' : ''}${wait ? '<span class="wait"><span class="spin sm"></span></span>' : ''}`;
 }
 function updateCropNote(pages) {
@@ -2603,7 +2696,8 @@ function openHelp() {
       <li>拖四個角或拖邊來調整範圍，放大鏡能幫你對準。</li>
       <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平；點兩下某條邊可以把它拉直。切回「直線」時彎度會保留，方便拖角或整條邊。</li>
       <li>拖動時，畫面的另一角會出現成品預覽，可以邊拉邊確認譜是不是平的；按下方的「成品」可以看大圖。</li>
-      <li>框得很不準時，按「AI 框選」讓 AI 重新找紙；書頁的上下邊有彎曲時，AI 會自動切到「曲線」並貼合彎度。在「統一調整」裡按「AI 框選」，可以一次處理全部頁面。</li></ul>
+      <li>框得很不準時，按「AI 框選」讓 AI 重新找紙；書頁的上下邊有彎曲時，AI 會自動切到「曲線」並貼合彎度。在「統一調整」裡按「AI 框選」，可以一次處理全部頁面。</li>
+      <li>即時掃描左上角的「AI」按鈕可以開啟「自動 AI 框選」：拍完自動用 AI 框好（iPhone 邊拍邊處理；Android 按「完成」後一次處理，立即裁切時先框好再進裁切畫面）。</li></ul>
     <h4>模式與調整</h4><ul>
       <li>黑白最適合樂譜，灰階、彩色適合有照片或顏色的講義。</li>
       <li>「調整」可以改曝光、濃淡、去雜點等。按住畫面，可以和原本的數值比較。</li>
@@ -2819,30 +2913,23 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.28';
+const APP_VER = '1.29';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
+  // 1.29：上線前總整理成 11 條基本功能（都是黑字）；之後新增的項目加 since，只有目前這一版的才是紅字
   { v: 'v1', items: [
-    { t: '三種拍法：即時掃描、高畫質拍照、相簿匯入' },
-    { t: '自動抓出紙張邊框並校正，有黑白、灰階、彩色、原圖四種模式' },
-    { t: '匯出 PDF 與圖片，檔名可以自己改' },
-    { t: '頁面可以拖曳排序；文件和頁面都能多選、合併、刪除' },
-    { t: '黑白模式自動去雜點、邊緣平滑；每種模式都能細部調整' },
-    { t: '「統一調整」可以一次調整整份文件，單頁調整只影響那一頁' },
-    { t: '「曲線」裁切，可以把彎曲的書頁拉平' },
-    { t: '裁切時有放大鏡，拖動時可以即時預覽成品' },
-    { t: '即時掃描拍好時會顯示「✓ 已拍好」' },
-    { t: '使用教學、加入主畫面教學' },
-    { t: '設定裡可以修改「預設調整數值」' },
-    { t: '問題回報與更新日誌', since: '1.18' },
-    { t: '即時掃描更會找紙：紙上印有框線不會框錯，書本攤開時會沿著書溝只框一頁', since: '1.19' },
-    { t: '手動拍攝不畫框、拍整張；可選「立即裁切」或「稍後裁切」，待裁切的頁會標上 ✂', since: '1.19' },
-    { t: '即時掃描更會分辨兩頁：書本攤開或散頁疊在一起時，只框你要的那一頁', since: '1.20' },
-    { t: 'iPhone 即時掃描改成瞬間拍好，不用等「拍攝中」；拿穩時更容易自動拍下', since: '1.21' },
-    { t: '光線不足時提示開閃光燈；一個角框不準時會自動推算修正', since: '1.23' },
-    { t: '同一頁不會再被連拍；角被手或東西遮住時也能推算出來', since: '1.24' },
-    { t: '新增 AI 框選，可單頁或全部頁面；單頁編輯新增上一步／下一步', since: '1.25' },
-    { t: 'AI 框選會貼合書頁上下邊的彎曲；調整數值時畫面即時跟著拉桿變化', since: '1.28' },
+    { t: '三種拍法：即時掃描（自動或手動拍攝）、高畫質拍照、相簿匯入' },
+    { t: '自動找出紙張邊框並校正；書本攤開時沿書溝只框一頁，角被遮住也能推算' },
+    { t: 'AI 框選：框不準時一鍵重新找紙並貼合書頁彎曲，可單頁或整份文件' },
+    { t: '黑白、灰階、彩色、原圖四種模式，黑白自動去雜點、邊緣平滑' },
+    { t: '細部調整即時預覽：「統一調整」整份文件，或只調單頁' },
+    { t: '裁切有放大鏡與成品預覽，「曲線」可以把彎曲的書頁拉平' },
+    { t: '可選立即裁切或稍後裁切，待裁切的頁標上 ✂' },
+    { t: '上一步／下一步，改錯可以復原' },
+    { t: '匯出 PDF 與圖片，可自訂檔名；頁面拖曳排序，文件與頁面多選、合併、刪除' },
+    { t: '光線不足時提示開閃光燈' },
+    { t: '使用教學、加入主畫面教學、問題回報、自訂預設調整數值' },
+    { t: '即時掃描新增「自動 AI 框選」開關：拍完自動用 AI 框好', since: '1.29' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
@@ -2850,18 +2937,19 @@ const verNum = (v) => v.split('.').map(Number);
 const verGt = (a, b) => { const x = verNum(a), y = verNum(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); } return false; };
 function logSeen() { try { return localStorage.getItem(LOG_KEY); } catch (_) { return null; } }
 function logMarkSeen() { try { localStorage.setItem(LOG_KEY, APP_VER); } catch (_) {} }
-const isNewItem = (it, seen) => !!it.since && (!seen || verGt(it.since, seen));
+// 1.29：只有「目前這一版」新增的項目是紅字；之前版本的一律黑字
+const isNewItem = (it) => it.since === APP_VER;
 function showChangelog() {
   const seen = logSeen();
   const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  $('#logList').innerHTML = CHANGELOG.map((g) => `<div class="log-item"><div class="log-ver">${esc(g.v)}</div><ul>${g.items.map((it) => `<li${isNewItem(it, seen) ? ' class="log-hl"' : ''}>${esc(it.t)}</li>`).join('')}</ul></div>`).join('');
+  $('#logList').innerHTML = CHANGELOG.map((g) => `<div class="log-item"><div class="log-ver">${esc(g.v)}</div><ul>${g.items.map((it) => `<li${isNewItem(it) ? ' class="log-hl"' : ''}>${esc(it.t)}</li>`).join('')}</ul></div>`).join('');
   $('#logCurrent').textContent = '目前版本 v' + APP_VER;
   logMarkSeen();
   openModal('logModal');
   setTimeout(() => { $('#logList').scrollTop = $('#logList').scrollHeight; }, 30);
 }
 // 有沒有「看過之後才新增」的項目
-function hasNewLog() { const seen = logSeen(); return CHANGELOG.some((g) => g.items.some((it) => isNewItem(it, seen))); }
+function hasNewLog() { return logSeen() !== APP_VER && CHANGELOG.some((g) => g.items.some((it) => isNewItem(it))); }
 $('#cvVer').textContent = '▸ v' + APP_VER;
 $('#cvVer').onclick = () => showChangelog();
 $('#cvReport').onclick = () => window.open(REPORT_URL, '_blank', 'noopener');
