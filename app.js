@@ -385,7 +385,22 @@ function openSheet(html, bind) {
   $('#sheetWrap').classList.add('show');
   if (bind) bind($('#sheet'));
 }
-function closeSheet() { $('#sheetWrap').classList.remove('show'); }
+let sheetOnClose = null;
+function closeSheet() { $('#sheetWrap').classList.remove('show'); const f = sheetOnClose; sheetOnClose = null; if (f) f(); }
+// 1.31：App 內的確認視窗（iPhone 跳出系統 confirm 時會中斷相機）。回傳 true＝按了確定
+function askSheet(title, msg, okText, cancelText) {
+  return new Promise((res) => {
+    let done = false;
+    const fin = (v) => { if (done) return; done = true; res(v); };
+    openSheet(`<h3>${title}</h3><div class="note" style="margin:2px 4px 14px;font-size:14.5px;line-height:1.6">${msg}</div>
+      <button class="bigbtn" id="askOk" style="width:100%">${okText || '確定'}</button>
+      <button class="bigbtn alt" id="askNo" style="width:100%;margin-top:8px">${cancelText || '取消'}</button>`, (s) => {
+      s.querySelector('#askOk').onclick = () => { sheetOnClose = null; closeSheet(); fin(true); };
+      s.querySelector('#askNo').onclick = () => { sheetOnClose = null; closeSheet(); fin(false); };
+    });
+    sheetOnClose = () => fin(false);
+  });
+}
 $('#sheetWrap').addEventListener('click', (e) => { if (e.target.id === 'sheetWrap') closeSheet(); });
 
 const ICON = {
@@ -637,7 +652,7 @@ $('#fileCamera').addEventListener('change', async (e) => {
   if (settings.confirmCrop) {
     openCrop({
       blob, corners, retake: true, burst: true,
-      onConfirm: async (c, cv) => { await burstAdd(blob, c, cv); toBurst(); },
+      onConfirm: async (c, cv, edited) => { const pg = await burstAdd(blob, c, cv); if (edited) { pg.cropUser = true; await DB.put('pages', pg); } toBurst(); },
       onRetake: () => openCamera(),
     });
   } else {
@@ -678,6 +693,7 @@ async function startLive(docId) {
     hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0, paused: false,
     aiLater: [],
   });
+  aiErrShown = false; aiTag(aiPend ? 'AI ' + aiPend : '', !!aiPend);
   pauseQueue(); // 掃描期間暫停高解析度處理，讓抓邊保持流暢
   resetLock();
   $('#liveThumb').style.visibility = 'hidden';
@@ -689,14 +705,7 @@ async function startLive(docId) {
     // 1.21：iPhone 不另外拍照（ImageCapture 的 takePhoto 要等約 1 秒，作者覺得太慢、常想先拿走），
     // 改回直接存畫面那一格（瞬間完成），所以預覽解析度要求最高；Android 維持另外拍照
     const useIC = HAS_IC && !IS_IOS;
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      // Android（有 ImageCapture）另外用 takePhoto 拍照，預覽只用來找紙，要 1920×1440 就夠，弱手機偵測才跟得上（1.10）
-      // iPhone（1.21 起不用 ImageCapture）存下來的就是預覽那一格，所以要求最高解析度
-      video: useIC
-        ? { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } }
-        : { facingMode: { ideal: 'environment' }, width: { ideal: 4096 }, height: { ideal: 3072 } },
-    });
+    const stream = await navigator.mediaDevices.getUserMedia(camConstraints(useIC));
     if (!live.running) { stream.getTracks().forEach((t) => t.stop()); return; }
     live.stream = stream;
     live.track = stream.getVideoTracks()[0];
@@ -734,6 +743,37 @@ async function startLive(docId) {
     stopLive();
     history.back();
     toast(err.name === 'NotAllowedError' ? '未取得相機權限' : '無法開啟相機：' + err.message);
+  }
+}
+// Android（有 ImageCapture）另外用 takePhoto 拍照，預覽只用來找紙，要 1920×1440 就夠，弱手機偵測才跟得上（1.10）
+// iPhone（1.21 起不用 ImageCapture）存下來的就是預覽那一格，所以要求最高解析度
+function camConstraints(useIC) {
+  return {
+    audio: false,
+    video: useIC
+      ? { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } }
+      : { facingMode: { ideal: 'environment' }, width: { ideal: 4096 }, height: { ideal: 3072 } },
+  };
+}
+// 1.31：重新開一次相機（iPhone 下載 AI 資料後相機畫面會凍結）；已拍的頁與文件保留，失敗就結束掃描
+async function restartCamera() {
+  if (!live.running) return;
+  try {
+    if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
+    const useIC = HAS_IC && !IS_IOS;
+    const stream = await navigator.mediaDevices.getUserMedia(camConstraints(useIC));
+    if (!live.running) { stream.getTracks().forEach((t) => t.stop()); return; }
+    live.stream = stream; live.track = stream.getVideoTracks()[0];
+    if (useIC) { try { live.ic = new ImageCapture(live.track); } catch (_) {} }
+    const v = $('#video');
+    v.style.display = 'none'; void v.offsetHeight; v.style.display = '';
+    v.srcObject = null; v.srcObject = stream;
+    await v.play().catch(() => {});
+    reapplyTorch();
+    live.armed = true; resetLock();
+  } catch (e) {
+    console.warn('restartCamera', e);
+    toast('相機無法重新開啟，已結束掃描'); finishLive();
   }
 }
 function stopLive() {
@@ -1141,12 +1181,15 @@ async function capture(sig, full, quadAt, userPress) {
       let curve = null;
       if (settings.autoAI && (await aiCached())) {
         live.paused = true; busy('AI 框選中…');
-        try { const r = await aiFixPage(page.id, blob, corners, true); if (r) { corners = r.corners; curve = r.curve; } } finally { unbusy(); }
+        try {
+          const r = await aiFixPage(page.id, blob, corners, true);
+          if (r && r.corners) { corners = r.corners; curve = r.curve; } else aiReport(r, live.count);
+        } finally { unbusy(); }
       }
       live.capturing = false; openLiveCrop(page, blob, corners, curve); return;
     }
     // 1.29：不進裁切畫面的頁：iPhone 邊拍邊在背景跑 AI；Android 等按「完成」再一次跑（避免弱手機拍攝變卡）
-    if (settings.autoAI) { if (IS_IOS) aiBg(page.id, blob, corners); else live.aiLater.push(page.id); }
+    if (settings.autoAI) { if (IS_IOS) aiBg(page.id, blob, corners, live.count); else live.aiLater.push(page.id); }
   } catch (e) {
     console.error(e); shotFx(''); toast('拍攝失敗：' + e.message);
     live.armed = true; resetLock();
@@ -1160,11 +1203,12 @@ function openLiveCrop(page, blob, corners, curve) {
   live.paused = true;
   openCrop({
     blob, corners, curve: curve || null, retake: true, liveCrop: true,
-    onConfirm: async (c, cv) => {
+    onConfirm: async (c, cv, edited) => {
       history.back(); // 回到拍攝畫面
       const p = await DB.get('pages', page.id);
       if (!p) return;
       p.corners = c; p.curve = cv; delete p.needCrop;
+      if (edited) p.cropUser = true;
       await DB.put('pages', p);
       enqueue(p.id);
     },
@@ -1239,8 +1283,11 @@ $('#autoBtn').onclick = () => {
 $('#aiBtn').onclick = async () => {
   if (!settings.autoAI) {
     live.paused = true;
-    const ok = await aiEnsure();
+    const had = await aiCached();
+    const ok = await aiEnsure(true); // 1.31：用 App 內的確認視窗（系統 confirm 會讓 iPhone 相機凍結）
+    if (!had && ok) await restartCamera(); // 下載十幾 MB 期間 iPhone 可能中斷相機：重新開一次
     live.paused = false;
+    if (!live.running) return;
     if (!ok) return;
     settings.autoAI = true; saveSettings(); updateLiveBtns();
     liveTip('自動 AI 框選', IS_IOS ? '拍完自動用 AI 重新框好' : '拍完自動用 AI 重新框好<br>按「完成」後一次處理');
@@ -1250,15 +1297,16 @@ $('#aiBtn').onclick = async () => {
   }
 };
 // 用 AI 重新框一頁。c0＝拍下時的框：使用者已經自己改過範圍就不動。keepCrop＝要進裁切畫面，保留待裁切標記
+// 回傳 { corners, curve }＝成功；{ fail: 'reject' | 'error' | 'skip', msg }＝沒有套用（1.31 起回報原因）
 async function aiFixPage(pageId, blob, c0, keepCrop) {
   try {
-    if (!(await aiCached())) return null;
+    if (!(await aiCached())) return { fail: 'error', msg: '手機裡找不到 AI 資料，請關掉再打開自動 AI 框選重新下載' };
     const { img, url } = await loadImg(blob);
     let r = null;
     try { r = await aiFrame(img); } finally { URL.revokeObjectURL(url); }
-    if (!r || !r.corners) return null;
-    const p = await DB.get('pages', pageId); if (!p) return null;
-    if (c0 && JSON.stringify(p.corners) !== JSON.stringify(c0)) return null;
+    if (!r || !r.corners) return { fail: 'reject', msg: r && r.reject };
+    const p = await DB.get('pages', pageId); if (!p) return { fail: 'skip' };
+    if (c0 && JSON.stringify(p.corners) !== JSON.stringify(c0)) return { fail: 'skip' };
     pushHist(p, 'autoai');
     p.corners = r.corners; p.curve = r.curve ? normCurve(r.corners, r.curve) : null;
     if (!keepCrop) delete p.needCrop;
@@ -1266,22 +1314,46 @@ async function aiFixPage(pageId, blob, c0, keepCrop) {
     enqueue(p.id);
     if (current === 'doc' && state.docId === p.docId) onPageUpdated(p.id);
     return { corners: p.corners, curve: p.curve };
-  } catch (e) { console.warn('auto AI', e); return null; }
+  } catch (e) { console.warn('auto AI', e); return { fail: 'error', msg: e && e.message ? e.message : String(e) }; }
 }
-let aiLiveQ = Promise.resolve();
-function aiBg(pageId, blob, c0) { aiLiveQ = aiLiveQ.then(() => aiFixPage(pageId, blob, c0, false)); }
+// 1.31：背景 AI 的狀態（左下角縮圖上方的「AI n」標籤）；不適合或失敗時提示
+let aiLiveQ = Promise.resolve(), aiPend = 0, aiErrShown = false, aiTagT = 0;
+function aiTag(text, busyNow) {
+  const t = $('#liveAi'); if (!t) return;
+  clearTimeout(aiTagT);
+  if (!text) { t.classList.remove('show'); return; }
+  t.innerHTML = (busyNow ? '<i class="spin sm"></i>' : '') + text;
+  t.classList.add('show');
+}
+function aiReport(r, n) {
+  if (!r || r.corners || r.fail === 'skip') return;
+  if (r.fail === 'reject') toast(`第 ${n} 頁 AI 判斷不適合，保留原框`);
+  else if (!aiErrShown) { aiErrShown = true; toast('AI 框選失敗：' + (r.msg || '未知原因')); }
+}
+function aiBg(pageId, blob, c0, n) {
+  aiPend++; aiTag('AI ' + aiPend, true);
+  aiLiveQ = aiLiveQ.then(async () => {
+    const r = await aiFixPage(pageId, blob, c0, false);
+    aiPend--;
+    if (current === 'live') aiReport(r, n);
+    if (aiPend > 0) aiTag('AI ' + aiPend, true);
+    else { aiTag('AI ✓', false); aiTagT = setTimeout(() => aiTag(''), 1500); }
+  });
+}
 // Android：按「完成」後把這次拍的頁一次用 AI 框好
 async function aiRunLater(ids) {
-  let done = 0;
+  let done = 0, firstErr = null;
   try {
     for (let i = 0; i < ids.length; i++) {
       busy(`AI 框選中 ${i + 1} / ${ids.length}`);
       const p = await DB.get('pages', ids[i]); if (!p || isBroken(p)) continue;
-      if (await aiFixPage(p.id, p.original, p.corners, false)) done++;
+      const r = await aiFixPage(p.id, p.original, p.corners, false);
+      if (r && r.corners) done++;
+      else if (r && r.fail === 'error' && !firstErr) firstErr = r.msg;
     }
   } finally { unbusy(); }
   if (current === 'doc') renderDoc();
-  toast(`AI 框選完成：${done} / ${ids.length} 頁`);
+  toast(firstErr ? `AI 框選失敗：${firstErr}` : `AI 框選完成：${done} / ${ids.length} 頁${done < ids.length ? '（其餘判斷不適合，保留原框）' : ''}`);
 }
 let torchOn = false;
 $('#torchBtn').onclick = async () => {
@@ -1380,7 +1452,7 @@ async function openCrop(opts) {
   const lc = canvasOf(Math.round(img.naturalWidth * ls), Math.round(img.naturalHeight * ls));
   const lctx = lc.getContext('2d'); lctx.imageSmoothingQuality = 'high';
   lctx.drawImage(img, 0, 0, lc.width, lc.height);
-  cropCtx = Object.assign({}, opts, { url, nat: [img.naturalWidth, img.naturalHeight], loupeSrc: lc, corners: opts.corners.map((p) => p.slice()), curve, curveMode: false, drag: null, pipKey: 'crop:' + Date.now() });
+  cropCtx = Object.assign({}, opts, { url, nat: [img.naturalWidth, img.naturalHeight], loupeSrc: lc, corners: opts.corners.map((p) => p.slice()), curve, curveMode: false, c0: opts.corners.map((p) => p.slice()), cv0: JSON.stringify(curve && !curveIsStraight(opts.corners, curve) ? curve : null), drag: null, pipKey: 'crop:' + Date.now() });
   pipInit(cropCtx);
   const ci = $('#cropImg'); ci.src = url;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
@@ -1714,7 +1786,10 @@ $('#cropOk').onclick = async () => {
   cropCtx = null;
   URL.revokeObjectURL(c.url);
   pipClose();
-  await c.onConfirm(q, c.curve && !curveIsStraight(q, c.curve) ? c.curve : null);
+  const cv = c.curve && !curveIsStraight(q, c.curve) ? c.curve : null;
+  // 1.31：使用者有沒有改過範圍（和打開時比）；有的話記成「自己調整過範圍」，統一調整的 AI 框選會先詢問
+  const edited = !nearSame(q, c.c0) || JSON.stringify(cv) !== c.cv0;
+  await c.onConfirm(q, cv, edited);
 };
 $('#cropCancel').onclick = () => history.back();
 $('#cropNext').onclick = () => { if (!cropCtx) return; openCamera(); $('#cropOk').onclick(); };
@@ -2173,7 +2248,7 @@ $('#pgCrop').onclick = () => {
   const p = viewPage;
   openCrop({
     blob: p.original, corners: p.corners, curve: p.curve || null,
-    onConfirm: async (c, cv) => { history.back(); await updatePage({ corners: c, curve: cv, needCrop: false }); },
+    onConfirm: async (c, cv, edited) => { history.back(); await updatePage(Object.assign({ corners: c, curve: cv, needCrop: false }, edited ? { cropUser: true } : {})); },
   });
 };
 // 1.25：往前移／往後移拿掉（文件頁可以拖曳排序），換成上一步／下一步
@@ -2868,9 +2943,10 @@ async function aiCached() {
     return true;
   } catch (_) { return false; }
 }
-async function aiEnsure() {
+async function aiEnsure(inApp) {
   if (await aiCached()) return true;
-  if (!confirm('AI 框選需要先下載約 15 MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。要下載嗎？')) return false;
+  const ask = 'AI 框選需要先下載約 15 MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。要下載嗎？';
+  if (inApp ? !(await askSheet('下載 AI 資料', ask, '下載')) : !confirm(ask)) return false;
   const total = AI_FILES.reduce((a, f) => a + f[2], 0);
   let got = 0;
   busy('下載 AI 資料中… 0%');
@@ -2931,19 +3007,24 @@ async function aiFrameDoc() {
   const { pages } = await getDocPages(docId);
   if (!pages.length) return;
   if (!(await aiEnsure())) return;
+  // 1.31：自己調整過範圍的頁（裁切畫面改過再按確定），先問要不要一起覆蓋（比照統一調整）
+  const mine = pages.filter((p) => p.cropUser).length;
+  let overwrite = true;
+  if (mine) overwrite = confirm(`有 ${mine} 頁自己調整過範圍。\n要一起用 AI 重新框選嗎？\n\n確定：全部重新框選\n取消：保留那幾頁`);
   const before = [], tag = 'ai:' + Date.now();
   let changed = 0, kept = 0;
   try {
     for (let i = 0; i < pages.length; i++) {
       busy(`AI 框選中 ${i + 1} / ${pages.length}`);
       const p = await DB.get('pages', pages[i].id); if (!p) continue;
+      if (p.cropUser && !overwrite) { kept++; continue; }
       let r = null;
       try { const { img, url } = await loadImg(p.original); try { r = await aiFrame(img); } finally { URL.revokeObjectURL(url); } }
       catch (e) { console.warn('ai page', e); }
       if (r && r.corners && !(nearSame(r.corners, p.corners) && !p.curve && !r.curve)) {
         pushHist(p, tag);
-        before.push({ id: p.id, corners: p.corners, curve: p.curve || null, needCrop: !!p.needCrop });
-        p.corners = r.corners; p.curve = r.curve ? normCurve(r.corners, r.curve) : null; delete p.needCrop;
+        before.push({ id: p.id, corners: p.corners, curve: p.curve || null, needCrop: !!p.needCrop, cropUser: !!p.cropUser });
+        p.corners = r.corners; p.curve = r.curve ? normCurve(r.corners, r.curve) : null; delete p.needCrop; delete p.cropUser;
         await DB.put('pages', p);
         enqueue(p.id);
         changed++;
@@ -2955,6 +3036,7 @@ async function aiFrameDoc() {
     for (const b of before) {
       const p = await DB.get('pages', b.id); if (!p) continue;
       p.corners = b.corners; p.curve = b.curve; if (b.needCrop) p.needCrop = true; else delete p.needCrop;
+      if (b.cropUser) p.cropUser = true; else delete p.cropUser;
       await DB.put('pages', p); enqueue(p.id);
       const h = hist.get(b.id); if (h && h.past.length && h.past[h.past.length - 1].tag === tag) h.past.pop();
     }
@@ -2981,7 +3063,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.30';
+const APP_VER = '1.31';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 1.29：上線前總整理成 11 條基本功能（都是黑字）；之後新增的項目加 since，只有目前這一版的才是紅字

@@ -447,6 +447,11 @@ input[type=file]{display:none}
 #live #torchBtn.on{background:#F2C94C;color:#3A281E}
 /* 1.29：自動 AI 框選開關（薄荷綠）；閃光燈、AI 關閉時劃斜線 */
 #live #aiBtn.on{background:#8FD3C1;color:#1E3A33}
+/* 1.31：背景 AI 狀態標籤（縮圖上方） */
+#live .thumbWrap{position:relative}
+#liveAi{position:absolute;left:0;bottom:calc(100% + 6px);display:none;align-items:center;gap:5px;white-space:nowrap;background:#8FD3C1;color:#1E3A33;font-size:12px;font-weight:800;padding:3px 8px;border-radius:999px}
+#liveAi.show{display:inline-flex}
+#liveAi .spin.sm{width:11px;height:11px;border-width:2px;border-color:rgba(30,58,51,.25);border-top-color:#1E3A33}
 #live .ibtn.round.on .slash{display:none}
 #cropModeBtn.later{background:#B86A22}
 #liveTip{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);z-index:4;background:rgba(20,14,10,.86);color:#fff;padding:12px 18px;border-radius:14px;font-size:14px;line-height:1.55;text-align:center;pointer-events:none;opacity:0;transition:opacity .25s;width:max-content;max-width:calc(100% - 32px)}
@@ -542,7 +547,7 @@ input[type=text],input:not([type]),textarea{-webkit-touch-callout:default;-webki
     <div id="liveTip"><b></b><span></span></div>
   </div>
   <div class="bottom">
-    <button id="liveThumb"><img alt=""><span>0</span></button>
+    <div class="thumbWrap"><button id="liveThumb"><img alt=""><span>0</span></button><b id="liveAi"></b></div>
     <button id="shutter" aria-label="拍攝"><svg viewBox="0 0 76 76"><circle id="ring" cx="38" cy="38" r="36" fill="none" stroke="#8FB38A" stroke-width="4" stroke-dasharray="226.2" stroke-dashoffset="226.2" stroke-linecap="round"/></svg></button>
     <button id="liveDone">完成</button>
   </div>
