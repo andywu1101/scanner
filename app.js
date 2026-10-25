@@ -15,8 +15,8 @@ const S_SAT = { k: 'saturation', name: '飽和度', min: -100, max: 100, def: 0,
 const S_TMP = { k: 'temp', name: '色溫', min: -100, max: 100, def: 0, lo: '冷', hi: '暖' };
 const ADJ = {
   bw: [S_EXP, S_CON, { k: 'density', name: '濃淡', min: -100, max: 100, def: 0, lo: '淡', hi: '濃' },
-    { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 40, lo: '柔', hi: '銳' }, { k: 'despeckle', name: '去雜點', min: 0, max: 100, def: 35, lo: '少', hi: '多' }, // 1.30 起 40／35（1.15～1.29 為 82／35，更早 35／20）
-    { k: 'smooth', name: '邊緣平滑', min: 0, max: 100, def: 80, lo: '關', hi: '強' }], // 1.30 起 80（原 50）
+    { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 55, lo: '柔', hi: '銳' }, { k: 'despeckle', name: '去雜點', min: 0, max: 100, def: 35, lo: '少', hi: '多' }, // 1.30 起 55／35（1.15～1.29 為 82／35，更早 35／20）
+    { k: 'smooth', name: '邊緣平滑', min: 0, max: 100, def: 65, lo: '關', hi: '強' }], // 1.30 起 65（原 50）
   gray: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50, lo: '柔', hi: '銳' }],
   color: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 50, lo: '柔', hi: '銳' }, S_SAT, S_TMP],
   original: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 0, lo: '柔', hi: '銳' }, S_SAT, S_TMP],
@@ -282,7 +282,7 @@ async function createDoc() {
 // 啟動時載入每份文件的統一設定；1.10 以前的文件沒有 doc.adj，以當時的數值（settings.adj）為起點，看起來不會變
 async function loadDocAdj() {
   const fix115 = !settings.adjFix115;
-  // 1.30 黑白出廠值改成銳利度 40、邊緣平滑 80（原 82／50，iPhone 即時掃描會有鋸齒）：已有的文件與單頁把沒設定過的這兩項固定成舊值，看起來不變
+  // 1.30 黑白出廠值改成銳利度 55、邊緣平滑 65（原 82／50，iPhone 即時掃描會有鋸齒）：已有的文件與單頁把沒設定過的這兩項固定成舊值，看起來不變
   const fix130 = !settings.adjFix130;
   for (const d of await DB.all('docs')) {
     let dirty = false;

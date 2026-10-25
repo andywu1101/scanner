@@ -760,7 +760,7 @@ function normalizeLight(cv, img, ctx) {
    sharp / despeckle：0 ~ 100
    空間相關的數值（模糊半徑、雜點面積）依頁面短邊等比例換算，預覽與全解析度效果一致 */
 const ADJ_DEFAULTS = {
-  bw: { exposure: 0, contrast: 0, density: 0, sharp: 40, despeckle: 35, smooth: 80 }, // 1.30 起銳利度 40、邊緣平滑 80（1.15～1.29 為 82／50；更早銳利度 35、去雜點 20）
+  bw: { exposure: 0, contrast: 0, density: 0, sharp: 55, despeckle: 35, smooth: 65 }, // 1.30 起銳利度 55、邊緣平滑 65（1.15～1.29 為 82／50；更早銳利度 35、去雜點 20）
   gray: { exposure: 0, contrast: 0, sharp: 50 },
   color: { exposure: 0, contrast: 0, sharp: 50, saturation: 0, temp: 0 },
   original: { exposure: 0, contrast: 0, sharp: 0, saturation: 0, temp: 0 },
