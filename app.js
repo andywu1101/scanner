@@ -711,12 +711,14 @@ async function startLive(docId) {
     // 1.34：iPhone 還沒設定「相機永遠允許」時，開相機會跳詢問；查權限（查不到就看開相機花多久）決定要不要顯示短提示
     // 1.34.1：Safari 回報的權限不一定準（iOS 曾有不管實際狀態都回報 prompt 的紀錄），所以還要「開相機真的花了時間」＝真的跳了詢問：
     //   查得到且是 prompt → 開相機超過 0.5 秒才顯示；查不到 → 超過 1 秒才顯示（避免舊手機開相機本來就慢而誤判）
+    const aiAsk = await aiDefaultCheck(); // 2.1：自動 AI 框選預設開啟（第一次進拍攝畫面詢問下載）
     let camPerm = null;
     if (IS_IOS) { try { camPerm = (await navigator.permissions.query({ name: 'camera' })).state; } catch (_) {} }
     const camT0 = performance.now();
     const stream = await navigator.mediaDevices.getUserMedia(camConstraints(useIC));
     const camDt = performance.now() - camT0;
-    if (IS_IOS && ((camPerm === 'prompt' && camDt > 500) || (camPerm === null && camDt > 1000))) showCamTip();
+    // 2.1：同一次要詢問 AI 下載時不顯示相機提示（一次只出現一個要讀的東西，下次進來才輪到它）
+    if (!aiAsk && IS_IOS && ((camPerm === 'prompt' && camDt > 500) || (camPerm === null && camDt > 1000))) showCamTip();
     if (!live.running) { stream.getTracks().forEach((t) => t.stop()); return; }
     live.stream = stream;
     live.track = stream.getVideoTracks()[0];
@@ -741,6 +743,7 @@ async function startLive(docId) {
     whenReady().then(() => { if (live.running && settings.autoShutter) setHint('將文件放進畫面中'); });
     liveLoop();
     requestAnimationFrame(drawOverlay);
+    if (aiAsk) { live.paused = true; setTimeout(aiAskNow, 1000); } // 相機畫面出來、系統權限詢問結束後再等 1 秒；問完之前先不自動拍
   } catch (err) {
     console.error(err);
     stopLive();
@@ -1459,13 +1462,36 @@ $('#aiBtn').onclick = async () => {
     live.paused = false;
     if (!live.running) return;
     if (!ok) return;
-    settings.autoAI = true; saveSettings(); updateLiveBtns();
+    settings.autoAI = true; settings.aiAsked = true; saveSettings(); updateLiveBtns();
     liveTip('自動 AI 框選', IS_IOS ? '拍完自動用 AI 重新框好' : '拍完自動用 AI 重新框好<br>按「完成」後一次處理');
   } else {
-    settings.autoAI = false; saveSettings(); updateLiveBtns();
+    settings.autoAI = false; settings.aiAsked = true; saveSettings(); updateLiveBtns();
     liveTip('自動 AI 框選', '已關閉');
   }
 };
+/* 2.1 自動 AI 框選預設開啟（作者：有些人不知道可以打開）。AI 資料要先下載約 15 MB，所以：
+   第一次進拍攝畫面時（相機開好再等 1 秒）用 App 內視窗詢問；按「下載」→ 下載完自動開啟並重開相機（1.31 iPhone 凍結），
+   按「暫時不要」→ 維持關閉、不再問（settings.aiAsked）。舊使用者也問一次（作者決定；以前特地關掉的人也會被問一次）。
+   已開啟的不問；已下載過資料但沒開的直接開啟；弱 Android（裝置記憶體 < 4 GB 或曾經記憶體不足自動降檔）不問、維持關閉，自己按 AI 按鈕 */
+const aiWeak = () => !IS_IOS && (settings.camAutoLow || (navigator.deviceMemory > 0 && navigator.deviceMemory < 4));
+async function aiDefaultCheck() {
+  if (settings.aiAsked || settings.autoAI) return false;
+  if (aiWeak()) return false;
+  if (await aiCached()) { settings.autoAI = true; settings.aiAsked = true; saveSettings(); updateLiveBtns(); return false; }
+  return true;
+}
+async function aiAskNow() {
+  if (!live.running || current !== 'live' || settings.autoAI || settings.aiAsked) { live.paused = false; return; }
+  settings.aiAsked = true; saveSettings();
+  live.paused = true;
+  const yes = await askSheet('自動 AI 框選', '拍完自動用 AI 精準框好紙張，省去調整的麻煩。<br>需要先下載約 15 MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。', '下載並開啟', '暫時不要');
+  let ok = false;
+  if (yes && live.running) { ok = await aiEnsure(true, true); if (ok) await restartCamera(); }
+  live.paused = false;
+  if (!ok || !live.running) return;
+  settings.autoAI = true; saveSettings(); updateLiveBtns();
+  liveTip('自動 AI 框選', IS_IOS ? '拍完自動用 AI 重新框好' : '拍完自動用 AI 重新框好<br>按「完成」後一次處理');
+}
 // 用 AI 重新框一頁。c0＝拍下時的框：使用者已經自己改過範圍就不動。keepCrop＝要進裁切畫面，保留待裁切標記
 // 回傳 { corners, curve }＝成功；{ fail: 'reject' | 'error' | 'skip', msg }＝沒有套用（1.31 起回報原因）
 async function aiFixPage(pageId, blob, c0, keepCrop) {
@@ -3140,10 +3166,10 @@ async function aiCached() {
     return true;
   } catch (_) { return false; }
 }
-async function aiEnsure(inApp) {
+async function aiEnsure(inApp, noAsk) {
   if (await aiCached()) return true;
   const ask = 'AI 框選需要先下載約 15 MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。要下載嗎？';
-  if (inApp ? !(await askSheet('下載 AI 資料', ask, '下載')) : !confirm(ask)) return false;
+  if (!noAsk && (inApp ? !(await askSheet('下載 AI 資料', ask, '下載')) : !confirm(ask))) return false; // 2.1：noAsk＝已經在預設開啟的詢問裡問過
   const total = AI_FILES.reduce((a, f) => a + f[2], 0);
   let got = 0;
   busy('下載 AI 資料中… 0%');
@@ -3260,7 +3286,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '2.0.1';
+const APP_VER = '2.1';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
