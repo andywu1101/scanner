@@ -327,9 +327,9 @@ async function loadDocAdj() {
     settings.adjFix130 = true; saveSettings();
   }
 }
-async function addPage(docId, blob, corners, curve, needCrop) {
+async function addPage(docId, blob, corners, curve, needCrop, rotation) {
   if (!(blob instanceof Blob) || !blob.size) throw new Error('照片沒有存成功，請再拍一次');
-  const page = { id: uid(), docId, original: blob, corners, curve: curve || null, rotation: 0, mode: settings.mode, created: Date.now() };
+  const page = { id: uid(), docId, original: blob, corners, curve: curve || null, rotation: rotation || 0, mode: settings.mode, created: Date.now() };
   if (needCrop) page.needCrop = true; // 1.19：即時掃描時要自己裁切、還沒裁的頁
   await DB.put('pages', page);
   const doc = await DB.get('docs', docId);
@@ -686,6 +686,7 @@ const STABLE_MS = 500;   // 鎖定後大致不動多久就拍
 const STABLE_TOL = 0.05;  // 容許的手抖（畫面比例；1.21 從 3% 放寬，作者覺得拿穩了還是拍不下去）
 const EDGE_MARGIN = 0.01; // 紙張四角至少離畫面邊緣 1%（1.4～1.15 是 3%，作者覺得要拿太遠，1.16 放寬）
 async function startLive(docId) {
+  askMotion(); // 1.35：一定要在點擊當下（第一個 await 之前）呼叫，iPhone 才會跳「動作與方向」詢問
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     toast('此瀏覽器不支援即時相機，請改用「高畫質拍照」'); return;
   }
@@ -702,6 +703,7 @@ async function startLive(docId) {
   torchOn = false; $('#torchBtn').classList.remove('on');
   setRing(0);
   go('live');
+  applyUiRot();
   try {
     // 1.21：iPhone 不另外拍照（ImageCapture 的 takePhoto 要等約 1 秒，作者覺得太慢、常想先拿走），
     // 改回直接存畫面那一格（瞬間完成），所以預覽解析度要求最高；Android 維持另外拍照
@@ -1151,6 +1153,7 @@ function flash() {
 async function capture(sig, full, quadAt, userPress) {
   if (live.capturing || !live.running || live.paused) return;
   live.capturing = true;
+  const capRot = pageRotNow(); // 1.35：橫拿拍的頁自動轉正（按下快門那一刻的方向）
   // 1.19：哪些照片要交給使用者自己裁切
   //  - 手動拍攝模式：每一張（不找框，存整張）
   //  - 自動拍攝模式下自己按快門，而框還沒穩定（沒有鎖定，或被「請稍微拉遠一點」擋住）：用照片重新找一次框（C），找不到就整張
@@ -1228,7 +1231,7 @@ async function capture(sig, full, quadAt, userPress) {
       else if (!r && !sameAspect) corners = FULL.map((p) => p.slice());
     } catch (_) {}
     if (!live.docId) live.docId = (await createDoc()).id;
-    const page = await addPage(live.docId, blob, corners, null, needUser);
+    const page = await addPage(live.docId, blob, corners, null, needUser, capRot);
     live.count++;
     { const tb = $('#liveThumb'); tb.classList.remove('bump'); void tb.offsetWidth; tb.classList.add('bump'); }
     const th = $('#liveThumb');
@@ -1237,7 +1240,7 @@ async function capture(sig, full, quadAt, userPress) {
     // 1.33：左下角縮圖顯示框好、拉正後的範圍（先放原圖，拉正好了再換）
     live.lastPageId = page.id;
     if (!live.thumbUrl) th.querySelector('img').src = blobUrl('live:last', blob, page.id);
-    if (thumbFrame) setLiveThumb(thumbFrame, corners, null, page.id); else refreshLiveThumb(page.id);
+    if (thumbFrame) setLiveThumb(thumbFrame, corners, null, page.id, capRot); else refreshLiveThumb(page.id);
     updResChip();
     live.lastCapT = Date.now(); live.miss = 0; live.best = null;
     if (!quad) { live.armed = true; resetLock(); }
@@ -1263,11 +1266,69 @@ async function capture(sig, full, quadAt, userPress) {
 }
 $('#shutter').onclick = () => { if (live.running) capture(null, null, null, true); };
 
+/* ---------- 1.35 橫拿拍攝 ----------
+   用重力感應判斷手機是直拿還是橫拿（和內建相機一樣：版面不動，只把按鈕與文字轉 90 度，拍好的頁自動轉正）。
+   devicemotion 的 accelerationIncludingGravity：Android 依規格，直拿時 y≈+9.8；iPhone 的正負號相反（y≈−9.8）。
+   motion.up＝手機「上方」在裝置上的方向：0＝直拿、90＝橫拿且上緣朝左（逆時針轉）、-90＝上緣朝右、180＝倒拿；
+   平放（重力幾乎垂直螢幕）或接近 45 度時沿用上一次，避免來回跳。iPhone 沒鎖旋轉時整個畫面會跟著轉，所以要扣掉螢幕本身的角度 */
+const motion = { on: false, up: null, cand: null, candT: 0, cal: [0, 0] };
+function askMotion() {
+  try {
+    const D = window.DeviceMotionEvent;
+    if (!D) return;
+    if (typeof D.requestPermission === 'function') D.requestPermission().then((s) => { if (s === 'granted') motionStart(); }).catch(() => {});
+    else motionStart();
+  } catch (_) {}
+}
+function motionStart() { if (motion.on) return; motion.on = true; window.addEventListener('devicemotion', onMotion); }
+function screenAngle() {
+  const o = typeof window.orientation === 'number' ? window.orientation : (screen.orientation && screen.orientation.angle) || 0;
+  return ((o % 360) + 360) % 360;
+}
+function onMotion(e) {
+  const g = e.accelerationIncludingGravity;
+  if (!g || g.x == null || g.y == null) return;
+  const s = (IS_IOS ? -1 : 1) * (settings.motionFlip ? -1 : 1);
+  const ux = g.x * s, uy = g.y * s;
+  if (Math.hypot(ux, uy) < 4.5) return; // 平放
+  let r;
+  if (Math.abs(uy) >= Math.abs(ux) * 1.25) r = uy > 0 ? 0 : 180;
+  else if (Math.abs(ux) >= Math.abs(uy) * 1.25) r = ux > 0 ? 90 : -90;
+  else return; // 接近 45 度
+  // 自動校正：螢幕是直的、手機明顯直立時，「上」應該是螢幕上緣；一開始大多數是反的，表示這支手機正負號和預期相反
+  if (!settings.motionCal && screenAngle() === 0 && Math.abs(uy) > 7) {
+    motion.cal[uy > 0 ? 0 : 1]++;
+    if (motion.cal[0] + motion.cal[1] >= 40) {
+      if (motion.cal[1] > motion.cal[0] * 3) { settings.motionFlip = !settings.motionFlip; motion.up = null; motion.cand = null; }
+      settings.motionCal = true; saveSettings();
+      return;
+    }
+  }
+  const now = performance.now();
+  if (r !== motion.cand) { motion.cand = r; motion.candT = now; }
+  if (r !== motion.up && now - motion.candT > 300) { motion.up = r; applyUiRot(); }
+}
+// 相對目前畫面的旋轉（0／90／-90／180）
+function uiRot() {
+  if (motion.up == null) return 0;
+  let r = (((motion.up - screenAngle()) % 360) + 540) % 360 - 180;
+  if (r === -180) r = 180;
+  return r;
+}
+// 拍好的頁要轉幾度才會正（頁面的 rotation 是順時針）
+const pageRotNow = () => (360 - uiRot()) % 360;
+function applyUiRot() {
+  const el = $('#live'); if (!el) return;
+  const r = uiRot();
+  el.classList.toggle('r90', r === 90); el.classList.toggle('rm90', r === -90); el.classList.toggle('r180', r === 180);
+}
+window.addEventListener('orientationchange', () => setTimeout(applyUiRot, 50));
+
 // 1.33：即時掃描左下角縮圖＝框好、拉正後的小圖（原色，不做黑白）；作者：要馬上知道有沒有框好
-async function setLiveThumb(frame, corners, curve, pageId) {
+async function setLiveThumb(frame, corners, curve, pageId, rotation) {
   try {
     await whenReady();
-    const r = await wcall('process', { buffer: frame.data.buffer, width: frame.width, height: frame.height, corners, curve: curve || null, upscale: 'off', rotation: 0, mode: 'original', params: fillAdj('original') }, [frame.data.buffer]);
+    const r = await wcall('process', { buffer: frame.data.buffer, width: frame.width, height: frame.height, corners, curve: curve || null, upscale: 'off', rotation: rotation || 0, mode: 'original', params: fillAdj('original') }, [frame.data.buffer]);
     if (pageId && live.lastPageId !== pageId) return;
     const c = canvasOf(r.width, r.height);
     c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
@@ -1284,7 +1345,7 @@ async function refreshLiveThumb(pageId) {
     const p = await DB.get('pages', pageId); if (!p || isBroken(p)) return;
     const { img, url } = await loadImg(p.original);
     const f = smallFrame(img, 640); URL.revokeObjectURL(url);
-    await setLiveThumb(f, p.corners, p.curve, pageId);
+    await setLiveThumb(f, p.corners, p.curve, pageId, p.rotation || 0);
   } catch (e) { console.warn('live thumb', e); }
 }
 
@@ -3193,7 +3254,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.34.1';
+const APP_VER = '1.35';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 1.29：上線前總整理成 11 條基本功能（都是黑字）；之後新增的項目加 since，只有目前這一版的才是紅字
@@ -3213,6 +3274,7 @@ const CHANGELOG = [
     { t: '黑白模式預設值調整：線條更平滑、不再有鋸齒（已掃好的文件維持原樣）', since: '1.30' },
     { t: '頁面縮圖照成品的比例顯示，框了哪裡一目了然；即時掃描左下角縮圖顯示框好的範圍', since: '1.33' },
     { t: '即時掃描畫質依手機自動調整，也可以在設定裡切換', since: '1.33' },
+    { t: '即時掃描可以橫拿手機拍：按鈕與文字跟著轉，拍好的頁自動轉正', since: '1.35' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
