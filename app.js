@@ -686,7 +686,7 @@ const STABLE_MS = 500;   // 鎖定後大致不動多久就拍
 const STABLE_TOL = 0.05;  // 容許的手抖（畫面比例；1.21 從 3% 放寬，作者覺得拿穩了還是拍不下去）
 const EDGE_MARGIN = 0.01; // 紙張四角至少離畫面邊緣 1%（1.4～1.15 是 3%，作者覺得要拿太遠，1.16 放寬）
 async function startLive(docId) {
-  if (landOn()) motionStart(); // 1.36：不再自動詢問；iPhone 要在拍攝畫面按 ↻ 才問
+  if (landOn()) motionStart(); else if (motion.on) motionStop(); // 1.37：只有 Android 用感應器（設定可關）
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     toast('此瀏覽器不支援即時相機，請改用「高畫質拍照」'); return;
   }
@@ -1271,39 +1271,18 @@ $('#shutter').onclick = () => { if (live.running) capture(null, null, null, true
    devicemotion 的 accelerationIncludingGravity：Android 依規格，直拿時 y≈+9.8；iPhone 的正負號相反（y≈−9.8）。
    motion.up＝手機「上方」在裝置上的方向：0＝直拿、90＝橫拿且上緣朝左（逆時針轉）、-90＝上緣朝右、180＝倒拿；
    平放（重力幾乎垂直螢幕）或接近 45 度時沿用上一次，避免來回跳。iPhone 沒鎖旋轉時整個畫面會跟著轉，所以要扣掉螢幕本身的角度 */
-const motion = { on: false, up: null, cand: null, candT: 0, cal: [0, 0], iosOn: false };
-/* 1.36 ↻ 橫拿開關（拍攝畫面按鈕＋Android 設定畫面，同一個開關）：
-   Android：settings.landscape，預設開、記住狀態，不需要權限。
-   iPhone：iOS 不會永久記住主畫面 App 的「動作與方向」允許，每次重開 App 都要再問。作者：盡量減少詢問，
-   所以 iPhone 每次開 App 都從關閉開始（只記在記憶體 motion.iosOn），要橫拿時按 ↻ 當下才問；切到背景再回來仍維持開啟 */
+const motion = { on: false, up: null, cand: null, candT: 0, cal: [0, 0] };
+/* 1.37：只有 Android 用感應器（settings.landscape，預設開、記住狀態，設定畫面可關；不需要權限）。
+   manifest 是 orientation:portrait，Android 加入主畫面後畫面不會轉，只能靠感應器。
+   iPhone 不用感應器：iOS 忽略 manifest 的方向，沒鎖螢幕方向時系統會把整個畫面轉成橫的（下面的 screenAngle 與橫式版面），
+   1.36 的 ↻ 按鈕與「動作與方向」詢問拿掉（作者：iPhone 使用者知道打開旋轉即可，盡量不要詢問）。有鎖方向的 iPhone 就不能橫拍 */
 const hasMotion = () => typeof window.DeviceMotionEvent !== 'undefined';
-const landOn = () => hasMotion() && (IS_IOS ? motion.iosOn : settings.landscape !== false);
+const landOn = () => !IS_IOS && hasMotion() && settings.landscape !== false;
 function motionStart() { if (motion.on) return; motion.on = true; window.addEventListener('devicemotion', onMotion); }
 function motionStop() {
   if (motion.on) window.removeEventListener('devicemotion', onMotion);
   motion.on = false; motion.up = null; motion.cand = null;
   applyUiRot();
-}
-// 一定要在點擊當下（第一個 await 之前）呼叫 requestPermission，iPhone 才會跳詢問
-function toggleLand() {
-  if (landOn()) {
-    if (IS_IOS) motion.iosOn = false; else { settings.landscape = false; saveSettings(); }
-    motionStop(); updateLiveBtns();
-    liveTip('橫拿拍攝：關閉', '一律當直拿拍');
-    return;
-  }
-  const turnOn = () => {
-    if (IS_IOS) motion.iosOn = true; else { settings.landscape = true; saveSettings(); }
-    motionStart(); updateLiveBtns();
-    liveTip('橫拿拍攝：開啟', '把手機橫過來拍<br>拍好的頁會自動轉正');
-  };
-  const D = window.DeviceMotionEvent;
-  if (IS_IOS && D && typeof D.requestPermission === 'function') {
-    D.requestPermission().then((s) => {
-      if (s === 'granted') turnOn();
-      else toast('沒有允許「動作與方向」，無法偵測橫拿；重開 App 後再按 ↻ 可以重新選擇');
-    }).catch(() => toast('無法取得「動作與方向」權限'));
-  } else turnOn();
 }
 function screenAngle() {
   const o = typeof window.orientation === 'number' ? window.orientation : (screen.orientation && screen.orientation.angle) || 0;
@@ -1440,8 +1419,6 @@ const MANUAL_HINT = '手動拍攝：拍完後再自己調整範圍';
 function manualHint() { live.manualHintUntil = performance.now() + 3000; setHint(MANUAL_HINT); }
 function updateLiveBtns() {
   $('#aiBtn').classList.toggle('on', !!settings.autoAI);
-  $('#rotBtn').style.display = hasMotion() ? '' : 'none';
-  $('#rotBtn').classList.toggle('on', landOn());
   $('#autoBtn').classList.toggle('on', settings.autoShutter);
   $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
   $('#cropModeBtn').textContent = settings.cropLater ? '稍後裁切' : '立即裁切';
@@ -1462,7 +1439,6 @@ $('#cropModeBtn').onclick = () => {
   if (settings.cropLater) liveTip('稍後裁切', '拍完先存起來，可以連續拍<br>之後在文件裡點「✂」那頁裁切');
   else liveTip('立即裁切', '需要自己裁切的照片<br>拍完直接進入裁切畫面');
 };
-$('#rotBtn').onclick = () => toggleLand();
 $('#liveClose').onclick = () => finishLive();
 $('#liveDone').onclick = () => finishLive();
 $('#liveThumb').onclick = () => finishLive();
@@ -2979,9 +2955,9 @@ $('#btnSettings').onclick = () => {
     <div class="seg" id="setMode">${MODES.map((m) => `<button data-k="${m.id}" class="${settings.mode === m.id ? 'on' : ''}">${m.name}</button>`).join('')}</div>
     <div class="switch"><span>即時掃描自動拍攝<small>文件穩定約 1 秒後自動按快門</small></span><button class="tg ${settings.autoShutter ? 'on' : ''}" data-k="autoShutter"></button></div>
     <div class="switch"><span>拍照後先確認裁切<small>高畫質拍照後進入四角微調畫面</small></span><button class="tg ${settings.confirmCrop ? 'on' : ''}" data-k="confirmCrop"></button></div>
-    ${!hasMotion() ? '' : IS_IOS
-    ? '<div class="note" style="margin:10px 2px 4px">↻ 橫拿拍攝：在拍攝畫面按 ↻ 開啟，每次開 App 需要重新開啟（iPhone 每次都要允許「動作與方向」）。</div>'
-    : `<div class="switch"><span>橫拿拍攝<small>橫拿時按鈕跟著轉、頁面自動轉正（同拍攝畫面的 ↻）</small></span><button class="tg ${settings.landscape !== false ? 'on' : ''}" data-k="landscape"></button></div>`}
+    ${IS_IOS
+    ? '<div class="note" style="margin:10px 2px 4px">橫拿拍攝：請關閉螢幕方向鎖定，直接橫拿就可以拍。</div>'
+    : !hasMotion() ? '' : `<div class="switch"><span>橫拿拍攝<small>橫拿時按鈕跟著轉、拍好的頁自動轉正</small></span><button class="tg ${settings.landscape !== false ? 'on' : ''}" data-k="landscape"></button></div>`}
     <div class="lbl" style="margin-top:12px">小圖平滑放大<small style="display:block;font-size:12px;margin-top:2px">讓解析度低的圖片（例如別人傳來的照片）轉黑白時邊緣更平順</small></div>
     <div class="seg" id="setUp">${[['auto', '自動'], ['always', '一律'], ['off', '關閉']].map(([k, n]) => `<button data-k="${k}" class="${settings.upscale === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     <div class="lbl" style="margin-top:12px">即時掃描畫質<small id="camDesc" style="display:block;font-size:12px;margin-top:2px"></small></div>
@@ -3284,7 +3260,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.36';
+const APP_VER = '1.37';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 1.29：上線前總整理成 11 條基本功能（都是黑字）；之後新增的項目加 since，只有目前這一版的才是紅字
@@ -3305,7 +3281,7 @@ const CHANGELOG = [
     { t: '頁面縮圖照成品的比例顯示，框了哪裡一目了然；即時掃描左下角縮圖顯示框好的範圍', since: '1.33' },
     { t: '即時掃描畫質依手機自動調整，也可以在設定裡切換', since: '1.33' },
     { t: '即時掃描可以橫拿手機拍：按鈕與文字跟著轉，拍好的頁自動轉正', since: '1.35' },
-    { t: '拍攝畫面新增 ↻ 橫拿開關；iPhone 按下 ↻ 才詢問「動作與方向」，開 App 不再跳詢問', since: '1.36' },
+    { t: '橫拿拍攝更簡單：iPhone 關閉螢幕方向鎖定就能橫拍，不再詢問「動作與方向」；Android 自動偵測，設定裡可以關閉', since: '1.37' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
