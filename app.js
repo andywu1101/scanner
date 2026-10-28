@@ -706,7 +706,15 @@ async function startLive(docId) {
     // 1.21：iPhone 不另外拍照（ImageCapture 的 takePhoto 要等約 1 秒，作者覺得太慢、常想先拿走），
     // 改回直接存畫面那一格（瞬間完成），所以預覽解析度要求最高；Android 維持另外拍照
     const useIC = HAS_IC && !IS_IOS;
+    // 1.34：iPhone 還沒設定「相機永遠允許」時，開相機會跳詢問；查權限（查不到就看開相機花多久）決定要不要顯示短提示
+    // 1.34.1：Safari 回報的權限不一定準（iOS 曾有不管實際狀態都回報 prompt 的紀錄），所以還要「開相機真的花了時間」＝真的跳了詢問：
+    //   查得到且是 prompt → 開相機超過 0.5 秒才顯示；查不到 → 超過 1 秒才顯示（避免舊手機開相機本來就慢而誤判）
+    let camPerm = null;
+    if (IS_IOS) { try { camPerm = (await navigator.permissions.query({ name: 'camera' })).state; } catch (_) {} }
+    const camT0 = performance.now();
     const stream = await navigator.mediaDevices.getUserMedia(camConstraints(useIC));
+    const camDt = performance.now() - camT0;
+    if (IS_IOS && ((camPerm === 'prompt' && camDt > 500) || (camPerm === null && camDt > 1000))) showCamTip();
     if (!live.running) { stream.getTracks().forEach((t) => t.stop()); return; }
     live.stream = stream;
     live.track = stream.getVideoTracks()[0];
@@ -816,6 +824,7 @@ async function restartCamera() {
 }
 function stopLive() {
   live.running = false;
+  clearTimeout(camTipT); $('#camTip').classList.remove('show');
   if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
   live.stream = null;
   $('#video').srcObject = null;
@@ -1086,7 +1095,7 @@ function drawOverlay() {
   const cv = $('#overlay');
   const dpr = window.devicePixelRatio || 1;
   const R = videoRect();
-  if (cv.width !== Math.round(R.cw * dpr)) { cv.width = Math.round(R.cw * dpr); cv.height = Math.round(R.ch * dpr); }
+  if (cv.width !== Math.round(R.cw * dpr) || cv.height !== Math.round(R.ch * dpr)) { cv.width = Math.round(R.cw * dpr); cv.height = Math.round(R.ch * dpr); } // 1.34：摺疊機展開／收合只改高度時也要重設
   const ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, R.cw, R.ch);
@@ -1278,6 +1287,21 @@ async function refreshLiveThumb(pageId) {
     await setLiveThumb(f, p.corners, p.curve, pageId);
   } catch (e) { console.warn('live thumb', e); }
 }
+
+// 1.34：iPhone 相機權限說明（拍攝畫面短提示、設定、教學共用）。網頁 App 不能直接打開 iPhone 的設定頁，只能列步驟
+const CAM_STEPS = '<ol style="margin:4px 0 8px;padding-left:22px;line-height:1.9"><li>打開 iPhone 的「設定」</li><li>點「App」→「Safari」</li><li>找到「相機」，改成「允許」</li></ol>';
+function camPermHelp() {
+  openSheet(`<h3>每次都要允許相機？</h3><div class="note" style="margin:0 4px 6px;font-size:14.5px;line-height:1.6">每次開即時掃描都要按「允許」使用相機的話，可以設定成永遠允許：</div>${CAM_STEPS}
+    <div class="note" style="margin:0 4px 12px">（「動作與方向」也可以照樣改成「允許」。）</div>
+    <button class="bigbtn" id="camHelpOk" style="width:100%">知道了</button>`, (s) => { s.querySelector('#camHelpOk').onclick = () => closeSheet(); });
+}
+let camTipT = 0;
+function showCamTip() {
+  const t = $('#camTip'); t.classList.add('show');
+  clearTimeout(camTipT); camTipT = setTimeout(() => t.classList.remove('show'), 5000);
+}
+$('#camTipGo').onclick = () => { $('#camTip').classList.remove('show'); camPermHelp(); };
+$('#camTipX').onclick = () => { clearTimeout(camTipT); $('#camTip').classList.remove('show'); };
 
 /* 1.19 立即裁切：拍完直接進裁切畫面；相機不關，只暫停找框，回來就能接著拍 */
 function openLiveCrop(page, blob, corners, curve) {
@@ -2114,7 +2138,8 @@ async function openPageCropSoon(pageId) {
 async function onPageUpdated(pageId) {
   if (current === 'doc') {
     const el = document.querySelector(`.pg[data-id="${pageId}"]`);
-    if (el) { const p = await DB.get('pages', pageId); const idx = [...el.parentNode.children].indexOf(el); if (p) fillPageThumb(el, p, idx); }
+    // 1.34：等資料庫的期間文件頁可能已重畫、元素被移除（以前會跳 Cannot read properties of null (reading 'children')）
+    if (el) { const p = await DB.get('pages', pageId); if (p && el.isConnected && el.parentNode) fillPageThumb(el, p, [...el.parentNode.children].indexOf(el)); }
   }
   if (current === 'page' && viewPage && viewPage.id === pageId) renderPage(true);
   if (current === 'home') renderHomeSoon();
@@ -2870,6 +2895,7 @@ $('#btnSettings').onclick = () => {
     <div class="seg" id="setUp">${[['auto', '自動'], ['always', '一律'], ['off', '關閉']].map(([k, n]) => `<button data-k="${k}" class="${settings.upscale === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     <div class="lbl" style="margin-top:12px">即時掃描畫質<small id="camDesc" style="display:block;font-size:12px;margin-top:2px"></small></div>
     <div class="seg" id="setCam">${[['auto', '自動'], ['high', '高畫質'], ['low', '省記憶體']].map(([k, n]) => `<button data-k="${k}" class="${(settings.camQ || 'auto') === k ? 'on' : ''}">${n}</button>`).join('')}</div>
+    ${IS_IOS ? '<button class="srow" id="setCamPerm" style="margin-top:6px"><span>📷 每次都要允許相機？ ›<span class="sub">設定成永遠允許，開即時掃描就不用每次按</span></span></button>' : ''}
     <button class="srow" id="setDefAdj" style="margin-top:6px"><span>預設調整數值 ›<span class="sub">新文件一開始用的曝光、濃淡、銳利度等數值</span></span></button>
     <button class="srow" id="setReport"><span>🐞 回報問題或建議 ›</span></button>
     <button class="srow" id="setLog"><span>更新日誌 ›<span class="sub">目前版本 v${APP_VER}</span></span></button>
@@ -2877,6 +2903,7 @@ $('#btnSettings').onclick = () => {
     <div class="note" id="storeInfo"></div>
     <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
     s.querySelector('#setDefAdj').onclick = () => openDefAdj('bw');
+    if (s.querySelector('#setCamPerm')) s.querySelector('#setCamPerm').onclick = () => camPermHelp();
     const camDesc = () => {
       const q = settings.camQ || 'auto', t = camTier();
       s.querySelector('#camDesc').textContent = q === 'auto'
@@ -2936,7 +2963,8 @@ function openHelp() {
       <li>書本攤開時，對準要拍的那一頁就好；釘起來的講義，把拍完的頁摺到背面再拍。</li>
       <li>框不準時可以直接按快門，拍完再調整範圍，或在裁切畫面按「AI 框選」。</li>
       <li>右上角可以切換「自動／手動拍攝」，以及「立即／稍後裁切」。</li>
-      <li>光線不足時，點左上角的 ⚡ 開燈。</li></ul>
+      <li>光線不足時，點左上角的 ⚡ 開燈。</li>
+      <li>iPhone 每次都要按「允許」使用相機：到 iPhone 的「設定」→「App」→「Safari」→「相機」，改成「允許」。</li></ul>
     <h4>裁切</h4><ul>
       <li>拖四個角或拖邊來調整範圍，放大鏡能幫你對準。</li>
       <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平；點兩下某條邊可以把它拉直。切回「直線」時彎度會保留，方便拖角或整條邊。</li>
@@ -3165,7 +3193,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.33';
+const APP_VER = '1.34.1';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 1.29：上線前總整理成 11 條基本功能（都是黑字）；之後新增的項目加 since，只有目前這一版的才是紅字

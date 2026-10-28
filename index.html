@@ -495,6 +495,22 @@ input[type=text],input:not([type]),textarea{-webkit-touch-callout:default;-webki
 .pg .card img,.sth .card img{position:absolute;inset:0;width:100%;height:100%;object-fit:fill}
 /* 即時掃描左下角縮圖：顯示框好、拉正的範圍，整張都看得到 */
 #liveThumb img{object-fit:contain}
+
+/* 1.34：iPad 上方多留 24 點，避開系統在狀態列下方的霧化（1.33 拿掉 viewport-fit=cover 沒有效果） */
+html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
+/* 1.34：寬螢幕（iPad、摺疊機展開、橫放）：選單與首頁內容限制寬度並置中，底部工具列往中間收，頁面縮圖稍大 */
+@media (min-width:700px){
+  #sheetWrap{justify-content:center}
+  #sheet{max-width:620px}
+  #homeBody,#a2Bar .a2hs-bar{max-width:760px;margin-left:auto;margin-right:auto}
+  .actions,.dock{padding-left:max(20px,calc(50% - 340px));padding-right:max(20px,calc(50% - 340px))}
+  .pagegrid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
+}
+/* 1.34：iPhone 相機權限短提示（拍攝畫面上方，5 秒後淡出） */
+#camTip{position:absolute;left:50%;top:calc(var(--st) + 108px);transform:translateX(-50%);z-index:3;display:none;align-items:center;background:rgba(28,19,14,.72);border-radius:20px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);opacity:0;transition:opacity .4s;white-space:nowrap}
+#camTip.show{display:flex;opacity:1}
+#camTip .t{color:#fff;font-size:13.5px;font-weight:600;padding:7px 4px 7px 14px}
+#camTip .x{color:rgba(255,255,255,.8);font-size:13px;padding:7px 12px 7px 8px}
 </style>
 </head>
 <body>
@@ -564,6 +580,7 @@ input[type=text],input:not([type]),textarea{-webkit-touch-callout:default;-webki
       <button class="pill" id="autoBtn">自動</button>
     </div>
     <div class="pill" id="hint">影像引擎載入中…</div>
+    <div id="camTip"><button class="t" id="camTipGo">📷 每次都要允許相機？</button><button class="x" id="camTipX" aria-label="關閉">✕</button></div>
     <div class="pill" id="resChip"></div>
     <div id="liveTip"><b></b><span></span></div>
   </div>
