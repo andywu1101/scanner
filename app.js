@@ -22,7 +22,7 @@ const ADJ = {
   original: [S_EXP, S_CON, { k: 'sharp', name: '銳利度', min: 0, max: 100, def: 0, lo: '柔', hi: '銳' }, S_SAT, S_TMP],
 };
 const MAX_PIXELS = 16000000; // iOS canvas 上限約 16.7M 像素
-const MAX_PHOTO = 15000000;  // Android 即時掃描拍照上限 1500 萬畫素（1.10）
+// 1.33：即時掃描存檔畫質依手機分檔（見 camTier）；1.10～1.32 是固定 1500 萬
 const HAS_IC = 'ImageCapture' in window; // Android Chrome 有；新版 iPhone Safari 也開始有（1.21 起 iPhone 不用，見 startLive）
 
 /* ---------- 設定 ---------- */
@@ -149,6 +149,7 @@ async function canvasBlob(c) {
   if (!c || !c.width || !c.height) return null;
   let b = await toBlob(c, 'image/jpeg', 0.97);
   if (b && b.size) return b;
+  blobStrain = true; // 1.33：第一次就失敗＝記憶體吃緊，之後自動降檔
   b = await toBlob(c, 'image/jpeg', 0.9);
   if (b && b.size) return b;
   try { const r = await fetch(c.toDataURL('image/jpeg', 0.9)); b = await r.blob(); if (b && b.size > 1000) return b; } catch (_) {}
@@ -481,7 +482,7 @@ function updateHomeStrip(pages) {
     const b = document.createElement('button');
     b.className = 'sth';
     const src = p.thumb || p.original;
-    b.innerHTML = `<img src="${blobUrl('strip:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span>${i + 1}</span>${p.needCrop ? '<i class="cut">✂</i>' : ''}${!isBroken(p) && (!p.thumb || processing.has(p.id)) ? '<i class="spin sm"></i>' : ''}`;
+    b.innerHTML = `<div class="card" style="${cardStyle(p)}"><img src="${blobUrl('strip:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span>${i + 1}</span>${p.needCrop ? '<i class="cut">✂</i>' : ''}${!isBroken(p) && (!p.thumb || processing.has(p.id)) ? '<i class="spin sm"></i>' : ''}</div>`;
     b.onclick = async () => {
       state.docId = docId; await renderDoc();
       history.pushState({ s: 'doc', doc: docId }, '');
@@ -691,7 +692,7 @@ async function startLive(docId) {
   Object.assign(live, {
     running: true, docId, fromDoc: !!docId, count: 0, stream: null, track: null, ic: null, lastQuad: null, shown: null,
     hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0, paused: false,
-    aiLater: [],
+    aiLater: [], lastRes: null, lastPageId: null,
   });
   aiErrShown = false; aiTag(aiPend ? 'AI ' + aiPend : '', !!aiPend);
   pauseQueue(); // 掃描期間暫停高解析度處理，讓抓邊保持流暢
@@ -721,19 +722,11 @@ async function startLive(docId) {
     if (useIC) {
       try {
         live.ic = new ImageCapture(live.track);
-        // 拍照尺寸：請相機用不超過 1500 萬畫素的大小拍（手機不支援時會選最接近的，拍完再縮）
-        live.ic.getPhotoCapabilities().then((pc) => {
-          const W = pc.imageWidth, H = pc.imageHeight;
-          if (!W || !H || !W.max || !H.max || W.max * H.max <= MAX_PHOTO) return;
-          const s = Math.sqrt(MAX_PHOTO / (W.max * H.max));
-          live.photoSettings = { imageWidth: Math.floor(W.max * s), imageHeight: Math.floor(H.max * s) };
-        }).catch(() => {});
+        setPhotoSettings();
       } catch (_) {}
     }
-    const updRes = () => {
-      $('#resChip').textContent = live.ic ? `預覽 ${v.videoWidth}×${v.videoHeight}・拍照最高 1500 萬畫素` : `${v.videoWidth}×${v.videoHeight}`;
-    };
-    v.onloadedmetadata = updRes; updRes();
+    // 1.33：左下角只顯示存檔的畫質（作者：寫預覽解析度會讓人誤會）
+    v.onloadedmetadata = updResChip; updResChip();
     if (!settings.autoShutter) manualHint(); else setHint(workerReady ? '將文件放進畫面中' : '影像引擎載入中…');
     whenReady().then(() => { if (live.running && settings.autoShutter) setHint('將文件放進畫面中'); });
     liveLoop();
@@ -747,6 +740,51 @@ async function startLive(docId) {
 }
 // Android（有 ImageCapture）另外用 takePhoto 拍照，預覽只用來找紙，要 1920×1440 就夠，弱手機偵測才跟得上（1.10）
 // iPhone（1.21 起不用 ImageCapture）存下來的就是預覽那一格，所以要求最高解析度
+// 1.33 即時掃描畫質分檔：settings.camQ＝'auto'｜'high'｜'low'；settings.camAutoLow＝曾經記憶體不足、自動降成省記憶體
+// 自動：iPhone 高檔（網頁相機串流上限約 1200 萬）；Android 依 navigator.deviceMemory（只有 Chrome 有，最多報 8）≥8 高、≥4 中、<4 省，讀不到當中
+function camTier() {
+  const q = settings.camQ || 'auto';
+  if (q === 'high') return 'high';
+  if (q === 'low') return 'low';
+  if (settings.camAutoLow) return 'low';
+  if (IS_IOS) return 'high';
+  const dm = navigator.deviceMemory;
+  if (!dm) return 'mid';
+  return dm >= 8 ? 'high' : dm >= 4 ? 'mid' : 'low';
+}
+const tierMP = (t) => (t === 'high' ? (IS_IOS ? 12 : 16) : t === 'mid' ? 12 : 8); // 萬畫素 ÷ 100
+const photoCap = () => tierMP(camTier()) * 1e6;
+const TIER_NAME = { high: '高', mid: '中', low: '省記憶體' };
+const mpText = (w, h) => Math.round((w * h) / 1e5) * 10; // 例：3024×4032 → 1220（萬畫素）
+function updResChip() {
+  const v = $('#video'), el = $('#resChip');
+  if (live.lastRes) { el.textContent = `已拍 ${live.lastRes[0]}×${live.lastRes[1]}（${mpText(...live.lastRes)} 萬畫素）`; return; }
+  const cap = photoCap();
+  if (live.ic) el.textContent = `畫質最高 ${cap / 1e4} 萬畫素`;
+  else if (v.videoWidth) el.textContent = `畫質約 ${Math.min(mpText(v.videoWidth, v.videoHeight), cap / 1e4)} 萬畫素`;
+  else el.textContent = '';
+}
+// 存照片時記憶體吃緊（canvasBlob 第一次就失敗）：自動降成省記憶體並記住（只在「自動」時）
+let blobStrain = false;
+function noteStrain() {
+  if (!blobStrain) return;
+  blobStrain = false;
+  if ((settings.camQ || 'auto') !== 'auto' || settings.camAutoLow || camTier() === 'low') return;
+  settings.camAutoLow = true; saveSettings();
+  toast('這支手機記憶體較少，已改用省記憶體畫質');
+  if (live.ic) live.photoSettings = null, setPhotoSettings();
+  updResChip();
+}
+function setPhotoSettings() {
+  if (!live.ic) return;
+  // 拍照尺寸：請相機用不超過上限的大小拍（手機不支援時會選最接近的，拍完再縮）
+  live.ic.getPhotoCapabilities().then((pc) => {
+    const W = pc.imageWidth, H = pc.imageHeight, cap = photoCap();
+    if (!W || !H || !W.max || !H.max || W.max * H.max <= cap) { live.photoSettings = null; return; }
+    const s = Math.sqrt(cap / (W.max * H.max));
+    live.photoSettings = { imageWidth: Math.floor(W.max * s), imageHeight: Math.floor(H.max * s) };
+  }).catch(() => {});
+}
 function camConstraints(useIC) {
   return {
     audio: false,
@@ -764,7 +802,7 @@ async function restartCamera() {
     const stream = await navigator.mediaDevices.getUserMedia(camConstraints(useIC));
     if (!live.running) { stream.getTracks().forEach((t) => t.stop()); return; }
     live.stream = stream; live.track = stream.getVideoTracks()[0];
-    if (useIC) { try { live.ic = new ImageCapture(live.track); } catch (_) {} }
+    if (useIC) { try { live.ic = new ImageCapture(live.track); setPhotoSettings(); } catch (_) {} }
     const v = $('#video');
     v.style.display = 'none'; void v.offsetHeight; v.style.display = '';
     v.srcObject = null; v.srcObject = stream;
@@ -1115,7 +1153,7 @@ async function capture(sig, full, quadAt, userPress) {
   if (!sig) sig = frameSig(v);
   setRing(0);
   try {
-    let blob = null, fromPhoto = false, src = null;
+    let blob = null, fromPhoto = false, src = null, thumbFrame = null;
     if (live.ic && !full) {
       // Android：全解析度拍照需要一點時間，拍好才閃光
       setHint('拍攝中，請勿移動…', true);
@@ -1133,7 +1171,18 @@ async function capture(sig, full, quadAt, userPress) {
       flash(); shotFx('ok'); // 這一格已經固定下來，手可以移開了
       setHint('已拍好，請換下一頁', true);
       live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; // 立刻隱藏框
+      // 1.33：iPhone 省記憶體檔：存檔前縮到上限以內
+      const cap = photoCap();
+      if (src.width * src.height > cap * 1.05) {
+        const sc = Math.sqrt(cap / (src.width * src.height));
+        const c2 = canvasOf(Math.floor(src.width * sc), Math.floor(src.height * sc));
+        const x2 = c2.getContext('2d'); x2.imageSmoothingQuality = 'high'; x2.drawImage(src, 0, 0, c2.width, c2.height);
+        src = c2;
+      }
+      thumbFrame = smallFrame(src, 640);
       blob = await canvasBlob(src);
+      if (blob) live.lastRes = [src.width, src.height];
+      noteStrain();
       if (!blob) { // 1.29：弱手機記憶體不足時轉檔會失敗，不要存成沒有照片的頁面
         toast('這張沒拍成功，請再拍一次'); shotFx('');
         live.armed = true; resetLock(); live.capturing = false; return;
@@ -1148,14 +1197,17 @@ async function capture(sig, full, quadAt, userPress) {
         const iw = img.naturalWidth, ih = img.naturalHeight;
         sameAspect = Math.abs(iw / ih - v.videoWidth / v.videoHeight) < 0.02;
         let srcImg = img;
-        if (iw * ih > MAX_PHOTO * 1.05) {
-          // 相機給的照片太大（例如 4800 萬畫素），先縮到 1500 萬再存，後面的處理才不會拖慢
-          const sc = Math.sqrt(MAX_PHOTO / (iw * ih));
+        const cap = photoCap();
+        if (iw * ih > cap * 1.05) {
+          // 相機給的照片太大（例如 4800 萬畫素），先縮到上限再存，後面的處理才不會拖慢
+          const sc = Math.sqrt(cap / (iw * ih));
           const c = canvasOf(Math.floor(iw * sc), Math.floor(ih * sc));
           const cx = c.getContext('2d'); cx.imageSmoothingQuality = 'high'; cx.drawImage(img, 0, 0, c.width, c.height);
           const nb = await toBlob(c, 'image/jpeg', 0.95);
-          if (nb) { blob = nb; srcImg = c; }
+          if (nb) { blob = nb; srcImg = c; } else { blobStrain = true; noteStrain(); }
         }
+        live.lastRes = [srcImg.width || srcImg.naturalWidth, srcImg.height || srcImg.naturalHeight];
+        thumbFrame = smallFrame(srcImg, 640);
         if (!manualMode) r = await detectOn(srcImg);
         if (srcImg !== img) srcImg.width = srcImg.height = 0;
         URL.revokeObjectURL(url);
@@ -1173,7 +1225,11 @@ async function capture(sig, full, quadAt, userPress) {
     const th = $('#liveThumb');
     th.style.visibility = 'visible';
     th.querySelector('span').textContent = live.count;
-    th.querySelector('img').src = blobUrl('live:last', blob, page.id);
+    // 1.33：左下角縮圖顯示框好、拉正後的範圍（先放原圖，拉正好了再換）
+    live.lastPageId = page.id;
+    if (!live.thumbUrl) th.querySelector('img').src = blobUrl('live:last', blob, page.id);
+    if (thumbFrame) setLiveThumb(thumbFrame, corners, null, page.id); else refreshLiveThumb(page.id);
+    updResChip();
     live.lastCapT = Date.now(); live.miss = 0; live.best = null;
     if (!quad) { live.armed = true; resetLock(); }
     if (needUser && !settings.cropLater) {
@@ -1198,6 +1254,31 @@ async function capture(sig, full, quadAt, userPress) {
 }
 $('#shutter').onclick = () => { if (live.running) capture(null, null, null, true); };
 
+// 1.33：即時掃描左下角縮圖＝框好、拉正後的小圖（原色，不做黑白）；作者：要馬上知道有沒有框好
+async function setLiveThumb(frame, corners, curve, pageId) {
+  try {
+    await whenReady();
+    const r = await wcall('process', { buffer: frame.data.buffer, width: frame.width, height: frame.height, corners, curve: curve || null, upscale: 'off', rotation: 0, mode: 'original', params: fillAdj('original') }, [frame.data.buffer]);
+    if (pageId && live.lastPageId !== pageId) return;
+    const c = canvasOf(r.width, r.height);
+    c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
+    const b = await toBlob(c, 'image/jpeg', 0.85); c.width = c.height = 0;
+    if (!b || (pageId && live.lastPageId !== pageId)) return;
+    if (live.thumbUrl) URL.revokeObjectURL(live.thumbUrl);
+    live.thumbUrl = URL.createObjectURL(b);
+    $('#liveThumb img').src = live.thumbUrl;
+  } catch (e) { console.warn('live thumb', e); }
+}
+// 從存好的原圖重算（背景 AI 框好、立即裁切確定、刪掉最後一張之後）
+async function refreshLiveThumb(pageId) {
+  try {
+    const p = await DB.get('pages', pageId); if (!p || isBroken(p)) return;
+    const { img, url } = await loadImg(p.original);
+    const f = smallFrame(img, 640); URL.revokeObjectURL(url);
+    await setLiveThumb(f, p.corners, p.curve, pageId);
+  } catch (e) { console.warn('live thumb', e); }
+}
+
 /* 1.19 立即裁切：拍完直接進裁切畫面；相機不關，只暫停找框，回來就能接著拍 */
 function openLiveCrop(page, blob, corners, curve) {
   live.paused = true;
@@ -1210,6 +1291,7 @@ function openLiveCrop(page, blob, corners, curve) {
       p.corners = c; p.curve = cv; delete p.needCrop;
       if (edited) p.cropUser = true;
       await DB.put('pages', p);
+      if (live.lastPageId === p.id) refreshLiveThumb(p.id);
       enqueue(p.id);
     },
     onRetake: () => removeLivePage(page.id),
@@ -1230,7 +1312,7 @@ async function removeLivePage(pageId) {
   if (!live.count) { th.style.visibility = 'hidden'; return; }
   th.querySelector('span').textContent = live.count;
   const last = doc && doc.pageIds.length ? await DB.get('pages', doc.pageIds[doc.pageIds.length - 1]) : null;
-  if (last) th.querySelector('img').src = blobUrl('live:last', last.original, last.id);
+  if (last) { live.lastPageId = last.id; th.querySelector('img').src = blobUrl('live:last', last.original, last.id); refreshLiveThumb(last.id); }
 }
 function liveResume() {
   live.paused = false;
@@ -1313,6 +1395,7 @@ async function aiFixPage(pageId, blob, c0, keepCrop) {
     await DB.put('pages', p);
     enqueue(p.id);
     if (current === 'doc' && state.docId === p.docId) onPageUpdated(p.id);
+    if (live.running && live.lastPageId === p.id) refreshLiveThumb(p.id);
     return { corners: p.corners, curve: p.curve };
   } catch (e) { console.warn('auto AI', e); return { fail: 'error', msg: e && e.message ? e.message : String(e) }; }
 }
@@ -2008,10 +2091,15 @@ function setupSort(g) {
     },
   });
 }
+// 1.33：縮圖照成品比例（outW／outH 已含旋轉）。還沒處理好的頁先用 3:4；格子是 3:4，比它寬就撐滿寬、比它瘦就撐滿高
+function cardStyle(p) {
+  const ar = p && p.outW && p.outH && !isBroken(p) ? p.outW / p.outH : 0.75;
+  return `width:${(Math.min(1, ar / 0.75) * 100).toFixed(2)}%;aspect-ratio:${ar.toFixed(4)}`;
+}
 function fillPageThumb(el, p, i) {
   const src = p.thumb || p.original;
   const wait = !isBroken(p) && (!p.thumb || processing.has(p.id));
-  el.innerHTML = `<img src="${blobUrl('t:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span class="no">${i + 1}</span>${pageCustom(p) ? `<span class="custom" title="這一頁單獨調整過">${ICON.sliders}</span>` : ''}${p.needCrop ? '<i class="cut" title="待裁切">✂</i>' : ''}${wait ? '<span class="wait"><span class="spin sm"></span></span>' : ''}`;
+  el.innerHTML = `<div class="card" style="${cardStyle(p)}"><img src="${blobUrl('t:' + p.id, src, verOf(p, 'thumb'))}" alt=""><span class="no">${i + 1}</span>${pageCustom(p) ? `<span class="custom" title="這一頁單獨調整過">${ICON.sliders}</span>` : ''}${p.needCrop ? '<i class="cut" title="待裁切">✂</i>' : ''}${wait ? '<span class="wait"><span class="spin sm"></span></span>' : ''}</div>`;
 }
 function updateCropNote(pages) {
   const n = pages.filter((p) => p.needCrop).length, el = $('#cropNote');
@@ -2780,13 +2868,27 @@ $('#btnSettings').onclick = () => {
     <div class="switch"><span>拍照後先確認裁切<small>高畫質拍照後進入四角微調畫面</small></span><button class="tg ${settings.confirmCrop ? 'on' : ''}" data-k="confirmCrop"></button></div>
     <div class="lbl" style="margin-top:12px">小圖平滑放大<small style="display:block;font-size:12px;margin-top:2px">讓解析度低的圖片（例如別人傳來的照片）轉黑白時邊緣更平順</small></div>
     <div class="seg" id="setUp">${[['auto', '自動'], ['always', '一律'], ['off', '關閉']].map(([k, n]) => `<button data-k="${k}" class="${settings.upscale === k ? 'on' : ''}">${n}</button>`).join('')}</div>
+    <div class="lbl" style="margin-top:12px">即時掃描畫質<small id="camDesc" style="display:block;font-size:12px;margin-top:2px"></small></div>
+    <div class="seg" id="setCam">${[['auto', '自動'], ['high', '高畫質'], ['low', '省記憶體']].map(([k, n]) => `<button data-k="${k}" class="${(settings.camQ || 'auto') === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     <button class="srow" id="setDefAdj" style="margin-top:6px"><span>預設調整數值 ›<span class="sub">新文件一開始用的曝光、濃淡、銳利度等數值</span></span></button>
     <button class="srow" id="setReport"><span>🐞 回報問題或建議 ›</span></button>
     <button class="srow" id="setLog"><span>更新日誌 ›<span class="sub">目前版本 v${APP_VER}</span></span></button>
-    <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描：Android 會另外拍一張照片（最高 1500 萬畫素）；iPhone 受限於網頁相機串流解析度。要最清楚的畫質請用「高畫質拍照」。</div>
+    <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描的畫質見上方「即時掃描畫質」：iPhone 最高約 1200 萬畫素（網頁相機的上限），Android 最高 1600 萬畫素。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
     <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
     s.querySelector('#setDefAdj').onclick = () => openDefAdj('bw');
+    const camDesc = () => {
+      const q = settings.camQ || 'auto', t = camTier();
+      s.querySelector('#camDesc').textContent = q === 'auto'
+        ? `自動：依這支手機判斷（目前為「${TIER_NAME[t]}」，每張約 ${tierMP(t) * 100} 萬畫素）${settings.camAutoLow ? '・曾經記憶體不足，已自動改用省記憶體' : ''}`
+        : q === 'high' ? `一律最高：每張約 ${tierMP('high') * 100} 萬畫素` : '一律 800 萬畫素，適合較舊的手機';
+    };
+    camDesc();
+    s.querySelectorAll('#setCam button').forEach((b) => b.onclick = () => {
+      settings.camQ = b.dataset.k; settings.camAutoLow = false; saveSettings(); // 自己選過就重新開始判斷
+      s.querySelectorAll('#setCam button').forEach((x) => x.classList.toggle('on', x === b));
+      camDesc();
+    });
     s.querySelector('#setReport').onclick = () => window.open(REPORT_URL, '_blank', 'noopener');
     s.querySelector('#setLog').onclick = () => { closeSheet(); showChangelog(); };
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
@@ -3063,7 +3165,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與 sw.js VERSION、打包號碼一致）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '1.32';
+const APP_VER = '1.33';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 1.29：上線前總整理成 11 條基本功能（都是黑字）；之後新增的項目加 since，只有目前這一版的才是紅字
@@ -3081,6 +3183,8 @@ const CHANGELOG = [
     { t: '使用教學、加入主畫面教學、問題回報、自訂預設調整數值' },
     { t: '即時掃描新增「自動 AI 框選」開關：拍完自動用 AI 框好', since: '1.29' },
     { t: '黑白模式預設值調整：線條更平滑、不再有鋸齒（已掃好的文件維持原樣）', since: '1.30' },
+    { t: '頁面縮圖照成品的比例顯示，框了哪裡一目了然；即時掃描左下角縮圖顯示框好的範圍', since: '1.33' },
+    { t: '即時掃描畫質依手機自動調整，也可以在設定裡切換', since: '1.33' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號

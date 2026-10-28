@@ -3,6 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<script>
+/* 1.33：iPad 不延伸到狀態列底下（viewport-fit=cover 會讓 iPadOS 把畫面延伸到狀態列下並蓋一層霧化，標題列被模糊）；
+   拿掉之後畫面從狀態列下方開始、狀態列是實心底色，和 iPhone 一致。這個設定每次打開都會讀，不用重新加入主畫面 */
+(function () {
+  var ua = navigator.userAgent;
+  if (/iPad/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
+    var m = document.querySelector('meta[name=viewport]');
+    if (m) m.setAttribute('content', m.getAttribute('content').replace(/,\s*viewport-fit=cover/, ''));
+    document.documentElement.classList.add('ipad');
+  }
+})();
+</script>
 <title>伍線譜樂譜掃描｜精確的攜帶式 PDF 掃描神器</title>
 <meta name="description" content="用手機把樂譜、講義掃成清晰的 PDF：自動抓邊、彎曲書頁拉平、去雜點。免註冊，資料只存在自己的手機。">
 <meta property="og:type" content="website">
@@ -238,7 +250,7 @@ input[type=file]{display:none}
 .pg img{-webkit-touch-callout:none;pointer-events:none}
 .pg{-webkit-touch-callout:none;touch-action:manipulation}
 .pg-ghost{opacity:.35}
-.pg-chosen{box-shadow:0 0 0 3px var(--caramel),0 10px 26px rgba(74,47,34,.3)!important}
+.pg-chosen .card{box-shadow:0 0 0 3px var(--caramel),0 10px 26px rgba(74,47,34,.3)!important}
 .pg-drag{transform:scale(1.04);opacity:.95}
 .fname{display:flex;align-items:center;gap:8px;background:var(--surface2);border-radius:12px;padding:4px 12px 4px 4px;margin-bottom:14px}
 .fname input{flex:1;min-width:0;border:0;background:var(--surface);border-radius:9px;padding:11px 12px;font:inherit;font-size:16px;color:var(--text);outline:none;-webkit-user-select:text;user-select:text}
@@ -268,9 +280,9 @@ input[type=file]{display:none}
 .selecting .doc .ck{display:grid;position:absolute;right:8px;top:8px;width:26px;height:26px;border-radius:50%;border:2px solid #fff;background:rgba(58,40,30,.35);color:#fff;font-size:13px;font-weight:700;place-items:center;box-shadow:0 1px 4px rgba(0,0,0,.3)}
 .selecting .doc.sel .ck{background:var(--cocoa);border-color:var(--cream)}
 .selecting .doc.sel{box-shadow:0 0 0 3px var(--cocoa)}
-.selecting .pg::after{content:"";position:absolute;right:7px;top:7px;width:22px;height:22px;border-radius:50%;border:2px solid #fff;background:rgba(58,40,30,.3);box-shadow:0 1px 4px rgba(0,0,0,.3)}
-.selecting .pg.sel::after{background:var(--cocoa) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 12l4 4 8-9'/%3E%3C/svg%3E") center/14px no-repeat;border-color:var(--cream)}
-.selecting .pg.sel{box-shadow:0 0 0 3px var(--cocoa)}
+.selecting .pg .card::after{content:"";position:absolute;right:7px;top:7px;width:22px;height:22px;border-radius:50%;border:2px solid #fff;background:rgba(58,40,30,.3);box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.selecting .pg.sel .card::after{background:var(--cocoa) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 12l4 4 8-9'/%3E%3C/svg%3E") center/14px no-repeat;border-color:var(--cream)}
+.selecting .pg.sel .card{box-shadow:0 0 0 3px var(--cocoa)}
 .dock .tool.danger{color:var(--danger)}
 .dock .tool[disabled]{opacity:.35}
 .selcount{justify-content:center;font-size:14px;font-weight:700;color:var(--cocoa-d)!important}
@@ -474,6 +486,15 @@ input[type=file]{display:none}
 body{touch-action:manipulation}
 input[type=range]{-webkit-user-select:none;user-select:none;touch-action:none}
 input[type=text],input:not([type]),textarea{-webkit-touch-callout:default;-webkit-user-select:text;user-select:text}
+
+/* 1.33：頁面縮圖照成品的比例顯示（格子本身透明，.card 是成品的形狀，置中；頁碼、✂ 等標記貼在成品角落） */
+.pg:not(.add),.sth{background:transparent!important;box-shadow:none!important;overflow:visible!important;border-radius:0!important}
+.pg .card,.sth .card{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:#fff;overflow:hidden;box-shadow:0 1px 0 var(--line),0 3px 12px rgba(74,47,34,.14)}
+.pg .card{border-radius:8px}
+.sth .card{border-radius:6px;box-shadow:0 0 0 1px var(--line)}
+.pg .card img,.sth .card img{position:absolute;inset:0;width:100%;height:100%;object-fit:fill}
+/* 即時掃描左下角縮圖：顯示框好、拉正的範圍，整張都看得到 */
+#liveThumb img{object-fit:contain}
 </style>
 </head>
 <body>
