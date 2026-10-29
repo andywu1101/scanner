@@ -1357,10 +1357,17 @@ async function refreshLiveThumb(pageId) {
 
 // 1.34：iPhone 相機權限說明（拍攝畫面短提示、設定、教學共用）。網頁 App 不能直接打開 iPhone 的設定頁，只能列步驟
 const CAM_STEPS = '<ol style="margin:4px 0 8px;padding-left:22px;line-height:1.9"><li>打開 iPhone 的「設定」</li><li>點「App」→「Safari」</li><li>找到「相機」，改成「允許」</li></ol>';
+const CAM_VIDEO = 'https://www.youtube.com/watch?v=q3Vb_R12qTI&t=76s';
 function camPermHelp() {
   openSheet(`<h3>每次都要允許相機？</h3><div class="note" style="margin:0 4px 6px;font-size:14.5px;line-height:1.6">每次開即時掃描都要按「允許」使用相機的話，可以設定成永遠允許：</div>${CAM_STEPS}
     <div class="note" style="margin:0 4px 12px">（「動作與方向」也可以照樣改成「允許」。）</div>
-    <button class="bigbtn" id="camHelpOk" style="width:100%">知道了</button>`, (s) => { s.querySelector('#camHelpOk').onclick = () => closeSheet(); });
+    <button class="bigbtn" id="camHelpVideo" style="width:100%;background:#C4302B">▶ 看影片教學</button>
+    <button class="bigbtn alt" id="camHelpOk" style="width:100%;margin-top:8px">知道了</button>`, (s) => {
+    s.querySelector('#camHelpOk').onclick = () => closeSheet();
+    // 2.2：影片從 1:16（相機設定那段）開始；Shorts 網址不能指定時間，所以用一般影片網址。
+    // 在拍攝畫面點的話會跳到 YouTube，App 進背景時 visibilitychange 會結束即時掃描（已拍的頁照常存好），回來不會卡在凍結的相機畫面
+    s.querySelector('#camHelpVideo').onclick = () => { closeSheet(); window.open(CAM_VIDEO, '_blank', 'noopener'); };
+  });
 }
 let camTipT = 0;
 function showCamTip() {
@@ -3286,7 +3293,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '2.1';
+const APP_VER = '2.2';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -3403,6 +3410,9 @@ const A2 = a2hsEnv();
 function showA2HS() {
   const env = a2hsEnv();
   $('#a2StepsIOS').style.display = env.isAndroid ? 'none' : '';
+  $('#a2Video').style.display = env.isAndroid ? 'none' : ''; // 2.2：影片是 iPhone 的操作
+  $('#a2BrIOS').style.display = env.isAndroid ? 'none' : '';
+  $('#a2BrAnd').style.display = env.isAndroid ? '' : 'none';
   $('#a2StepsAndroid').style.display = env.isAndroid ? '' : 'none';
   document.querySelectorAll('.a2Br').forEach((e) => { e.textContent = env.isAndroid ? 'Chrome' : 'Safari'; });
   $('#a2InApp').style.display = env.needBrowser ? 'block' : 'none';

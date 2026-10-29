@@ -1,5 +1,5 @@
 /* 伍線譜樂譜掃描 — Service Worker（離線可用） */
-const VERSION = 'cocoscan-v44';
+const VERSION = 'cocoscan-v45';
 // AI 框選的模型與執行環境（約 15 MB）：第一次使用時由 app.js 下載放進這個快取，換版本不清掉（1.25）
 const AI_CACHE = 'cocoscan-ai';
 const ASSETS = [
