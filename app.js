@@ -642,22 +642,40 @@ async function finishBurst() {
 }
 $('#burstDone').onclick = finishBurst;
 
+// 3.0.1：高畫質拍照、相簿匯入也跟著「自動 AI 框選」開關（開著而且 AI 已下載才用）。
+// 回傳 { corners, curve }；AI 判斷不適合或失敗回傳 { fail, msg }（呼叫的地方保留一般偵測的框）
+async function aiAutoOn() { return !!settings.autoAI && (await aiCached()); }
+async function aiCorners(blob) {
+  try {
+    const { img, url } = await loadImg(blob);
+    let r = null;
+    try { r = await aiFrame(img); } finally { URL.revokeObjectURL(url); }
+    if (!r || !r.corners) return { fail: 'reject', msg: r && r.reject };
+    return { corners: r.corners, curve: r.curve ? normCurve(r.corners, r.curve) : null };
+  } catch (e) { console.warn('auto AI', e); return { fail: 'error', msg: e && e.message ? e.message : String(e) }; }
+}
 $('#fileCamera').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   busy('偵測文件邊框…');
-  let blob, corners;
+  let blob, corners, curve = null;
   try { blob = await stableBlob(file); corners = await detectBlob(blob); }
   catch (err) { unbusy(); toast(err.message); return; }
+  if (await aiAutoOn()) {
+    busy('AI 框選中…');
+    const r = await aiCorners(blob);
+    if (r.corners) { corners = r.corners; curve = r.curve; }
+    else toast(r.fail === 'reject' ? 'AI 判斷不適合，保留原框' : 'AI 框選失敗：' + (r.msg || '未知原因'));
+  }
   unbusy();
   if (settings.confirmCrop) {
     openCrop({
-      blob, corners, retake: true, burst: true,
+      blob, corners, curve, retake: true, burst: true,
       onConfirm: async (c, cv, edited) => { const pg = await burstAdd(blob, c, cv); if (edited) { pg.cropUser = true; await DB.put('pages', pg); } toBurst(); },
       onRetake: () => openCamera(),
     });
   } else {
-    await burstAdd(blob, corners);
+    await burstAdd(blob, corners, curve);
     toBurst();
     toast(`已加入第 ${burst.count} 張`);
   }
@@ -668,16 +686,24 @@ $('#fileGallery').addEventListener('change', async (e) => {
   if (!files.length) return;
   let docId = cameraTarget;
   if (!docId) docId = (await createDoc()).id;
+  const useAI = await aiAutoOn();
+  let rejected = 0, aiErr = null;
   for (let i = 0; i < files.length; i++) {
-    busy(`匯入中 ${i + 1} / ${files.length}`);
+    busy(`${useAI ? 'AI 框選中' : '匯入中'} ${i + 1} / ${files.length}`);
     try {
       const blob = await stableBlob(files[i]);
-      const c = await detectBlob(blob);
-      await addPage(docId, blob, c);
+      let c = await detectBlob(blob), cv = null;
+      if (useAI) {
+        const r = await aiCorners(blob);
+        if (r.corners) { c = r.corners; cv = r.curve; } else if (r.fail === 'reject') rejected++; else aiErr = aiErr || r.msg || '未知原因';
+      }
+      await addPage(docId, blob, c, cv);
     } catch (err) { toast(err.message); }
   }
   unbusy();
   openDoc(docId, current !== 'doc');
+  if (aiErr) toast('AI 框選失敗：' + aiErr);
+  else if (rejected) toast(files.length === 1 ? 'AI 判斷不適合，保留原框' : `${rejected} 張 AI 判斷不適合，保留原框`);
 });
 
 /* ---------- 即時掃描 ---------- */
@@ -743,7 +769,7 @@ async function startLive(docId) {
     whenReady().then(() => { if (live.running && settings.autoShutter) setHint('將文件放進畫面中'); });
     liveLoop();
     requestAnimationFrame(drawOverlay);
-    if (aiAsk) { live.paused = true; setTimeout(aiAskNow, 1000); } // 相機畫面出來、系統權限詢問結束後再等 1 秒；問完之前先不自動拍
+    if (aiAsk) { live.paused = true; setTimeout(aiAsk === 'up' ? aiUpAskNow : aiAskNow, 1000); } // 相機畫面出來、系統權限詢問結束後再等 1 秒；問完之前先不自動拍
   } catch (err) {
     console.error(err);
     stopLive();
@@ -1465,7 +1491,7 @@ $('#aiBtn').onclick = async () => {
     live.paused = true;
     const had = await aiCached();
     const ok = await aiEnsure(true); // 1.31：用 App 內的確認視窗（系統 confirm 會讓 iPhone 相機凍結）
-    if (!had && ok) await restartCamera(); // 下載十幾 MB 期間 iPhone 可能中斷相機：重新開一次
+    if (!had && ok) await restartCamera(); // 下載幾十 MB 期間 iPhone 可能中斷相機：重新開一次
     live.paused = false;
     if (!live.running) return;
     if (!ok) return;
@@ -1476,22 +1502,36 @@ $('#aiBtn').onclick = async () => {
     liveTip('自動 AI 框選', '已關閉');
   }
 };
-/* 2.1 自動 AI 框選預設開啟（作者：有些人不知道可以打開）。AI 資料要先下載約 15 MB，所以：
+/* 2.1 自動 AI 框選預設開啟（作者：有些人不知道可以打開）。AI 資料要先下載（3.0 起約 32 MB），所以：
    第一次進拍攝畫面時（相機開好再等 1 秒）用 App 內視窗詢問；按「下載」→ 下載完自動開啟並重開相機（1.31 iPhone 凍結），
    按「暫時不要」→ 維持關閉、不再問（settings.aiAsked）。舊使用者也問一次（作者決定；以前特地關掉的人也會被問一次）。
    已開啟的不問；已下載過資料但沒開的直接開啟；弱 Android（裝置記憶體 < 4 GB 或曾經記憶體不足自動降檔）不問、維持關閉，自己按 AI 按鈕 */
 const aiWeak = () => !IS_IOS && (settings.camAutoLow || (navigator.deviceMemory > 0 && navigator.deviceMemory < 4));
+// 回傳 'ask'＝問要不要下載並開啟；'up'＝3.0 舊使用者問要不要升級引擎；false＝不問
 async function aiDefaultCheck() {
+  const st = await aiState();
+  if (aiUpgradable(st) && !settings.aiUpAsked) return 'up';
   if (settings.aiAsked || settings.autoAI) return false;
   if (aiWeak()) return false;
-  if (await aiCached()) { settings.autoAI = true; settings.aiAsked = true; saveSettings(); updateLiveBtns(); return false; }
-  return true;
+  if (st.model && aiPickEngine(st)) { settings.autoAI = true; settings.aiAsked = true; saveSettings(); updateLiveBtns(); return false; }
+  return 'ask';
+}
+// 3.0：已經用舊引擎的人，問一次要不要升級（同樣在相機開好 1 秒後、暫停自動拍攝；按「暫時不要」→ 設定裡有升級按鈕）
+async function aiUpAskNow() {
+  if (!live.running || current !== 'live' || settings.aiUpAsked) { live.paused = false; return; }
+  settings.aiUpAsked = true; saveSettings();
+  live.paused = true;
+  const yes = await askSheet('AI 框選升級', `新版 AI 框選速度更快，需要再下載約 ${AI_UP_MB} MB（只需一次），建議在 Wi-Fi 下使用。`, '下載並升級', '暫時不要');
+  let ok = false;
+  if (yes && live.running) { ok = await aiUpgrade(); if (ok) await restartCamera(); }
+  live.paused = false;
+  if (ok && live.running) liveTip('AI 框選已升級', '速度更快了');
 }
 async function aiAskNow() {
   if (!live.running || current !== 'live' || settings.autoAI || settings.aiAsked) { live.paused = false; return; }
   settings.aiAsked = true; saveSettings();
   live.paused = true;
-  const yes = await askSheet('自動 AI 框選', '拍完自動用 AI 精準框好紙張，省去調整的麻煩。<br>需要先下載約 15 MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。', '下載並開啟', '暫時不要');
+  const yes = await askSheet('自動 AI 框選', `拍完自動用 AI 精準框好紙張，省去調整的麻煩。<br>需要先下載約 ${AI_DL_MB} MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。`, '下載並開啟', '暫時不要');
   let ok = false;
   if (yes && live.running) { ok = await aiEnsure(true, true); if (ok) await restartCamera(); }
   live.paused = false;
@@ -1679,16 +1719,32 @@ function layoutCrop() {
   const s = Math.min((st.width - pad * 2) / nw, (st.height - pad * 2) / nh);
   const w = nw * s, h = nh * s, x = (st.width - w) / 2;
   const y = (st.height - h) / 2; // 置中（1.13 曾下移 40 點，1.14 預覽改到對角後改回置中）
-  cropCtx.rect = { x, y, w, h };
+  cropCtx.base = { x, y, w, h }; // 沒有縮放時的位置（3.0.1 雙指縮放：版面改變時恢復原尺寸）
+  cropCtx.zs = 1;
+  placeCrop({ x, y, w, h });
+  pipPlace(false);
+}
+// 把照片、外框、控制點放到 r（裁切區座標）；縮放時控制點大小不變，所以放大後更好點準
+function placeCrop(r) {
+  cropCtx.rect = r;
   const ci = $('#cropImg');
-  Object.assign(ci.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
+  Object.assign(ci.style, { left: r.x + 'px', top: r.y + 'px', width: r.w + 'px', height: r.h + 'px' });
   for (const id of ['#cropSvg', '#cropHandles']) {
     const svg = $(id);
-    Object.assign(svg.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
-    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    Object.assign(svg.style, { left: r.x + 'px', top: r.y + 'px', width: r.w + 'px', height: r.h + 'px' });
+    svg.setAttribute('viewBox', `0 0 ${r.w} ${r.h}`);
   }
-  pipPlace(false);
   drawCrop();
+}
+// 縮放 s 倍（1～4），讓照片上的 (u, v)（0～1）落在裁切區的 (mx, my)；放大後照片不會被拖到留出大片空白
+function zoomCrop(s, u, v, mx, my) {
+  const b = cropCtx.base, st = $('#cropStage').getBoundingClientRect(), pad = 26;
+  s = Math.min(4, Math.max(1, s));
+  if (s < 1.02) { cropCtx.zs = 1; placeCrop({ ...b }); return; }
+  const w = b.w * s, h = b.h * s;
+  const fit = (pos, size, view) => (size + pad * 2 <= view ? (view - size) / 2 : Math.min(pad, Math.max(view - size - pad, pos)));
+  cropCtx.zs = s;
+  placeCrop({ x: fit(mx - u * w, w, st.width), y: fit(my - v * h, h, st.height), w, h });
 }
 // 邊的中點（畫面座標）：有彎度時取曲線上的中點
 function edgeMid(i, w, h) {
@@ -1784,8 +1840,36 @@ function drawCrop() {
   const stage = $('#cropStage');
   const clamp = (v) => Math.min(1, Math.max(0, v));
   const local = (e) => { const b = stage.getBoundingClientRect(); return [e.clientX - b.left - cropCtx.rect.x, e.clientY - b.top - cropCtx.rect.y]; };
+  // 3.0.1 雙指縮放：兩指捏合放大縮小並平移；放大後單指按在沒有控制點的地方可以平移；在空白處點兩下恢復原尺寸。
+  // 第二指放下時，取消第一指正在拖的控制點（回到拖之前），避免縮放時順便把角拖走
+  const ptrs = new Map();
+  let pinch = null, pan = null, lastEmptyTap = 0;
+  const inStage = (x, y) => { const b = stage.getBoundingClientRect(); return [x - b.left, y - b.top]; };
+  const cancelDrag = () => {
+    const g = cropCtx.drag; if (!g) return;
+    cropCtx.corners = g.c0.map((p) => p.slice());
+    cropCtx.curve = g.k0 ? g.k0.map((k) => k.map((p) => p.slice())) : null;
+    cropCtx.drag = null; $('#loupe').style.display = 'none';
+    pipRequest(true); pipHideSoon(); drawCrop();
+  };
+  const startPinch = () => {
+    const [a, b] = [...ptrs.values()].map((p) => inStage(p[0], p[1]));
+    const r = cropCtx.rect, m = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    pinch = { d0: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, s0: cropCtx.zs, u: (m[0] - r.x) / r.w, v: (m[1] - r.y) / r.h };
+    pan = null;
+  };
+  const showLoupe = (lx, ly) => { if (cropCtx.zs < 2.5) loupe(lx, ly); else $('#loupe').style.display = 'none'; }; // 放大很多時不需要放大鏡
   stage.addEventListener('pointerdown', (e) => {
-    if (!cropCtx || cropCtx.drag) return;
+    if (!cropCtx) return;
+    ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+    if (ptrs.size >= 2) {
+      cancelDrag();
+      if (ptrs.size === 2) startPinch();
+      try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+      e.preventDefault();
+      return;
+    }
+    if (pinch || cropCtx.drag) return;
     if (e.target.closest('#pipFull')) { pipFullClose(); return; }
     const [lx, ly] = local(e);
     const { w, h } = cropCtx.rect;
@@ -1818,7 +1902,17 @@ function drawCrop() {
     }
     if (!best) {
       // 沒按到控制點：按在小視窗上就是移動或點開小視窗
-      if (e.target.closest('#pip') && $('#pip').classList.contains('vis')) { e.preventDefault(); pipFullOpen(); }
+      if (e.target.closest('#pip') && $('#pip').classList.contains('vis')) { e.preventDefault(); pipFullOpen(); return; }
+      // 空白處：點兩下恢復原尺寸；放大時按住可以平移
+      const now = Date.now();
+      if (cropCtx.zs > 1 && now - lastEmptyTap < 320) { lastEmptyTap = 0; zoomCrop(1); return; }
+      lastEmptyTap = now;
+      if (cropCtx.zs > 1) {
+        const r = cropCtx.rect;
+        pan = { id: e.pointerId, start: [e.clientX, e.clientY], r0: { ...r } };
+        try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
+      }
       return;
     }
     best.start = [lx, ly];
@@ -1828,10 +1922,26 @@ function drawCrop() {
     cropCtx.drag = best;
     stage.setPointerCapture(e.pointerId);
     e.preventDefault();
-    drawCrop(); loupe(lx, ly);
+    drawCrop(); showLoupe(lx, ly);
   });
   stage.addEventListener('pointermove', (e) => {
-    const g = cropCtx && cropCtx.drag;
+    if (!cropCtx) return;
+    if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pinch) {
+      if (ptrs.size < 2) return;
+      const [a, b] = [...ptrs.values()].slice(0, 2).map((p) => inStage(p[0], p[1]));
+      const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+      zoomCrop(pinch.s0 * d / pinch.d0, pinch.u, pinch.v, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+      return;
+    }
+    if (pan) {
+      if (e.pointerId !== pan.id) return;
+      // 平移＝縮放倍數不變、照片跟著手指移動（照片左上角＝裁切區的 (0,0) 往回推）
+      const r0 = pan.r0, nx = r0.x + e.clientX - pan.start[0], ny = r0.y + e.clientY - pan.start[1];
+      zoomCrop(cropCtx.zs, -nx / r0.w, -ny / r0.h, 0, 0);
+      return;
+    }
+    const g = cropCtx.drag;
     if (!g) return;
     const [lx, ly] = local(e);
     const { w, h } = cropCtx.rect;
@@ -1882,12 +1992,15 @@ function drawCrop() {
         }
       }
     }
-    drawCrop(); loupe(lx, ly);
+    drawCrop(); showLoupe(lx, ly);
     pipAvoid(lx + cropCtx.rect.x, ly + cropCtx.rect.y);
   });
   let lastRope = null; // 1.28：曲線模式點兩下某條邊＝把那條邊拉直
   const end = (e) => {
+    ptrs.delete(e.pointerId);
     if (!cropCtx) return;
+    if (pinch) { if (ptrs.size < 2) pinch = null; return; } // 捏合結束：剩下的手指不接著拖或平移
+    if (pan) { if (e.pointerId === pan.id) pan = null; return; }
     const g = cropCtx.drag, was = !!g;
     if (g && g.type === 'rope' && e.type === 'pointerup') {
       const [lx, ly] = local(e), now = Date.now();
@@ -1905,6 +2018,7 @@ function drawCrop() {
   window.ropePoint = (g) => { const C = cropCtx.corners, k = cropCtx.curve[g.i]; return edgePoint(C[g.i], k, C[(g.i + 1) % 4], g.s); };
   stage.addEventListener('pointerup', end);
   stage.addEventListener('pointercancel', end);
+  for (const t of ['pointerup', 'pointercancel']) window.addEventListener(t, (e) => { if (ptrs.has(e.pointerId) && !stage.contains(e.target)) end(e); }); // 在裁切區外放開的手指也要清掉
 
   // 放大鏡：顯示正在拖的點附近，直接畫出裁切邊、框外變暗；跟著手指，顯示在手指上方
   function loupe(fx, fy) {
@@ -2249,7 +2363,7 @@ function addSheet() {
     s.querySelectorAll('.srow').forEach((b) => b.onclick = () => { closeSheet(); startSource(b.dataset.s, state.docId); });
   });
 }
-$('#docAdd').onclick = addSheet;
+$('#docAi').onclick = () => aiFrameDoc(); // 3.0.1：原本的「新增頁面」（頁面列最後的＋已有）換成 AI 框選
 $('#docBack').onclick = () => history.back();
 $('#docTitle').onclick = renameDoc;
 // 改名（1.12 起不用瀏覽器內建對話框，改成底部輸入畫面，才能全選、有清除鈕）
@@ -2283,10 +2397,10 @@ $('#docMore').onclick = () => openSheet(`<h3>文件</h3>
     history.back();
   };
 });
-$('#docMode').onclick = () => openSheet(`<h3>統一調整</h3><button class="srow" data-ai="1">${ICON.ai}<span>AI 框選<span class="sub">用 AI 重新找出每一頁的紙張範圍</span></span></button><div class="note" style="margin:4px 4px 10px">選一個模式套用到全部頁面，接著可以調整這份文件統一的數值</div>${MODES.map((m) => `<button class="srow" data-m="${m.id}"><span>${m.name}<span class="sub">${modeDesc(m.id)}</span></span></button>`).join('')}`, (s) => {
+$('#docMode').onclick = () => openSheet(`<h3>統一調整</h3><div class="note" style="margin:4px 4px 10px">選一個模式套用到全部頁面，接著可以調整這份文件統一的數值</div>${MODES.map((m) => `<button class="srow" data-m="${m.id}"><span>${m.name}<span class="sub">${modeDesc(m.id)}</span></span></button>`).join('')}`, (s) => {
   s.querySelectorAll('.srow').forEach((b) => b.onclick = async () => {
     closeSheet();
-    if (b.dataset.ai) aiFrameDoc(); else openDocAdjust(b.dataset.m);
+    openDocAdjust(b.dataset.m);
   });
 });
 // 統一調整：全部頁面改成這個模式，再進入調整畫面（預覽第一頁，可左右切換預覽的頁面）
@@ -2988,6 +3102,8 @@ $('#btnSettings').onclick = () => {
     <div class="seg" id="setMode">${MODES.map((m) => `<button data-k="${m.id}" class="${settings.mode === m.id ? 'on' : ''}">${m.name}</button>`).join('')}</div>
     <div class="switch"><span>即時掃描自動拍攝<small>文件穩定約 1 秒後自動按快門</small></span><button class="tg ${settings.autoShutter ? 'on' : ''}" data-k="autoShutter"></button></div>
     <div class="switch"><span>拍照後先確認裁切<small>高畫質拍照後進入四角微調畫面</small></span><button class="tg ${settings.confirmCrop ? 'on' : ''}" data-k="confirmCrop"></button></div>
+    <div class="switch"><span>✨ 自動 AI 框選<small id="aiStat">即時掃描、高畫質拍照、相簿匯入都自動用 AI 框選紙張</small></span><button class="tg ${settings.autoAI ? 'on' : ''}" id="setAuto"></button></div>
+    <button class="srow" id="setAiUp" style="display:none"><span>有可升級的AI 引擎，點擊升級 ›<span class="sub">AI 框選速度更快，需要下載約 ${AI_UP_MB} MB</span></span></button>
     ${IS_IOS
     ? '<div class="note" style="margin:10px 2px 4px">橫拿拍攝：請關閉螢幕方向鎖定，直接橫拿就可以拍。</div>'
     : !hasMotion() ? '' : `<div class="switch"><span>橫拿拍攝<small>橫拿時按鈕跟著轉、拍好的頁自動轉正</small></span><button class="tg ${settings.landscape !== false ? 'on' : ''}" data-k="landscape"></button></div>`}
@@ -3003,6 +3119,36 @@ $('#btnSettings').onclick = () => {
     <div class="note" id="storeInfo"></div>
     <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
     s.querySelector('#setDefAdj').onclick = () => openDefAdj('bw');
+    // 3.0：還在用舊 AI 引擎的人（按過「暫時不要」或還沒被問）才顯示，升級後消失（3.0.1 搬到自動 AI 框選開關下方）
+    // 3.0.1：自動 AI 框選開關（和拍攝畫面的 AI 按鈕同一個設定，整個 App 共用）；下面一行顯示 AI 資料的狀態。
+    // 還沒下載的人打開時詢問下載，下載完才算開啟；按「暫時不要」或下載失敗維持關閉
+    const aiStat = async () => {
+      const st = await aiState(), el = s.querySelector('#aiStat'), up = s.querySelector('#setAiUp');
+      if (!el) return;
+      const ok = st.model && aiPickEngine(st);
+      el.textContent = !ok ? `即時掃描、高畫質拍照、相簿匯入都自動用 AI 框選。尚未下載 AI 資料（約 ${AI_DL_MB} MB），打開時會詢問下載`
+        : '即時掃描、高畫質拍照、相簿匯入都自動用 AI 框選。AI 資料已下載，離線也能用';
+      if (up) up.style.display = aiUpgradable(st) ? '' : 'none';
+    };
+    aiStat();
+    s.querySelector('#setAiUp').onclick = async () => {
+      if (await aiUpgrade()) { aiStat(); toast('AI 引擎已升級'); }
+    };
+    s.querySelector('#setAuto').onclick = async () => {
+      const b = s.querySelector('#setAuto');
+      if (settings.autoAI) {
+        settings.autoAI = false; settings.aiAsked = true; saveSettings(); b.classList.remove('on');
+        return;
+      }
+      if (await aiCached()) {
+        settings.autoAI = true; settings.aiAsked = true; saveSettings(); b.classList.add('on');
+        return;
+      }
+      const ok = await aiEnsure(true); // 詢問視窗會蓋掉設定畫面，結束後再打開設定
+      if (ok) { settings.autoAI = true; settings.aiAsked = true; saveSettings(); }
+      $('#btnSettings').onclick();
+      if (ok) toast('已開啟自動 AI 框選');
+    };
     if (s.querySelector('#setCamPerm')) s.querySelector('#setCamPerm').onclick = () => camPermHelp();
     const camDesc = () => {
       const q = settings.camQ || 'auto', t = camTier();
@@ -3028,7 +3174,7 @@ $('#btnSettings').onclick = () => {
       // 目前打開的文件立即更新，其他文件打開時才更新
       if (state.docId && (current === 'doc' || current === 'page')) getDocPages(state.docId).then(({ pages }) => ensureFresh(pages));
     });
-    s.querySelectorAll('.tg').forEach((b) => b.onclick = () => { settings[b.dataset.k] = !settings[b.dataset.k]; saveSettings(); b.classList.toggle('on', settings[b.dataset.k]); });
+    s.querySelectorAll('.tg[data-k]').forEach((b) => b.onclick = () => { settings[b.dataset.k] = !settings[b.dataset.k]; saveSettings(); b.classList.toggle('on', settings[b.dataset.k]); });
     if (navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then((e) => {
       s.querySelector('#storeInfo').textContent = `已使用空間 ${(e.usage / 1048576).toFixed(0)} MB`;
     });
@@ -3066,11 +3212,11 @@ function openHelp() {
       <li>光線不足時，點左上角的 ⚡ 開燈。</li>
       <li>iPhone 每次都要按「允許」使用相機：到 iPhone 的「設定」→「App」→「Safari」→「相機」，改成「允許」。</li></ul>
     <h4>裁切</h4><ul>
-      <li>拖四個角或拖邊來調整範圍，放大鏡能幫你對準。</li>
+      <li>拖四個角或拖邊來調整範圍，放大鏡能幫你對準。兩指捏合可以放大畫面，調得更精準；在空白處點兩下恢復原尺寸。</li>
       <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平；點兩下某條邊可以把它拉直。切回「直線」時彎度會保留，方便拖角或整條邊。</li>
       <li>拖動時，畫面的另一角會出現成品預覽，可以邊拉邊確認譜是不是平的；按下方的「成品」可以看大圖。</li>
-      <li>框得很不準時，按「AI 框選」讓 AI 重新找紙；書頁的上下邊有彎曲時，AI 會自動貼合彎度。在「統一調整」裡按「AI 框選」，可以一次處理全部頁面。</li>
-      <li>即時掃描左上角的「AI」按鈕可以開啟「自動 AI 框選」：拍完自動用 AI 框好（iPhone 邊拍邊處理；Android 按「完成」後一次處理，立即裁切時先框好再進裁切畫面）。</li></ul>
+      <li>框得很不準時，按「AI 框選」讓 AI 重新找紙；書頁的上下邊有彎曲時，AI 會自動貼合彎度。文件頁下方的「✨ AI 框選」可以一次處理全部頁面。</li>
+      <li>即時掃描左上角的「AI」按鈕，或「設定」裡的開關，可以開啟「自動 AI 框選」：即時掃描、高畫質拍照、相簿匯入都會自動用 AI 框好（即時掃描時 iPhone 邊拍邊處理；Android 按「完成」後一次處理，立即裁切時先框好再進裁切畫面）。</li></ul>
     <h4>模式與調整</h4><ul>
       <li>黑白最適合樂譜，灰階、彩色適合有照片或顏色的講義。</li>
       <li>「調整」可以改曝光、濃淡、去雜點等。按住畫面，可以和原本的數值比較。</li>
@@ -3149,47 +3295,102 @@ function undoBar(msg, fn) {
   undoT = setTimeout(() => b.classList.remove('show'), fn ? 8000 : 3000);
 }
 
-/* ---------- AI 框選（1.25） ----------
+/* ---------- AI 框選（1.25；3.0 新引擎） ----------
    U²-Net（u2netp，4.6 MB）在 ai-worker.js 以 ONNX Runtime Web 執行，找出「哪一塊是紙」；
-   worker.js 的 maskQuad 再把遮罩變成四個角並沿紙邊貼齊。模型與執行環境約 15 MB，第一次使用時才下載，
-   存在獨立的快取 cocoscan-ai（換版本不會被清掉），之後離線也能用 */
-const AI_FILES = [['lib/ai/ort.wasm.min.js', 'text/javascript', 145070], ['lib/ai/ort-wasm-simd.wasm', 'application/wasm', 10551547], ['lib/ai/u2netp.onnx', 'application/octet-stream', 4574861]];
+   worker.js 的 maskQuad 再把遮罩變成四個角並沿紙邊貼齊。模型與執行環境第一次使用時才下載，
+   存在獨立的快取 cocoscan-ai（換版本不會被清掉），之後離線也能用。
+   3.0：新引擎 ONNX Runtime Web 1.30.0（可用 GPU／WebGPU，約 32 MB；作者決定一律裝新的）。
+     - 下載完在背景比較一次 CPU 與 GPU（aiBench），快的記在 settings.aiEP（iPhone 17 實測 GPU 快 4 倍多，Y31 GPU 反而慢）
+     - 舊使用者（快取裡只有 1.17.3 舊引擎）：舊引擎照常可用；進拍攝畫面詢問一次升級（settings.aiUpAsked），
+       按「暫時不要」的在設定「自動 AI 框選」開關下方出現（3.0.1 前在「預設調整數值」下方）「有可升級的AI 引擎，點擊升級」，升級後消失
+     - 安全網：新引擎載入失敗（ENGINE: 錯誤）→ settings.aiForceOld，下載舊引擎改用它；GPU 出錯由 ai-worker 自動改用 CPU */
+const AI_MODEL = ['lib/ai/u2netp.onnx', 'application/octet-stream', 4574861];
+const AI_NEW = [['lib/ai/ort.webgpu.min.js', 'text/javascript', 66417], ['lib/ai/ort-wasm-simd-threaded.asyncify.mjs', 'text/javascript', 53057], ['lib/ai/ort-wasm-simd-threaded.asyncify.wasm', 'application/wasm', 26781914]];
+const AI_OLD = [['lib/ai/ort.wasm.min.js', 'text/javascript', 145070], ['lib/ai/ort-wasm-simd.wasm', 'application/wasm', 10551547]];
+const AI_NEW_VER = '1.30.0';
 const AI_CACHE = 'cocoscan-ai';
-let aiWorker = null, aiSeq = 0;
+const mbOf = (list) => Math.ceil(list.reduce((a, f) => a + f[2], 0) / 1e6); // 跟使用者說的 MB（新下載 32、升級 27）
+let aiWorker = null, aiSeq = 0, aiInitP = null, aiEngineNow = null;
 const aiPending = new Map();
-function aiCall(payload, transfer) {
-  if (!aiWorker) {
-    aiWorker = new Worker('ai-worker.js');
-    aiWorker.onmessage = (e) => { const p = aiPending.get(e.data.id); if (!p) return; aiPending.delete(e.data.id); e.data.ok ? p.res(e.data.result) : p.rej(new Error(e.data.error)); };
-    aiWorker.onerror = (e) => { for (const p of aiPending.values()) p.rej(new Error(e.message || 'AI 載入失敗')); aiPending.clear(); aiWorker = null; };
-  }
-  return new Promise((res, rej) => { const id = ++aiSeq; aiPending.set(id, { res, rej }); aiWorker.postMessage(Object.assign({ id }, payload), transfer || []); });
-}
-async function aiCached() {
+async function aiHas(list) {
   try {
     if (!('caches' in window)) return false;
     const c = await caches.open(AI_CACHE);
-    for (const [f] of AI_FILES) if (!(await c.match(new URL(f, location.href).href))) return false;
+    for (const [f] of list) if (!(await c.match(new URL(f, location.href).href))) return false;
     return true;
   } catch (_) { return false; }
 }
-async function aiEnsure(inApp, noAsk) {
-  if (await aiCached()) return true;
-  const ask = 'AI 框選需要先下載約 15 MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。要下載嗎？';
-  if (!noAsk && (inApp ? !(await askSheet('下載 AI 資料', ask, '下載')) : !confirm(ask))) return false; // 2.1：noAsk＝已經在預設開啟的詢問裡問過
-  const total = AI_FILES.reduce((a, f) => a + f[2], 0);
+async function aiState() {
+  const [model, neu, old] = await Promise.all([aiHas([AI_MODEL]), aiHas(AI_NEW), aiHas(AI_OLD)]);
+  return { model, neu, old };
+}
+// 能用 AI 的引擎：新引擎（沒被安全網停用）優先，其次舊引擎
+function aiPickEngine(st) { return st.neu && !settings.aiForceOld ? 'new' : st.old ? 'old' : st.neu ? 'new' : null; }
+async function aiCached() { const st = await aiState(); return st.model && !!aiPickEngine(st); }
+const aiUpgradable = (st) => st.model && st.old && !st.neu && !settings.aiForceOld;
+function aiReset() {
+  if (aiWorker) aiWorker.terminate();
+  for (const p of aiPending.values()) p.rej(new Error('AI 重新載入'));
+  aiPending.clear(); aiWorker = null; aiInitP = null; aiEngineNow = null;
+}
+function aiPost(payload, transfer) {
+  return new Promise((res, rej) => { const id = ++aiSeq; aiPending.set(id, { res, rej }); aiWorker.postMessage(Object.assign({ id }, payload), transfer || []); });
+}
+function aiInit() {
+  if (aiInitP) return aiInitP;
+  aiInitP = (async () => {
+    const st = await aiState();
+    const eng = aiPickEngine(st) || 'new';
+    aiWorker = new Worker('ai-worker.js');
+    aiWorker.onmessage = (e) => { const p = aiPending.get(e.data.id); if (!p) return; aiPending.delete(e.data.id); e.data.ok ? p.res(e.data.result) : p.rej(new Error(e.data.error)); };
+    aiWorker.onerror = (e) => { for (const p of aiPending.values()) p.rej(new Error('ENGINE:' + (e.message || 'AI 載入失敗'))); aiPending.clear(); aiWorker = null; aiInitP = null; };
+    await aiPost({ type: 'init', engine: eng, ep: settings.aiEP || 'wasm' });
+    aiEngineNow = eng;
+    // 新引擎還沒比較過 CPU／GPU（例如剛下載完、或新版第一次用）：在背景比較一次
+    if (eng === 'new' && settings.aiBenchV !== AI_NEW_VER) aiBench();
+  })();
+  aiInitP.catch(() => { aiInitP = null; }); // 載入失敗下次重來
+  return aiInitP;
+}
+async function aiBench() {
+  try {
+    const r = await aiPost({ type: 'bench' });
+    settings.aiEP = r.gpu != null && r.gpu < r.cpu * 0.8 ? 'webgpu' : 'wasm';
+    settings.aiBenchV = AI_NEW_VER; saveSettings();
+    console.info('AI bench', r, settings.aiEP);
+    await aiPost({ type: 'setEP', ep: settings.aiEP });
+  } catch (e) { console.warn('AI bench', e); }
+}
+// 送一個工作給 AI；新引擎載入失敗（ENGINE:）時啟動安全網：改用舊引擎再試一次
+async function aiCall(payload, transfer, retried) {
+  const keep = payload.buffer ? payload.buffer.slice(0) : null; // 送出時 buffer 會被轉走，重試要用備份
+  try {
+    await aiInit();
+    return await aiPost(payload, transfer);
+  } catch (e) {
+    const m = String(e && e.message);
+    if (retried || !m.startsWith('ENGINE:') || aiEngineNow === 'old') throw new Error(m.replace(/^ENGINE:/, ''));
+    console.warn('AI 新引擎載入失敗，改用舊引擎', m);
+    settings.aiForceOld = true; saveSettings(); aiReset();
+    if (!(await aiHas(AI_OLD)) && !(await aiDownload(AI_OLD, 'AI 改用相容模式，下載中…'))) throw new Error('無法載入 AI 引擎');
+    return aiCall(keep ? Object.assign({}, payload, { buffer: keep }) : payload, keep ? [keep] : [], true);
+  }
+}
+// 下載一組檔案放進 AI 快取（顯示百分比）
+async function aiDownload(list, label) {
+  const total = list.reduce((a, f) => a + f[2], 0);
   let got = 0;
-  busy('下載 AI 資料中… 0%');
+  busy(`${label} 0%`);
   try {
     const cache = 'caches' in window ? await caches.open(AI_CACHE) : null;
-    for (const [f, type] of AI_FILES) {
+    for (const [f, type] of list) {
       const res = await fetch(f, { cache: 'no-store' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const rd = res.body.getReader(), parts = [];
       for (;;) {
         const { done, value } = await rd.read(); if (done) break;
         parts.push(value); got += value.length;
-        $('#busyMsg').textContent = `下載 AI 資料中… ${Math.min(99, Math.round((got / total) * 100))}%`;
+        $('#busyMsg').textContent = `${label} ${Math.min(99, Math.round((got / total) * 100))}%`;
       }
       if (cache) await cache.put(new URL(f, location.href).href, new Response(new Blob(parts, { type }), { headers: { 'Content-Type': type } }));
     }
@@ -3200,6 +3401,29 @@ async function aiEnsure(inApp, noAsk) {
     toast('下載失敗，請確認網路後再試一次');
     return false;
   }
+}
+async function aiDropOld() {
+  try { const c = await caches.open(AI_CACHE); for (const [f] of AI_OLD) await c.delete(new URL(f, location.href).href); } catch (_) {}
+}
+const AI_DL_MB = mbOf([AI_MODEL, ...AI_NEW]), AI_UP_MB = mbOf(AI_NEW);
+async function aiEnsure(inApp, noAsk) {
+  if (await aiCached()) return true;
+  const ask = `AI 框選需要先下載約 ${AI_DL_MB} MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。要下載嗎？`;
+  if (!noAsk && (inApp ? !(await askSheet('下載 AI 資料', ask, '下載')) : !confirm(ask))) return false; // 2.1：noAsk＝已經在預設開啟的詢問裡問過
+  const st = await aiState();
+  const need = [...(st.model ? [] : [AI_MODEL]), ...AI_NEW];
+  if (!(await aiDownload(need, '下載 AI 資料中…'))) return false;
+  settings.aiForceOld = false; settings.aiBenchV = null; saveSettings();
+  await aiDropOld(); aiReset();
+  return true;
+}
+// 舊使用者升級成新引擎（拍攝畫面的詢問、設定裡的按鈕）
+async function aiUpgrade() {
+  if (!(await aiDownload(AI_NEW, '升級 AI 引擎中…'))) return false;
+  settings.aiForceOld = false; settings.aiBenchV = null; settings.aiUpAsked = true; saveSettings();
+  await aiDropOld(); aiReset();
+  aiInit().catch(() => {}); // 載入新引擎並在背景比較 CPU／GPU
+  return true;
 }
 // 一張圖 → { corners } 或 { reject }
 async function aiFrame(img) {
@@ -3292,8 +3516,8 @@ async function aiFrameDoc() {
 
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
-   日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '2.2';
+   日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
+const APP_VER = '3.0.1';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -3312,6 +3536,13 @@ const CHANGELOG = [
   { v: 'v2', items: [
     { t: '正式版上線 🎉', since: '2.0.1' },
   ] },
+  { v: 'v3', items: [
+    { t: 'AI框選全面加速：新的AI引擎會運用 GPU 提升框選速度', since: '3.0' },
+    { t: '最佳化 AI 書頁框選，攤開的書框得更準', since: '3.0' },
+    { t: '自動 AI 框選預設開啟，並於第一次拍攝時詢問下載', since: '3.0' },
+    { t: '加入主畫面說明，並新增影片教學', since: '3.0' },
+    { t: '框選畫面支援雙指縮放；相簿匯入與高畫質拍照也能自動 AI 框選', since: '3.0.1' },
+  ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
 const verNum = (v) => v.split('.').map(Number);
@@ -3319,11 +3550,11 @@ const verGt = (a, b) => { const x = verNum(a), y = verNum(b); for (let i = 0; i 
 function logSeen() { try { return localStorage.getItem(LOG_KEY); } catch (_) { return null; } }
 function logMarkSeen() { try { localStorage.setItem(LOG_KEY, APP_VER); } catch (_) {} }
 // 1.29：只有「目前這一版」新增的項目是紅字；之前版本的一律黑字
-const isNewItem = (it) => it.since === APP_VER;
+const isNewItem = (it) => it.since === APP_VER; // 只用來判斷要不要自動跳出日誌（3.0.1 起不再標紅字，一律黑字）
 function showChangelog() {
   const seen = logSeen();
   const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  $('#logList').innerHTML = CHANGELOG.map((g) => `<div class="log-item"><div class="log-ver">${esc(g.v)}</div><ul>${g.items.map((it) => `<li${isNewItem(it) ? ' class="log-hl"' : ''}>${esc(it.t)}</li>`).join('')}</ul></div>`).join('');
+  $('#logList').innerHTML = CHANGELOG.map((g) => `<div class="log-item"><div class="log-ver">${esc(g.v)}</div><ul>${g.items.map((it) => `<li>${esc(it.t)}</li>`).join('')}</ul></div>`).join('');
   $('#logCurrent').textContent = '目前版本 v' + APP_VER;
   logMarkSeen();
   openModal('logModal');

@@ -1,6 +1,10 @@
-AI 框選使用的第三方檔案（1.25）
+AI 框選使用的第三方檔案
 
-ort.wasm.min.js、ort-wasm-simd.wasm
+ort.webgpu.min.js、ort-wasm-simd-threaded.asyncify.mjs、ort-wasm-simd-threaded.asyncify.wasm（3.0 起使用）
+  ONNX Runtime Web 1.30.0（Microsoft） — MIT License
+  https://github.com/microsoft/onnxruntime
+
+ort.wasm.min.js、ort-wasm-simd.wasm（1.25 起；3.0 起作為新引擎無法載入時的備用）
   ONNX Runtime Web 1.17.3（Microsoft） — MIT License
   https://github.com/microsoft/onnxruntime
 

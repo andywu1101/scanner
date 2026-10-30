@@ -36,7 +36,7 @@
 
 > ⚠️ **請先加入主畫面，再開始掃描。** 在瀏覽器裡掃描的資料，不會出現在主畫面的 App 裡。
 
-第一次開啟會下載影像引擎（約 10 MB）；第一次使用 AI 框選時會再詢問是否下載 AI 資料（約 15 MB）。下載後存在手機裡，之後沒有網路也能使用。
+第一次開啟會下載影像引擎（約 10 MB）；第一次使用 AI 框選時會再詢問是否下載 AI 資料（約 32 MB）。下載後存在手機裡，之後沒有網路也能使用。
 
 ## 三種拍法
 
@@ -63,6 +63,7 @@
 
 ## 版本紀錄
 
+- **v3.0.1（2026 年 10 月）**：AI 框選全面加速（支援的手機會運用 GPU）、AI 書頁框選最佳化（攤開的書框得更準）、自動 AI 框選預設開啟（即時掃描、高畫質拍照、相簿匯入都適用）、框選畫面支援雙指縮放、加入主畫面說明新增影片教學。
 - **v2.0（2026 年 10 月）**：正式版上線。
 - **v1.x（開發期間）**：自動抓邊與透視校正、書溝分頁、四種增強模式、多頁管理與 PDF 匯出、AI 框選、曲線拉平、即時預覽調整、上一步／下一步、畫質分檔、iPad 與寬螢幕版面、橫拿拍攝等功能陸續完成。
 
@@ -73,7 +74,7 @@
 | 專案 | 用途 | 授權 |
 |---|---|---|
 | [OpenCV.js](https://opencv.org/) 4.10 | 紙張偵測、透視校正、影像處理 | Apache 2.0 |
-| [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) 1.17.3 | 在手機上執行 AI 模型 | MIT |
+| [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) 1.30.0（備用 1.17.3） | 在手機上執行 AI 模型（可運用 GPU） | MIT |
 | [U²-Net](https://github.com/xuebinqin/U-2-Net)（u2netp，ONNX 檔取自 [rembg](https://github.com/danielgatis/rembg)） | AI 框選 | Apache 2.0（rembg：MIT） |
 | [SortableJS](https://github.com/SortableJS/Sortable) 1.15.3 | 頁面拖曳排序 | MIT |
 | [QR Code Generator](https://github.com/kazuhikoarase/qrcode-generator)（Kazuhiko Arase） | 電腦版顯示網址 QR Code | MIT |

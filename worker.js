@@ -457,9 +457,106 @@ function refineEdges(G, w, h, q) {
   return nq.map((p) => [Math.min(w - 1, Math.max(0, p[0])), Math.min(h - 1, Math.max(0, p[1]))]);
 }
 
+// 書頁框選最佳化（3.0）：AI 框 q 與原本偵測（凹口／書溝）切出的單頁 c（都已排成 左上、右上、右下、左下）。
+// 上下邊對得上（差 4% 以內），只有左或右一側 AI 比較寬（多 3% 以上）→ AI 多框了隔壁頁，依序判斷：
+//  1) 那一條範圍裡找得到整條書溝／頁緣（八成取樣點）且線上沒有印刷內容 → 沿這條線切
+//  2) c 的分頁線只在一端和 AI 分開（另一端差 2% 以內）、上下邊又幾乎完全吻合 → 旁邊的紙蓋住一個角，不切（維持 AI＝三邊延長推回角）
+//  3) 其他 → 沿 c 的分頁線切（線上有印刷內容就不切）
+// 回傳換掉那一側的四邊形，或 null（不切）
+function gutterSide(q, c, w, h, G) {
+  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const dy = (i, j) => Math.abs(mid(q[i], q[j])[1] - mid(c[i], c[j])[1]) / h;
+  const dxs = (i, j) => (mid(c[i], c[j])[0] - mid(q[i], q[j])[0]) / w; // 正＝c 在 q 的右邊
+  const top = dy(0, 1), bot = dy(3, 2);
+  if (top > 0.04 || bot > 0.04) return null;
+  const L = dxs(0, 3), R = dxs(1, 2); // L>0：c 的左邊在 AI 左邊的內側；R<0：c 的右邊在 AI 右邊的內側
+  const line = (a, b) => { const A = b[1] - a[1], B = a[0] - b[0]; return [A, B, A * a[0] + B * a[1]]; };
+  const X = (l1, l2) => { const d = l1[0] * l2[1] - l2[0] * l1[1]; if (Math.abs(d) < 1e-9) return null; return [(l1[2] * l2[1] - l2[2] * l1[1]) / d, (l1[0] * l2[2] - l2[0] * l1[2]) / d]; };
+  const lt = line(q[0], q[1]), lb = line(q[3], q[2]);
+  // 分頁線上不能有印刷內容：真的書溝／頁邊是空白（頂多一條陰影）；切過五線譜、音符的就是誤判
+  const ink = (a, b) => {
+    const v = [];
+    for (let k = 0; k <= 80; k++) {
+      const t = 0.08 + 0.84 * k / 80, x = a[0] + (b[0] - a[0]) * t, y = a[1] + (b[1] - a[1]) * t;
+      let m = 255;
+      for (let d = -2; d <= 2; d++) { const xx = Math.round(x + d), yy = Math.round(y); if (xx >= 0 && yy >= 0 && xx < w && yy < h) m = Math.min(m, G[yy * w + xx]); }
+      v.push(m);
+    }
+    const med = v.slice().sort((p, r) => p - r)[v.length >> 1];
+    return v.filter((m) => m < med * 0.6).length / v.length;
+  };
+  let side = null;
+  if (L > 0.03 && Math.abs(R) < 0.04) side = 'L';
+  else if (R < -0.03 && Math.abs(L) < 0.04) side = 'R';
+  if (!side) return null;
+  // 在 AI 那一側和原本偵測的分頁線附近，找一條「整條都看得到書溝／頁緣」的直線：
+  // 每個取樣點橫向看，有細細的暗線（書溝摺痕、裝訂孔）或明顯的明暗落差（上面那頁的頁緣）就算有
+  const yOn = (l, x) => (l[2] - l[0] * x) / l[1];
+  const dir = side === 'L' ? 1 : -1, qa = side === 'L' ? q[0] : q[1], qb = side === 'L' ? q[3] : q[2];
+  const ca = side === 'L' ? c[0] : c[1], cb = side === 'L' ? c[3] : c[2];
+  const sc = line(ca, cb), ct = X(lt, sc), cbm = X(lb, sc);
+  if (!ct || !cbm) return null;
+  const rt = [-w * 0.005, w * 0.25], rb = rt; // 離 AI 那一側 -0.5%～25%（至少有一端要離開 2.5% 以上，否則就是紙張外緣本身）
+  // 特徵圖只算搜尋範圍那一條（左右各多 40 px）：
+  //  有細暗線（書溝摺痕、裝訂孔）或明顯明暗落差（上面那頁的頁緣），而且往這一頁內側 3～9 px 的小方塊裡沒有墨水
+  //  （五線譜開頭、音符邊緣也有落差，但旁邊有墨水，不算）
+  const xs = [qa[0] + dir * rt[0], qa[0] + dir * rt[1], qb[0] + dir * rb[0], qb[0] + dir * rb[1]];
+  const X0 = Math.max(0, Math.floor(Math.min(...xs)) - 40), X1 = Math.min(w - 1, Math.ceil(Math.max(...xs)) + 40), SW = X1 - X0 + 1;
+  const sub = new Float32Array(SW * h); for (let y = 0; y < h; y++) for (let x = 0; x < SW; x++) sub[y * SW + x] = G[y * w + X0 + x];
+  const filt = (A, r, isMin) => { // 分離式最小／最大值濾波（方塊 (2r+1)²）
+    const T = new Float32Array(A.length), O = new Float32Array(A.length);
+    for (let y = 0; y < h; y++) for (let x = 0; x < SW; x++) {
+      let v = A[y * SW + x];
+      for (let xx = Math.max(0, x - r), e = Math.min(SW - 1, x + r); xx <= e; xx++) { const u = A[y * SW + xx]; if (isMin ? u < v : u > v) v = u; }
+      T[y * SW + x] = v;
+    }
+    for (let y = 0; y < h; y++) for (let x = 0; x < SW; x++) {
+      let v = T[y * SW + x];
+      for (let yy = Math.max(0, y - r), e = Math.min(h - 1, y + r); yy <= e; yy++) { const u = T[yy * SW + x]; if (isMin ? u < v : u > v) v = u; }
+      O[y * SW + x] = v;
+    }
+    return O;
+  };
+  const mn = filt(sub, 3, true), mx = filt(sub, 15, false), F = new Uint8Array(SW * h);
+  for (let y = 0; y < h; y++) for (let x = 6; x < SW - 6; x++) {
+    const xi = x + dir * 6; if (xi < 0 || xi >= SW) continue;
+    const i = y * SW + x;
+    if (mn[y * SW + xi] < mx[i] - 25) continue;
+    const S = (d) => sub[i + d];
+    const dep = (S(-5) + S(5)) / 2 - Math.min(S(-1), S(0), S(1));
+    const st = Math.abs((S(-6) + S(-5) + S(-4) + S(-3)) / 4 - (S(3) + S(4) + S(5) + S(6)) / 4);
+    if (dep >= 4 || st >= 7) F[i] = 1;
+  }
+  const feat = (x, y) => { const xi = Math.round(x) - X0, yi = Math.round(y); if (yi < 0 || yi >= h || xi < 1 || xi >= SW - 1) return false; const i = yi * SW + xi; return F[i] || F[i - 1] || F[i + 1]; };
+  const N = 48, st = 2;
+  let best = null;
+  for (let ot = rt[0]; ot <= rt[1]; ot += st) {
+    const xt = qa[0] + dir * ot, yt = yOn(lt, xt);
+    for (let ob = rb[0]; ob <= rb[1]; ob += st) {
+      if (Math.max(ot, ob) < w * 0.025) continue;
+      const xb = qb[0] + dir * ob, yb = yOn(lb, xb);
+      let n = 0;
+      for (let k = 0; k < N; k++) { const t = 0.06 + 0.88 * k / (N - 1); if (feat(xt + (xb - xt) * t, yt + (yb - yt) * t)) n++; }
+      if (!best || n > best.n) best = { n, a: [xt, yt], b: [xb, yb] };
+    }
+  }
+  const put = (a, b) => (side === 'L' ? [a, q[1], q[2], b] : [q[0], a, b, q[3]]);
+  // 1) 整條都看得到書溝／頁緣（八成以上的取樣點），而且線上沒有印刷內容 → 用這條線
+  if (best && best.n / N >= 0.8 && ink(best.a, best.b) <= 0.06) return put(best.a, best.b);
+  // 2) 原本偵測的分頁線只在一端和 AI 那側分開（另一端幾乎重合，呈三角形），而 AI 的上下邊又和它完全對得上：
+  //    這是旁邊疊著別張紙、把這張的一個角蓋住（凹口是別張紙的邊造成的），不是書。
+  //    維持 AI 的框＝沿著看得到的三條邊延長，推回被蓋住的角
+  const ot = (ct[0] - qa[0]) * dir / w, ob = (cbm[0] - qb[0]) * dir / w;
+  if (Math.min(ot, ob) < 0.02 && top < 0.015 && bot < 0.015) return null;
+  // 3) 其他：用原本偵測的分頁線
+  if (ink(ct, cbm) > 0.06) return null;
+  return put(ct, cbm);
+}
+
 // AI 框選（1.25）：依 U²-Net 的遮罩（320×320）求紙張四角。遮罩只抓「哪一塊是紙」，邊緣較粗，
 // 先取遮罩最大區塊的外形近似成四邊形，再用 refineEdges 沿真正的紙邊貼齊。
 // 回傳 { corners } 或 { reject: 原因 }：形狀不像一頁、和遮罩差太多、或像攤開的書被整個框進去（書本交給原本的偵測）
+
 function maskQuad(cv, msg) {
   const { width: w, height: h } = msg;
   const rgba = new Uint8Array(msg.buffer);
@@ -505,11 +602,18 @@ function maskQuad(cv, msg) {
   clean();
   if (qa < ca * 0.8 || qa > ca * 1.25) return { reject: 'mismatch' };
   if (asp < 0.5) return { reject: 'aspect' };
-  // 攤開的書：原本的偵測切出單頁（凹口／書溝）時，AI 框得比它大很多就代表把整本書框進去了
+  // 攤開的書：AI 只認得「紙」，兩頁連在一起都是紙，不會在書溝停下來。
+  // 原本的偵測切出單頁（凹口／書溝）時：AI 只在左或右一側比它寬 → gutterSide 修正那一邊；修不了而且 AI 框得比它大很多＝把整本書框進去了，交給原本的偵測
+  let cut = null;
   try {
     const r = detectQuad(cv, rgba, w, h, false);
-    if (r && (r.notch || r.gutter) && qa / (w * h) > r.area * 1.3) return { reject: 'book' };
+    if (r && (r.notch || r.gutter) && r.corners) {
+      const c = orderCorners(r.corners.map((p) => [p[0] * w, p[1] * h]));
+      cut = gutterSide(q, c, w, h, G0);
+      if (!cut && qa / (w * h) > r.area * 1.3) return { reject: 'book' };
+    }
   } catch (e) { /* 比對失敗就不管 */ }
+  if (cut) q = cut;
   const cx = q.reduce((a, p) => a + p[0], 0) / 4, cy = q.reduce((a, p) => a + p[1], 0) / 4, inset = 0.006;
   const qq = q.map((p) => [p[0] + (cx - p[0]) * inset * 2, p[1] + (cy - p[1]) * inset * 2]);
   let cq = qq, curve = null;
