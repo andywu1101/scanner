@@ -4048,7 +4048,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '4.0.1';
+const APP_VER = '4.0.2';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -4099,7 +4099,8 @@ function showChangelog() {
   setTimeout(() => { $('#logList').scrollTop = $('#logList').scrollHeight; }, 30);
 }
 // 有沒有「看過之後才新增」的項目
-function hasNewLog() { return logSeen() !== APP_VER && CHANGELOG.some((g) => g.items.some((it) => isNewItem(it))); }
+// 4.0.2：改成「比上次看過的版本還新」的項目（原本只認 since === APP_VER，出小版本 4.0.1 時 since '4.0' 的項目就不會跳）
+function hasNewLog() { const seen = logSeen() || '0'; return seen !== APP_VER && CHANGELOG.some((g) => g.items.some((it) => it.since && verGt(it.since, seen))); }
 $('#cvVer').textContent = '▸ v' + APP_VER;
 $('#cvVer').onclick = () => showChangelog();
 $('#cvReport').onclick = () => window.open(REPORT_URL, '_blank', 'noopener');
