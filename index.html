@@ -300,8 +300,13 @@ input[type=file]{display:none}
 #burst{background:var(--cam);color:#fff}
 #burst .bar{background:var(--cam)}
 #burstStage{flex:1;display:flex;align-items:center;justify-content:center;padding:18px;overflow:hidden;position:relative}
-#burstImg{max-width:100%;max-height:100%;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,.5);visibility:hidden}
-#burstCount{position:absolute;top:14px;left:50%;transform:translateX(-50%)}
+#burstPw{position:absolute;left:0;top:0;width:0;height:0;visibility:hidden}
+#burstPw canvas{position:absolute;left:0;top:0;width:100%;height:100%;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+#burstPw .cr-clip{position:absolute;left:0;top:0;width:100%;height:100%;overflow:hidden}
+#burstSpin{position:absolute;inset:0;display:none;place-items:center}
+#burstSpin.on{display:grid}
+#burstSpin .spin{border-color:rgba(255,255,255,.3);border-top-color:#fff}
+#burstCount{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:2}
 #burst .controls{flex:none;padding:6px 20px calc(var(--sb) + 18px)}
 #burst .row{display:flex;align-items:center;justify-content:space-between;margin-top:12px}
 #burstNext{width:84px;height:84px;border-radius:50%;background:var(--cream);color:var(--cocoa);display:grid;place-items:center;box-shadow:0 6px 20px rgba(0,0,0,.35)}
@@ -373,6 +378,31 @@ input[type=file]{display:none}
 @keyframes okpop{0%{opacity:0;transform:translate(-50%,-50%) scale(.6)}15%{opacity:1;transform:translate(-50%,-50%) scale(1.08)}25%{transform:translate(-50%,-50%) scale(1)}80%{opacity:1}100%{opacity:0;transform:translate(-50%,-50%) scale(1)}}
 #liveThumb.bump{animation:bump .45s ease-out}
 @keyframes bump{0%{transform:scale(1)}35%{transform:scale(1.22)}100%{transform:scale(1)}}
+/* 3.1 拍攝動畫：#capFx 蓋在整個畫面上（不擋點擊），座標用畫面座標；紙張用 matrix3d 從斜的四邊形拉成正面 */
+#capFx{position:fixed;inset:0;z-index:40;pointer-events:none;display:none;overflow:hidden}
+#capFx.on{display:block}
+#capFx .cf-dim{position:absolute;inset:0;background:#000;opacity:0}
+#capFx .cf-pw{position:absolute;left:0;top:0;width:100%;height:100%;transform-origin:0 0}
+#capFx canvas{position:absolute;left:0;top:0;transform-origin:0 0}
+#capFx .cf-clip,#capRes .cr-clip{position:absolute;left:0;top:0;width:100%;height:100%;overflow:hidden}
+.cf-band{position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;display:none;will-change:transform,opacity;
+  background:linear-gradient(180deg,rgba(217,150,40,0) 0%,rgba(217,150,40,.28) 55%,rgba(250,204,90,.55) 88%,rgba(255,255,255,.95) 97%,rgba(250,204,90,.9) 100%);box-shadow:0 4px 14px 2px rgba(250,204,90,.75)}
+/* 4.0.1：等待超過 3 秒時掃描光「呼吸」：疊一層更亮、光暈更大的光，只動透明度（交給圖形處理器，手機忙時照樣會動） */
+.cf-band::after{content:"";position:absolute;inset:0;opacity:0;pointer-events:none;
+  background:linear-gradient(180deg,rgba(250,204,90,0) 0%,rgba(250,204,90,.35) 60%,rgba(255,236,170,.85) 92%,#fff 98%,rgba(255,220,120,1) 100%);box-shadow:0 6px 26px 8px rgba(255,210,100,.85)}
+.cf-band.wait::after{animation:breathe 1.2s ease-in-out infinite}
+@keyframes breathe{0%,100%{opacity:0}50%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.cf-band.wait::after{animation:none;opacity:.6}}
+#capRes{position:fixed;inset:0;z-index:45;background:#1C130E;display:none;flex-direction:column;padding:calc(var(--st) + 8px) 0 calc(var(--sb) + 12px)}
+#capRes.on{display:flex}
+#capRes .cr-top{color:#fff;text-align:center;font-size:16px;font-weight:700;padding:8px 0 4px}
+#capRes .cr-stage{position:relative;flex:1;overflow:hidden}
+#capRes .cr-pw{position:absolute;left:0;top:0;transform-origin:0 0}
+#capRes canvas{position:absolute;left:0;top:0;width:100%;height:100%;box-shadow:0 6px 24px rgba(0,0,0,.45)}
+#capRes .cr-spin{position:absolute;inset:0;display:none;place-items:center}
+#capRes .cr-spin.on{display:grid}
+#capRes .cr-bar{display:flex;gap:12px;padding:10px 20px 0}
+#capRes .cr-bar .bigbtn{margin-top:0}
 .sponsor-empty{font-size:15px;color:var(--muted);padding:6px 4px;line-height:1.7}
 /* 使用教學 */
 .help h4{font-size:15.5px;color:var(--cocoa-d);margin:16px 4px 6px}
@@ -648,7 +678,7 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
     <button class="tool" id="cropRetake"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>重拍</button>
     <button class="tool" id="cropCurve"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7c4-3 14-3 18 0M3 17c4 3 14 3 18 0M3 7v10M21 7v10"/></svg><span>直線</span></button>
     <button class="tool" id="cropFull"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 3v3M16 3v3M8 21v-3M16 21v-3M3 8h3M3 16h3M21 8h-3M21 16h-3"/></svg>全頁</button>
-    <button class="tool" id="cropNext" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><path d="M12 10v6M9 13h6"/></svg>確定，拍下一張</button>
+    <button class="tool" id="cropRot"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="1.5"/><path d="M3 13V8a4 4 0 0 1 4-4h6"/><path d="M10 1l3 3-3 3"/></svg>向右轉</button>
     <button class="tool" id="cropPrev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><rect x="12" y="10" width="7" height="6" rx="1" fill="currentColor" stroke="none"/></svg>成品</button>
     <button class="tool" id="cropAuto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M12 8l1.2 2.8L16 12l-2.8 1.2L12 16l-1.2-2.8L8 12l2.8-1.2z"/></svg>自動偵測</button>
     <button class="tool" id="cropAI"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.6L18.5 9l-4.7 1.6L12 15l-1.8-4.4L5.5 9l4.7-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>AI 框選</button>
@@ -677,7 +707,8 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
     <button class="tbtn solid" id="burstDone">完成</button>
   </header>
   <div id="burstStage">
-    <img id="burstImg" alt="">
+    <div id="burstPw"><canvas class="cr-base"></canvas><div class="cr-clip"><canvas class="cr-out"></canvas></div><div class="cf-band cr-band"></div></div>
+    <div class="cr-spin" id="burstSpin"><div class="spin"></div></div>
     <div class="pill" id="burstCount">尚未拍攝</div>
   </div>
   <div class="controls">
@@ -685,7 +716,7 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
     <div class="row">
       <button class="side" id="burstRetake"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 2v6h6"/><path d="M2.7 15.6A9 9 0 1 0 5 6.5L2.5 8"/></svg>重拍上一張</button>
       <div class="side"><button id="burstNext" aria-label="拍下一張"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></button><span style="margin-top:6px;font-size:13.5px">拍下一張</span></div>
-      <span class="side"></span>
+      <button class="side" id="burstEdit"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>繼續編輯</button>
     </div>
   </div>
 </section>
@@ -847,6 +878,11 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
   </div>
 </div>
 <div id="undoBar"><span></span><button id="undoBtn">還原</button></div>
+<!-- 3.1 拍攝動畫（即時掃描：拉平 → 金色掃描光 → 飛進縮圖） -->
+<div id="capFx"><div class="cf-dim"></div><div class="cf-pw"><canvas class="cf-paper"></canvas><div class="cf-clip"><canvas class="cf-scan"></canvas></div><div class="cf-band"></div></div></div>
+<!-- 3.1 立即裁切：按確定後先看成品 -->
+<div id="capRes"><div class="cr-top">成品</div><div class="cr-stage"><div class="cr-pw"><canvas class="cr-base"></canvas><div class="cr-clip"><canvas class="cr-out"></canvas></div><div class="cf-band cr-band"></div></div><div class="cr-spin"><div class="spin"></div></div></div>
+<div class="cr-bar"><button class="bigbtn alt" id="crEdit">繼續編輯</button><button class="bigbtn" id="crOk">確定</button></div></div>
 <div id="busy"><div class="box"><div class="spin"></div><div id="busyMsg">處理中…</div></div></div>
 <div id="toast"></div>
 <input type="file" id="fileCamera" accept="image/*" capture="environment">
