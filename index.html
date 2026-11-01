@@ -40,6 +40,25 @@ window.__a2hsPrompt = null;
 window.addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); window.__a2hsPrompt = e; });
 window.addEventListener('appinstalled', function () { window.__a2hsPrompt = null; });
 </script>
+<!-- 4.1.5：標準網址（測試版用同一份檔案，也指向正式版，搜尋排名集中在正式版）與給搜尋引擎看的 App 身分資料 -->
+<link rel="canonical" href="https://andywu1101.github.io/scanner/">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "伍線譜樂譜掃描",
+  "alternateName": ["伍線譜掃描", "伍線譜", "Sheet Music Scanner"],
+  "url": "https://andywu1101.github.io/scanner/",
+  "description": "用手機把樂譜、講義掃成清晰的 PDF：自動抓邊、彎曲書頁拉平、去雜點。免註冊，資料只存在自己的手機。",
+  "applicationCategory": "UtilitiesApplication",
+  "operatingSystem": "iOS, Android",
+  "browserRequirements": "需要 Safari（iPhone）或 Chrome（Android）",
+  "inLanguage": "zh-Hant-TW",
+  "image": "https://andywu1101.github.io/scanner/og-image.png",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "TWD" },
+  "author": { "@type": "Person", "name": "伍祐恆", "alternateName": "Heng-Heng Wu" }
+}
+</script>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -70,6 +89,11 @@ svg{display:block}
 .bar h1{font-size:19px;margin:0 0 0 4px;font-weight:700;letter-spacing:.06em;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bar .title-btn{flex:1;text-align:left;font-size:17px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:6px 4px}
 .ibtn{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;flex:none}
+/* 4.1：單頁右上角「✨ 精修」：外框＝未精修，處理中顯示進度，亮金色＝已精修 */
+.aibtn{flex:none;height:32px;padding:0 11px;border-radius:16px;border:1.5px solid var(--caramel);color:var(--cocoa);background:transparent;font-size:13.5px;font-weight:700;white-space:nowrap;margin-right:2px}
+.aibtn.busy{background:var(--cream);color:var(--cocoa-l)}
+.aibtn.on{background:linear-gradient(135deg,#F2C48D,#E5A85E);border-color:#D9963F;color:#4A2F22}
+.aibtn:active{transform:scale(.95)}
 .ibtn:active{background:rgba(107,70,50,.1)}
 .ibtn svg{width:24px;height:24px}
 .tbtn{padding:8px 12px;border-radius:10px;font-weight:600;font-size:15px}
@@ -170,7 +194,8 @@ svg{display:block}
 /* 單頁檢視 */
 #page{background:#E9DFD3}
 #viewStage{position:relative;flex:1;overflow:hidden;touch-action:none}
-#viewImg{position:absolute;left:0;top:0;transform-origin:0 0;box-shadow:0 4px 22px rgba(58,40,30,.25);background:#fff;max-width:none;max-height:none}
+#viewImg{position:absolute;left:0;top:0;transform-origin:0 0;box-shadow:0 4px 22px rgba(58,40,30,.25);background:#fff;max-width:none;max-height:none;
+  pointer-events:none;-webkit-user-drag:none;user-select:none;-webkit-user-select:none} /* 4.1.4：長按不會被 iPhone 拿起來拖曳（手勢都由 #viewStage 處理） */
 .navarrow{position:absolute;top:50%;transform:translateY(-50%);width:40px;height:56px;display:grid;place-items:center;color:var(--cocoa);background:rgba(255,252,248,.75);border-radius:12px;z-index:2}
 .navarrow svg{width:22px;height:22px}
 #prevBtn{left:6px}#nextBtn{right:6px}
@@ -748,10 +773,11 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
   <header class="bar">
     <button class="ibtn" id="pageBack" aria-label="返回"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
     <h1 id="pageTitle" style="text-align:center;font-size:16px"></h1>
+    <button class="aibtn" id="pageAi" aria-label="AI 精修">✨ 精修</button>
     <button class="ibtn" id="pageDel" aria-label="刪除此頁"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></svg></button>
   </header>
   <div id="viewStage">
-    <img id="viewImg" alt="">
+    <img id="viewImg" alt="" draggable="false">
     <button class="navarrow" id="prevBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
     <button class="navarrow" id="nextBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
     <div id="viewBusy"><div class="spin"></div></div>

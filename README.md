@@ -63,6 +63,12 @@
 
 ## 版本紀錄
 
+- **v4.1.5（2026 年 11 月）**：讓 Google 搜尋更容易找到本工具（網站地圖、正式網址設定）。
+- **v4.1.4（2026 年 11 月）**：修正長按比較精修前後時，照片被系統拖曳。
+- **v4.1.3（2026 年 11 月）**：修正 AI 精修關掉再打開的錯誤；按住畫面可比較精修前後。
+- **v4.1.2（2026 年 11 月）**：更新日誌加入 AI 精修。
+- **v4.1.1（2026 年 10 月）**：AI 精修後微調範圍或關掉再開，不用重新處理。
+- **v4.1（2026 年 10 月）**：新增單頁「✨ AI 精修」，讓樂譜線條與文字更清晰。
 - **v4.0.2（2026 年 10 月）**：修正升級後更新日誌沒有自動跳出。
 - **v4.0.1（2026 年 10 月）**：處理較久時，掃描光會「呼吸」提示手機仍在處理中。
 - **v4.0（2026 年 10 月）**：即時掃描與高畫質拍照加入拍攝動畫與音效（掃描光跟著處理速度只刷一遍）；立即裁切每拍一張就編輯並先確認成品，編輯時暫停相機省電；高畫質拍照框選後直接顯示成品、可繼續編輯；框選畫面可向右轉，高畫質拍照與相簿匯入自動轉正躺著的樂譜。
@@ -79,6 +85,7 @@
 | [OpenCV.js](https://opencv.org/) 4.10 | 紙張偵測、透視校正、影像處理 | Apache 2.0 |
 | [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) 1.30.0（備用 1.17.3） | 在手機上執行 AI 模型（可運用 GPU） | MIT |
 | [U²-Net](https://github.com/xuebinqin/U-2-Net)（u2netp，ONNX 檔取自 [rembg](https://github.com/danielgatis/rembg)） | AI 框選 | Apache 2.0（rembg：MIT） |
+| [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)（realesr-animevideov3） | AI 精修 | BSD 3-Clause |
 | [SortableJS](https://github.com/SortableJS/Sortable) 1.15.3 | 頁面拖曳排序 | MIT |
 | [QR Code Generator](https://github.com/kazuhikoarase/qrcode-generator)（Kazuhiko Arase） | 電腦版顯示網址 QR Code | MIT |
 

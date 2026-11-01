@@ -73,6 +73,45 @@ async function bench() {
   return { cpu, gpu };
 }
 
+/* 4.1：AI 精修（Real-ESRGAN animevideov3「線稿」模型，2.5 MB，BSD-3）。app.js 把拉正後的頁面縮小、切成固定大小的塊送來，
+   每塊 SR_IN×SR_IN（RGBA）→ 放大 4 倍的 RGBA；接縫由 app.js 多讀邊緣處理。和框選用不同的 session，GPU／CPU 各自選（srEP） */
+const SR_MODEL = new URL('lib/ai/sr-anime.onnx', self.location.href).href;
+let srSess = null, srSessEP = null, srEP = 'wasm';
+async function srCreate(want) { return ort.InferenceSession.create(SR_MODEL, { executionProviders: [want], graphOptimizationLevel: 'all' }); }
+async function srRelease() { if (srSess) { try { await srSess.release(); } catch (_) {} } srSess = null; srSessEP = null; }
+async function srGet() {
+  if (srSess && srSessEP === srEP) return srSess;
+  await srRelease();
+  try { srSess = await srCreate(srEP); srSessEP = srEP; }
+  catch (err) { if (srEP !== 'webgpu') throw err; srEP = 'wasm'; srSess = await srCreate('wasm'); srSessEP = 'wasm'; }
+  return srSess;
+}
+async function srRun(s, buf, n) {
+  const src = new Uint8ClampedArray(buf), N2 = n * n, f = new Float32Array(3 * N2);
+  for (let i = 0; i < N2; i++) { f[i] = src[i * 4] / 255; f[N2 + i] = src[i * 4 + 1] / 255; f[2 * N2 + i] = src[i * 4 + 2] / 255; }
+  const out = await s.run({ [s.inputNames[0]]: new ort.Tensor('float32', f, [1, 3, n, n]) });
+  const t = out[s.outputNames[0]], y = t.getData ? await t.getData() : t.data;
+  const O = n * 4, M = O * O, p = new Uint8ClampedArray(M * 4);
+  for (let i = 0; i < M; i++) { const a = i * 4; p[a] = y[i] * 255 + 0.5; p[a + 1] = y[M + i] * 255 + 0.5; p[a + 2] = y[2 * M + i] * 255 + 0.5; p[a + 3] = 255; }
+  return p.buffer;
+}
+// 精修測速：同一塊各跑兩次（第一次含 GPU 準備時間），量第二次；回傳每塊毫秒 { cpu, gpu }
+async function srBench(n) {
+  const buf = () => new Uint8ClampedArray(n * n * 4).fill(200).buffer;
+  await srRelease();
+  let cpu = null, gpu = null, t;
+  const sc = await srCreate('wasm');
+  await srRun(sc, buf(), n); t = performance.now(); await srRun(sc, buf(), n); cpu = performance.now() - t;
+  try { await sc.release(); } catch (_) {}
+  let hasGpu = false;
+  try { hasGpu = !!(self.navigator && self.navigator.gpu && (await self.navigator.gpu.requestAdapter())); } catch (_) {}
+  if (engine === 'new' && hasGpu) {
+    try { const sg = await srCreate('webgpu'); await srRun(sg, buf(), n); t = performance.now(); await srRun(sg, buf(), n); gpu = performance.now() - t; try { await sg.release(); } catch (_) {} }
+    catch (_) { gpu = null; }
+  }
+  return { cpu, gpu };
+}
+
 self.onmessage = async (e) => {
   const { id, type } = e.data;
   try {
@@ -80,6 +119,15 @@ self.onmessage = async (e) => {
     if (!engine) load('old');
     if (type === 'bench') { self.postMessage({ id, ok: true, result: await bench() }); return; }
     if (type === 'setEP') { ep = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: ep }); return; }
+    if (type === 'srBench') { self.postMessage({ id, ok: true, result: await srBench(e.data.n) }); return; }
+    if (type === 'srEP') { srEP = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: srEP }); return; }
+    if (type === 'srTile') {
+      let r;
+      try { r = await srRun(await srGet(), e.data.buffer, e.data.n); }
+      catch (err) { if (srSessEP !== 'webgpu') throw err; srEP = 'wasm'; r = await srRun(await srGet(), e.data.buffer, e.data.n); } // GPU 出錯改用 CPU（buffer 還在：送進來的是複本）
+      self.postMessage({ id, ok: true, result: r }, [r]); return;
+    }
+    if (type === 'srRelease') { await srRelease(); self.postMessage({ id, ok: true, result: null }); return; }
     const s = await getSess();
     if (type === 'warm') { self.postMessage({ id, ok: true, result: { ep: sessEP } }); return; }
     const f = input(e.data.buffer);
