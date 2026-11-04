@@ -736,55 +736,7 @@ async function finishBurst() {
 }
 $('#burstDone').onclick = finishBurst;
 
-// 3.1.7：自動轉正。iPhone 系統相機平拿往下拍時常把照片存成躺的（相機自己判斷錯方向，網頁管不到）。
-// 拉正後看線條方向：五線譜、歌詞、文字行放正時是橫的，躺著時變直的。用「每一條窄帶裡的行／列輪廓起伏」比較橫、直兩個方向
-// （書頁彎曲時長線會斷，所以分 16 條窄帶各自算）。分數 = 橫 / (橫 + 直)；樣張 57 張直式＋4 張橫式：放正 ≥ 0.54、躺著 ≤ 0.46。
-// 低於 0.45 才轉（明顯躺著），轉的方向固定順時針 90 度（作者實測大多是這個方向；轉錯可在框選畫面再按「向右轉」）。
-// 看的是線條不是長寬，所以橫式樂譜不會被轉。任何錯誤都當作不轉。
-function lineScore(g, W, H) {
-  // 自適應二值化（25×25 區域平均減 5 以下算墨跡，等同 OpenCV ADAPTIVE_THRESH_MEAN_C）
-  const I = new Float64Array((W + 1) * (H + 1));
-  for (let y = 0; y < H; y++) { let s = 0; for (let x = 0; x < W; x++) { s += g[y * W + x]; I[(y + 1) * (W + 1) + x + 1] = I[y * (W + 1) + x + 1] + s; } }
-  const b = new Uint8Array(W * H), R = 12;
-  for (let y = 0; y < H; y++) {
-    const y0 = Math.max(0, y - R), y1 = Math.min(H, y + R + 1);
-    for (let x = 0; x < W; x++) {
-      const x0 = Math.max(0, x - R), x1 = Math.min(W, x + R + 1);
-      const m = (I[y1 * (W + 1) + x1] - I[y0 * (W + 1) + x1] - I[y1 * (W + 1) + x0] + I[y0 * (W + 1) + x0]) / ((y1 - y0) * (x1 - x0));
-      b[y * W + x] = g[y * W + x] <= m - 5 ? 1 : 0;
-    }
-  }
-  const K = 16;
-  const prof = (rows, cols, at) => { // 每條窄帶：沿 rows 方向的輪廓，相鄰差的平均
-    const st = Math.floor(cols / K); let v = 0;
-    for (let i = 0; i < K; i++) {
-      let prev = -1, acc = 0;
-      for (let r = 0; r < rows; r++) { let s = 0; for (let c = i * st; c < (i + 1) * st; c++) s += at(r, c); s /= st; if (prev >= 0) acc += Math.abs(s - prev); prev = s; }
-      v += acc / (rows - 1);
-    }
-    return v;
-  };
-  const h = prof(H, W, (r, c) => b[r * W + c]), v = prof(W, H, (r, c) => b[c * W + r]);
-  return h / (h + v + 1e-9);
-}
-async function autoRot(blob, corners, curve) {
-  try {
-    await whenReady();
-    const { img, url } = await loadImg(blob);
-    const f = smallFrame(img, 1600); URL.revokeObjectURL(url);
-    const r = await wcall('process', { buffer: f.data.buffer, width: f.width, height: f.height, corners, curve: curve || null, upscale: 'off', rotation: 0, mode: 'original', params: fillAdj('original') }, [f.data.buffer]);
-    const s = Math.min(1, 900 / Math.max(r.width, r.height)), W = Math.max(32, Math.round(r.width * s)), H = Math.max(32, Math.round(r.height * s));
-    const src = canvasOf(r.width, r.height); src.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
-    const c = canvasOf(W, H), x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(src, 0, 0, W, H); src.width = src.height = 0;
-    const d = x.getImageData(0, 0, W, H).data, g = new Float32Array(W * H);
-    for (let i = 0; i < W * H; i++) g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
-    c.width = c.height = 0;
-    const sc = lineScore(g, W, H);
-    autoRot.last = sc;
-    return sc < 0.45 ? 90 : 0;
-  } catch (e) { console.warn('autoRot', e); return 0; }
-}
-
+// 4.1.6：3.1.7 的自動轉正（看線條方向，躺著就順時針轉 90 度）拿掉：作者實測仍有誤轉，框選畫面已有「向右轉」
 // 3.0.1：高畫質拍照、相簿匯入也跟著「自動 AI 框選」開關（開著而且 AI 已下載才用）。
 // 回傳 { corners, curve }；AI 判斷不適合或失敗回傳 { fail, msg }（呼叫的地方保留一般偵測的框）
 async function aiAutoOn() { return !!settings.autoAI && (await aiCached()); }
@@ -810,16 +762,15 @@ $('#fileCamera').addEventListener('change', async (e) => {
     if (r.corners) { corners = r.corners; curve = r.curve; }
     else toast(r.fail === 'reject' ? 'AI 判斷不適合，保留原框' : 'AI 框選失敗：' + (r.msg || '未知原因'));
   }
-  const rot0 = await autoRot(blob, corners, curve); // 3.1.7：iPhone 平拿拍照常把照片存成躺的，躺著就自動順時針轉正
   unbusy();
   if (settings.confirmCrop) {
     openCrop({
-      blob, corners, curve, rotation: rot0, retake: true, burst: true,
+      blob, corners, curve, retake: true, burst: true,
       onConfirm: async (c, cv, edited, rot) => { sfxPrime(); const pg = await burstAdd(blob, c, cv, rot); if (edited) { pg.cropUser = true; await DB.put('pages', pg); } toBurst(); },
       onRetake: () => openCamera(),
     });
   } else {
-    await burstAdd(blob, corners, curve, rot0);
+    await burstAdd(blob, corners, curve);
     toBurst();
     toast(`已加入第 ${burst.count} 張`);
   }
@@ -841,7 +792,7 @@ $('#fileGallery').addEventListener('change', async (e) => {
         const r = await aiCorners(blob);
         if (r.corners) { c = r.corners; cv = r.curve; } else if (r.fail === 'reject') rejected++; else aiErr = aiErr || r.msg || '未知原因';
       }
-      await addPage(docId, blob, c, cv, false, await autoRot(blob, c, cv)); // 3.1.7：躺著的自動轉正
+      await addPage(docId, blob, c, cv);
     } catch (err) { toast(err.message); }
   }
   unbusy();
@@ -865,6 +816,7 @@ async function startLive(docId) {
     running: true, docId, fromDoc: !!docId, count: 0, stream: null, track: null, ic: null, lastQuad: null, shown: null,
     hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0, paused: false,
     aiLater: [], lastRes: null, lastPageId: null, deferring: false, deferDone: null, finishing: false, camOff: false,
+    seenT: performance.now(), idleT0: performance.now(), tipShown: false, tipOn: false, // 4.1.7
   });
   aiErrShown = false; aiTag(aiPend ? 'AI ' + aiPend : '', !!aiPend);
   pauseQueue(); // 掃描期間暫停高解析度處理，讓抓邊保持流暢
@@ -1152,7 +1104,8 @@ async function liveLoop() {
     } catch (e) { console.warn(e); }
     live.detecting = false;
   }
-  if (live.running) setTimeout(liveLoop, 20);
+  // 4.1.7：連續 3 秒找不到紙就降到約每秒 5 次（白色背景時偵測一直全速跑，iPhone 會過熱）；一找到紙就恢復
+  if (live.running) setTimeout(liveLoop, settings.autoShutter && performance.now() - (live.seenT || 0) > 3000 ? 200 : 20);
 }
 
 function onDetect(r, sig, full, sharp, gt) {
@@ -1160,6 +1113,8 @@ function onDetect(r, sig, full, sharp, gt) {
   const now = performance.now();
   const ok = r && r.area > 0.1;
   const qs = ok ? quadSig(gt, r.corners) : null;
+  // 4.1.7：自動拍攝 10 秒都沒拍下（找不到紙或一直穩定不下來），提示一次可以改手動（每次進入拍攝畫面只一次）
+  if (live.armed && !live.tipShown && now - (live.idleT0 || now) > 10000) { live.tipShown = true; live.tipOn = true; }
   live.dbg = { motion: live.prevQs && qs ? qsDiff(qs, live.prevQs) : null, change: live.capturedQs && qs ? qsDiff(qs, live.capturedQs) : null };
 
   // 拍完後：等換頁／移開才重新開始，期間不顯示框
@@ -1181,7 +1136,7 @@ function onDetect(r, sig, full, sharp, gt) {
     live.miss++;
     live.cand = [];
     if (live.miss >= 4 && live.lockQ) resetLock();
-    if (!live.lockQ) { setRing(0); setHint(live.count ? '放入下一頁' : '將文件放進畫面中'); }
+    if (!live.lockQ) { setRing(0); setHint(live.tipOn ? WAIT_TIP : live.count ? '放入下一頁' : '將文件放進畫面中'); }
     return;
   }
   live.miss = 0;
@@ -1191,7 +1146,7 @@ function onDetect(r, sig, full, sharp, gt) {
     // 尚未鎖定：需要連續 3 格位置一致，才確定是文件
     if (live.cand.length && maxDisp(q, live.cand[live.cand.length - 1]) > 0.05) live.cand = [];
     live.cand.push(q);
-    if (live.cand.length < 3) { setHint('尋找文件中…'); return; }
+    if (live.cand.length < 3) { setHint(live.tipOn ? WAIT_TIP : '尋找文件中…'); return; }
     live.lockQ = medianQuad(live.cand);
     live.acc = live.cand.slice();
     live.cand = [];
@@ -1208,6 +1163,7 @@ function onDetect(r, sig, full, sharp, gt) {
     live.lockQ = medianQuad(live.acc);
   }
   live.lastQuad = live.lockQ;
+  live.seenT = now; // 4.1.7：「找到紙」＝框已鎖定（白色背景時偵測常回報亂跳的框，鎖不住，不算找到）
 
   // 紙內容在動（手經過、正在翻頁）→ 重新倒數
   const motion = live.prevQs ? qsDiff(qs, live.prevQs) : 0; // qs 是依這一格實際四角取樣
@@ -1228,7 +1184,7 @@ function onDetect(r, sig, full, sharp, gt) {
   live.edge = edgeBlocked(live.lockQ);
   if (live.edge) {
     live.stableSince = now; live.progress = 0; live.best = null;
-    setRing(0); setHint('請稍微拉遠一點'); return;
+    setRing(0); setHint(live.tipOn ? WAIT_TIP : '請稍微拉遠一點'); return;
   }
 
   // 記錄倒數期間最清楚的一格
@@ -1236,7 +1192,7 @@ function onDetect(r, sig, full, sharp, gt) {
 
   if (!settings.autoShutter) { setRing(0); setHint('按下快門拍攝', true); return; }
   setRing(progress);
-  setHint('對準了，保持住…', true);
+  if (live.tipOn && progress < 0.05) { setHint(WAIT_TIP); } else { live.tipOn = false; setHint('對準了，保持住…', true); }
   if (progress >= 1 && Date.now() - live.lastCapT > 800) {
     const b = live.best;
     capture(sig, b ? b.canvas : null, b ? b.quad : live.lockQ);
@@ -1342,7 +1298,7 @@ function flash() {
 }
 async function capture(sig, full, quadAt, userPress) {
   if (live.capturing || !live.running || live.paused) return;
-  live.capturing = true;
+  live.capturing = true; live.tipOn = false; live.idleT0 = performance.now() + 1e9; // 4.1.7：拍下後提示消失；回到拍攝才重新計時
   const capRot = pageRotNow(); // 1.35：橫拿拍的頁自動轉正（按下快門那一刻的方向）
   // 1.19：哪些照片要交給使用者自己裁切
   //  - 手動拍攝模式：每一張（不找框，存整張）
@@ -1450,7 +1406,7 @@ async function capture(sig, full, quadAt, userPress) {
     if (!live.thumbUrl) th.querySelector('img').src = blobUrl('live:last', blob, page.id);
     if (thumbFrame) setLiveThumb(thumbFrame, corners, null, page.id, capRot); else refreshLiveThumb(page.id);
     updResChip();
-    live.lastCapT = defT0 || Date.now(); live.miss = 0; live.best = null;
+    live.lastCapT = defT0 || Date.now(); live.miss = 0; live.best = null; live.idleT0 = performance.now(); // 4.1.7
     if (!quad) { live.armed = true; resetLock(); }
     if (now2crop) {
       // 3.1：立即裁切＝每拍一張就進框選（1.19～3.0 只有手動拍攝、或框沒穩就自己按快門的才進）
@@ -1471,7 +1427,7 @@ async function capture(sig, full, quadAt, userPress) {
       return;
     }
     // 1.29：不進裁切畫面的頁：iPhone 邊拍邊在背景跑 AI；Android 等按「完成」再一次跑（避免弱手機拍攝變卡）
-    if (settings.autoAI) { if (IS_IOS) aiBg(page.id, blob, corners, live.count); else live.aiLater.push(page.id); }
+    if (settings.autoAI) live.aiLater.push(page.id); // 4.1.7：iPhone 也改成按「完成」後一次處理（拍攝時不跑 AI，減少發熱）
   } catch (e) {
     console.error(e); shotFx(''); if (fx) fx.stop(); endDefer(); toast('拍攝失敗：' + e.message);
     live.armed = true; resetLock();
@@ -1628,7 +1584,7 @@ async function removeLivePage(pageId) {
   if (last) { live.lastPageId = last.id; th.querySelector('img').src = blobUrl('live:last', last.original, last.id); refreshLiveThumb(last.id); }
 }
 function liveResume() {
-  live.paused = false;
+  live.paused = false; live.idleT0 = live.seenT = performance.now(); // 4.1.7
   if (!live.track || live.track.readyState === 'ended') { finishLive(); return; } // 中途被切到背景，相機已經關了
   camResume(); // 3.1.5：相機恢復送畫面
   // 1.20：iPhone 從裁切畫面回來時，相機畫面會用錯誤的大小重畫（縮成約四分之三、四周變黑）。
@@ -1640,6 +1596,7 @@ function liveResume() {
   else hideHint();
 }
 const MANUAL_HINT = '手動拍攝：拍完後再自己調整範圍';
+const WAIT_TIP = '找不到紙張邊緣？可以點右上角「自動拍攝」改成手動拍攝'; // 4.1.7
 function manualHint() { live.manualHintUntil = performance.now() + 3000; setHint(MANUAL_HINT); }
 function updateLiveBtns() {
   $('#aiBtn').classList.toggle('on', !!settings.autoAI);
@@ -1669,7 +1626,7 @@ $('#liveThumb').onclick = () => finishLive();
 $('#autoBtn').onclick = () => {
   settings.autoShutter = !settings.autoShutter; saveSettings();
   updateLiveBtns();
-  live.armed = true; resetLock(); setRing(0);
+  live.armed = true; resetLock(); setRing(0); live.tipOn = false; live.idleT0 = live.seenT = performance.now(); // 4.1.7
   if (settings.autoShutter) { setHint('將文件放進畫面中'); liveTip('自動拍攝', '對準文件，穩定後自動拍下'); }
   else { manualHint(); liveTip('手動拍攝', '不自動框選，拍完再自己調整範圍'); }
 };
@@ -3794,7 +3751,7 @@ function openHelp() {
       <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平；點兩下某條邊可以把它拉直。切回「直線」時彎度會保留，方便拖角或整條邊。</li>
       <li>拖動時，畫面的另一角會出現成品預覽，可以邊拉邊確認譜是不是平的；按下方的「成品」可以看大圖。</li>
       <li>框得很不準時，按「AI 框選」讓 AI 重新找紙；書頁的上下邊有彎曲時，AI 會自動貼合彎度。文件頁下方的「✨ AI 框選」可以一次處理全部頁面。</li>
-      <li>即時掃描左上角的「AI」按鈕，或「設定」裡的開關，可以開啟「自動 AI 框選」：即時掃描、高畫質拍照、相簿匯入都會自動用 AI 框好（即時掃描時 iPhone 邊拍邊處理；Android 按「完成」後一次處理，立即裁切時先框好再進裁切畫面）。</li></ul>
+      <li>即時掃描左上角的「AI」按鈕，或「設定」裡的開關，可以開啟「自動 AI 框選」：即時掃描、高畫質拍照、相簿匯入都會自動用 AI 框好（即時掃描稍後裁切時，按「完成」後一次處理；立即裁切時先框好再進裁切畫面）。</li></ul>
     <h4>模式與調整</h4><ul>
       <li>黑白最適合樂譜，灰階、彩色適合有照片或顏色的講義。</li>
       <li>「調整」可以改曝光、濃淡、去雜點等。按住畫面，可以和原本的數值比較。</li>
@@ -4252,7 +4209,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '4.1.5';
+const APP_VER = '4.1.7';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -4283,8 +4240,8 @@ const CHANGELOG = [
     { t: '即時掃描、高畫質拍照加入框選動畫與音效', since: '4.0' },
     { t: '最佳化立即裁切：編輯時暫停相機，減少耗電與發熱', since: '4.0' },
     { t: '最佳化高畫質拍照流程體驗', since: '4.0' },
-    { t: '新增樂譜拍攝自動轉向功能，將自動偵測樂譜的方向', since: '4.0' },
     { t: '新增 ✨ AI 精修：讓樂譜線條與文字更清晰', since: '4.1.2' },
+    { t: '最佳化拍攝運作流程，減少拍攝時發熱', since: '4.1.7' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
