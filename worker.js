@@ -1346,6 +1346,152 @@ function cropWarp(cv, msg) {
   return finish(cv, warped, 0);
 }
 
+/* ---------- 4.2：AI 框選 × TEED 邊緣 互助 ----------
+   TEED（MIT，0.25 MB）在 ai-worker.js 算出整張照片的邊緣強度圖，跟 AI 遮罩一起送來 maskQuad。*/
+// T = { buffer: Uint8Array(0~255 邊緣強度), width, height }（照片長邊 640、寬高為 8 的倍數）
+// 1) TEED 自己框一個框（紙張＝沒有邊緣線、不碰畫面邊的最大區塊）
+// 2) AI 的四條邊和 TEED 的四條邊逐條比：沿著邊有多少比例貼著連續的 TEED 邊緣，明顯貼得好的那條勝出
+// 3) AI 放棄時（包括誤判成攤開的書），TEED 有把握就整個框用 TEED 的
+// 4) 換成 TEED 的上下邊，用 TEED 邊緣找彎度；沒換的邊保留 AI 的彎度
+function teedRegionQuad(cv, T) {
+  const W = T.width, H = T.height, E = T.data;
+  for (const [th, dil] of [[133, 5], [154, 3], [133, 7]]) {
+    const b = new cv.Mat(H, W, cv.CV_8UC1); let bd = b.data; // 先取出來：每次讀 .data 都會重建陣列，很慢
+    for (let i = 0; i < W * H; i++) bd[i] = E[i] >= th ? 1 : 0;
+    const k = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(dil, dil));
+    cv.dilate(b, b, k); k.delete();
+    bd = b.data; for (let i = 0; i < W * H; i++) bd[i] = 1 - bd[i];
+    const lab = new cv.Mat(), st = new cv.Mat(), ce = new cv.Mat();
+    const n = cv.connectedComponentsWithStats(b, lab, st, ce, 4, cv.CV_32S);
+    let best = -1, ba = 0;
+    for (let i = 1; i < n; i++) {
+      const x = st.intAt(i, 0), y = st.intAt(i, 1), w = st.intAt(i, 2), h = st.intAt(i, 3);
+      if (x === 0 || y === 0 || x + w >= W || y + h >= H || w * h < W * H * 0.12) continue;
+      if (w * h > ba) { ba = w * h; best = i; }
+    }
+    if (best < 0) { [b, lab, st, ce].forEach((m) => m.delete()); continue; }
+    const m = new cv.Mat(H, W, cv.CV_8UC1), L = lab.data32S, md = m.data;
+    for (let i = 0; i < W * H; i++) md[i] = L[i] === best ? 255 : 0;
+    [b, lab, st, ce].forEach((x) => x.delete());
+    const cs = new cv.MatVector(), hi = new cv.Mat();
+    cv.findContours(m, cs, hi, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    let c = null, ca = 0;
+    for (let i = 0; i < cs.size(); i++) { const t = cs.get(i), a = cv.contourArea(t); if (a > ca) { if (c) c.delete(); c = t; ca = a; } else t.delete(); }
+    m.delete(); cs.delete(); hi.delete();
+    if (!c) return null;
+    const hull = new cv.Mat(); cv.convexHull(c, hull, false, true); c.delete();
+    const peri = cv.arcLength(hull, true); let q = null;
+    for (let s = 0; s < 30 && !q; s++) {
+      const eps = 0.005 + (0.075 * s) / 29, ap = new cv.Mat(); cv.approxPolyDP(hull, ap, eps * peri, true);
+      if (ap.rows === 4) q = matToPts(ap);
+      ap.delete();
+    }
+    hull.delete();
+    if (!q) return null;
+    const sum = q.map((p) => p[0] + p[1]), dif = q.map((p) => p[1] - p[0]);
+    const ai = (a, f) => a.indexOf(f(...a));
+    q = [q[ai(sum, Math.min)], q[ai(dif, Math.min)], q[ai(sum, Math.max)], q[ai(dif, Math.max)]];
+    if (polyArea(q) / (W * H) < 0.35) return null; // 框太小＝沒把握
+    return q;
+  }
+  return null;
+}
+function teedFuse(cv, r, msg) {
+  const t0 = Date.now();
+  const T = { data: new Uint8Array(msg.teed.buffer), width: msg.teed.width, height: msg.teed.height };
+  const W = T.width, H = T.height, E = T.data;
+  const on = (x, y) => { x |= 0; y |= 0; return x >= 0 && y >= 0 && x < W && y < H && E[y * W + x] > 153; };
+  const tq = teedRegionQuad(cv, T);
+  const ai = r && r.corners ? r.corners.map((p) => [p[0] * W, p[1] * H]) : null;
+  const dbg = { teed: !!tq };
+  if (!ai && !tq) return Object.assign({}, r, { fuse: dbg });
+  if (!tq) return Object.assign({}, r, { fuse: Object.assign(dbg, { src: 'aaaa', ms: Date.now() - t0 }) });
+  const cx = tq.reduce((a, p) => a + p[0], 0) / 4, cy = tq.reduce((a, p) => a + p[1], 0) / 4;
+  const outN = (a, b, ox, oy) => { const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1; let nx = dy / L, ny = -dx / L; if (nx * ((a[0] + b[0]) / 2 - ox) + ny * ((a[1] + b[1]) / 2 - oy) < 0) { nx = -nx; ny = -ny; } return [nx, ny]; };
+  const support = (a, b) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1, nx = dy / L, ny = -dx / L; let hit = 0;
+    for (let k = 0; k < 70; k++) {
+      const t = 0.06 + (0.88 * k) / 69, px = a[0] + dx * t, py = a[1] + dy * t;
+      for (let s = -4; s <= 4; s++) if (on(px + nx * s, py + ny * s)) { hit++; break; }
+    }
+    return hit / 70;
+  };
+  const T2 = [0, 1, 2, 3].map((i) => { const a = tq[i], b = tq[(i + 1) % 4], [nx, ny] = outN(a, b, cx, cy); return [[a[0] + nx * 2, a[1] + ny * 2], [b[0] + nx * 2, b[1] + ny * 2]]; });
+  let sides, src;
+  if (!ai) { sides = T2; src = ['t', 't', 't', 't']; }
+  else {
+    sides = []; src = [];
+    for (let i = 0; i < 4; i++) {
+      const sa = [ai[i], ai[(i + 1) % 4]], ka = support(...sa), kt = support(...T2[i]);
+      if (kt > ka + 0.15) { sides.push(T2[i]); src.push('t'); } else { sides.push(sa); src.push('a'); }
+    }
+  }
+  dbg.src = src.join(''); dbg.ms = Date.now() - t0;
+  if (ai && !src.includes('t')) return Object.assign({}, r, { fuse: dbg });
+  const inter = (p1, p2, p3, p4) => {
+    const d1 = [p2[0] - p1[0], p2[1] - p1[1]], d2 = [p4[0] - p3[0], p4[1] - p3[1]], den = d1[0] * -d2[1] - d1[1] * -d2[0];
+    if (Math.abs(den) < 1e-9) return null;
+    const rx = p3[0] - p1[0], ry = p3[1] - p1[1], t = (rx * -d2[1] - ry * -d2[0]) / den;
+    return [p1[0] + d1[0] * t, p1[1] + d1[1] * t];
+  };
+  const Q = [];
+  for (let i = 0; i < 4; i++) { const p = inter(...sides[(i + 3) % 4], ...sides[i]); if (!p) return Object.assign({}, r, { fuse: Object.assign(dbg, { bad: 'inter' }) }); Q.push(p); }
+  // 安全檢查：要在畫面內、是凸四邊形、比例合理、和 AI 的框大小差不多
+  const qa = polyArea(Q) / (W * H);
+  const inside = Q.every((p) => p[0] > -0.02 * W && p[0] < 1.02 * W && p[1] > -0.02 * H && p[1] < 1.02 * H);
+  let cvx = true; for (let i = 0; i < 4; i++) { const a = Q[i], b = Q[(i + 1) % 4], c = Q[(i + 2) % 4]; if ((b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]) <= 0) cvx = false; }
+  const wd = (Math.hypot(Q[1][0] - Q[0][0], Q[1][1] - Q[0][1]) + Math.hypot(Q[2][0] - Q[3][0], Q[2][1] - Q[3][1])) / 2;
+  const ht = (Math.hypot(Q[3][0] - Q[0][0], Q[3][1] - Q[0][1]) + Math.hypot(Q[2][0] - Q[1][0], Q[2][1] - Q[1][1])) / 2;
+  const aiA = ai ? polyArea(ai) / (W * H) : qa;
+  if (!inside || !cvx || Math.min(wd, ht) / Math.max(wd, ht) < 0.5 || qa < 0.2 || qa > aiA * 1.3 || qa < aiA * 0.7) return Object.assign({}, r, { fuse: Object.assign(dbg, { bad: 'guard' }) });
+  // 彎度
+  const ph = (Math.hypot(Q[3][0] - Q[0][0], Q[3][1] - Q[0][1]) + Math.hypot(Q[2][0] - Q[1][0], Q[2][1] - Q[1][1])) / 2;
+  const qcx = Q.reduce((a, p) => a + p[0], 0) / 4, qcy = Q.reduce((a, p) => a + p[1], 0) / 4;
+  const aiCurve = r && r.curve ? r.curve.map((e) => e.map((p) => [p[0] * W, p[1] * H])) : null;
+  let anyC = false; const curve = [];
+  for (let e = 0; e < 4; e++) {
+    const A = Q[e], B = Q[(e + 1) % 4], dx = B[0] - A[0], dy = B[1] - A[1], [nx, ny] = outN(A, B, qcx, qcy);
+    const line = (u) => [A[0] + dx * u, A[1] + dy * u];
+    const straight = [1, 2, 3, 4, 5].map((k) => line(k / 6));
+    if (src[e] === 'a') {
+      // 保留 AI 的彎度：控制點離原本弦線的距離，套到新的弦線上
+      if (aiCurve) {
+        const a0 = ai[e], b0 = ai[(e + 1) % 4], [mx, my] = outN(a0, b0, qcx, qcy);
+        const offs = aiCurve[e].map((p, k) => { const u = (k + 1) / 6; return (p[0] - (a0[0] + (b0[0] - a0[0]) * u)) * mx + (p[1] - (a0[1] + (b0[1] - a0[1]) * u)) * my; });
+        if (offs.some((o) => Math.abs(o) > 0.5)) anyC = true;
+        curve.push(offs.map((o, k) => { const p = line((k + 1) / 6); return [p[0] + nx * o, p[1] + ny * o]; }));
+      } else curve.push(straight);
+      continue;
+    }
+    if (Math.abs(dx) <= Math.abs(dy)) { curve.push(straight); continue; } // 左右邊維持直線
+    const R = Math.max(4, Math.round(ph * 0.03)), ts = [], ds = [];
+    for (let k = 0; k < 48; k++) {
+      const t = 0.04 + (0.92 * k) / 47, [px, py] = line(t); let best = null;
+      for (let s = 0; s <= R && best === null; s++) for (const sg of [s, -s]) if (on(px + nx * sg, py + ny * sg)) { best = sg; break; }
+      if (best !== null) { ts.push(t); ds.push(best); }
+    }
+    if (ts.length < 30) { curve.push(straight); continue; }
+    const row = (t) => [t * (1 - t), t * t * (1 - t)];
+    let idx = ts.map((_, i) => i), fit = null;
+    for (let it = 0; it < 4; it++) {
+      fit = lsq(idx.map((i) => row(ts[i])), idx.map((i) => ds[i])); if (!fit) break;
+      const res = ts.map((t, i) => Math.abs(ds[i] - (fit[0] * row(t)[0] + fit[1] * row(t)[1])));
+      const sel = idx.map((i) => res[i]).sort((a, b) => a - b), mad = sel[sel.length >> 1] + 0.5;
+      idx = ts.map((_, i) => i).filter((i) => res[i] <= Math.max(1.5, 3 * mad));
+      if (!idx.length) break;
+    }
+    if (!fit || idx.length < ts.length * 0.7) { curve.push(straight); continue; }
+    const f = (u) => fit[0] * u * (1 - u) + fit[1] * u * u * (1 - u);
+    let bul = 0; for (let k = 0; k <= 10; k++) bul = Math.max(bul, Math.abs(f(k / 10)));
+    bul /= ph;
+    if (bul > 0.05 || bul < 0.003) { curve.push(straight); continue; }
+    anyC = true; curve.push([1, 2, 3, 4, 5].map((k) => { const p = line(k / 6), o = f(k / 6); return [p[0] + nx * o, p[1] + ny * o]; }));
+  }
+  const nz = (p) => [Math.min(1, Math.max(0, p[0] / W)), Math.min(1, Math.max(0, p[1] / H))];
+  dbg.ms = Date.now() - t0;
+  return { corners: Q.map(nz), curve: anyC ? curve.map((e) => e.map(nz)) : null, area: qa, fuse: dbg, aiCorners: r && r.corners, aiCurve: r && r.curve };
+}
+
 self.onmessage = async (e) => {
   const { id, type } = e.data;
   try {
@@ -1355,7 +1501,10 @@ self.onmessage = async (e) => {
       const r = detectQuad(cv, new Uint8Array(buffer), width, height, !!fast);
       self.postMessage({ id, ok: true, result: r });
     } else if (type === 'maskQuad') {
-      self.postMessage({ id, ok: true, result: maskQuad(cv, e.data) });
+      const r0 = maskQuad(cv, e.data);
+      let r = r0;
+      if (e.data.teed) { try { r = teedFuse(cv, r0, e.data); } catch (err) { console.warn('TEED 互助失敗', err); } } // 4.2：出錯就用原本 AI 的結果
+      self.postMessage({ id, ok: true, result: r });
     } else if (type === 'process') {
       const r = processPage(cv, e.data);
       self.postMessage({ id, ok: true, result: r }, [r.buffer]);

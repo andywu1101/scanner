@@ -112,6 +112,29 @@ async function srBench(n) {
   return { cpu, gpu };
 }
 
+/* 4.2：TEED 邊緣模型（MIT，0.25 MB）。app.js 送來照片縮小後的 RGBA（長邊 640、寬高為 8 的倍數），
+   回傳每個像素的邊緣強度（0～255）。worker.js 的 teedFuse 用它跟 AI 遮罩互助框選。4.2.1 起一律用 CPU */
+const TEED_MODEL = new URL('lib/ai/teed.onnx', self.location.href).href;
+let teedSess = null, teedSessEP = null, teedNoGpu = true; // 4.2.1：一律用 CPU（iPhone 只多約 0.1 秒，少占 GPU 記憶體；輸入大小隨照片比例變，GPU 每種大小都要另開記憶體）
+async function teedGet() {
+  const want = teedNoGpu ? 'wasm' : ep;
+  if (teedSess && teedSessEP === want) return teedSess;
+  if (teedSess) { try { await teedSess.release(); } catch (_) {} teedSess = null; teedSessEP = null; }
+  try { teedSess = await ort.InferenceSession.create(TEED_MODEL, { executionProviders: [want], graphOptimizationLevel: 'all' }); teedSessEP = want; }
+  catch (err) { if (want !== 'webgpu') throw err; teedNoGpu = true; return teedGet(); }
+  return teedSess;
+}
+async function teedRun(buffer, w, h) {
+  const d = new Uint8ClampedArray(buffer), n = w * h, f = new Float32Array(3 * n);
+  for (let i = 0; i < n; i++) { f[i] = d[i * 4 + 2] - 103.939; f[n + i] = d[i * 4 + 1] - 116.779; f[2 * n + i] = d[i * 4] - 123.68; } // BGR 減平均
+  const go = async (s) => { const o = await s.run({ [s.inputNames[0]]: new ort.Tensor('float32', f, [1, 3, h, w]) }); const t = o[s.outputNames[0]]; return t.getData ? await t.getData() : t.data; };
+  let y;
+  try { y = await go(await teedGet()); }
+  catch (err) { if (teedSessEP !== 'webgpu') throw err; teedNoGpu = true; y = await go(await teedGet()); } // GPU 出錯改用 CPU
+  const u = new Uint8Array(n); for (let i = 0; i < n; i++) u[i] = Math.round(y[i] * 255);
+  return u.buffer;
+}
+
 self.onmessage = async (e) => {
   const { id, type } = e.data;
   try {
@@ -128,6 +151,7 @@ self.onmessage = async (e) => {
       self.postMessage({ id, ok: true, result: r }, [r]); return;
     }
     if (type === 'srRelease') { await srRelease(); self.postMessage({ id, ok: true, result: null }); return; }
+    if (type === 'teed') { const r = await teedRun(e.data.buffer, e.data.width, e.data.height); self.postMessage({ id, ok: true, result: r }, [r]); return; }
     const s = await getSess();
     if (type === 'warm') { self.postMessage({ id, ok: true, result: { ep: sessEP } }); return; }
     const f = input(e.data.buffer);

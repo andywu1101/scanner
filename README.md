@@ -63,6 +63,9 @@
 
 ## 版本紀錄
 
+- **v4.2.2（2026 年 11 月）**：相簿匯入多張時也套用 AI 框選的閃退修正。
+- **v4.2.1（2026 年 11 月）**：修正 iPhone 一次 AI 框選多頁時可能閃退。
+- **v4.2（2026 年 11 月）**：最佳化淺色背景 AI 框選準確度；偵測不到框選範圍時，提示可直接按快門。
 - **v4.1.7（2026 年 11 月）**：最佳化拍攝運作流程，減少拍攝時發熱。
 - **v4.1.6（2026 年 11 月）**：拿掉高畫質拍照與相簿匯入的自動轉向（改用框選畫面的「向右轉」）。
 - **v4.1.5（2026 年 11 月）**：讓 Google 搜尋更容易找到本工具（網站地圖、正式網址設定）。
@@ -87,6 +90,7 @@
 | [OpenCV.js](https://opencv.org/) 4.10 | 紙張偵測、透視校正、影像處理 | Apache 2.0 |
 | [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) 1.30.0（備用 1.17.3） | 在手機上執行 AI 模型（可運用 GPU） | MIT |
 | [U²-Net](https://github.com/xuebinqin/U-2-Net)（u2netp，ONNX 檔取自 [rembg](https://github.com/danielgatis/rembg)） | AI 框選 | Apache 2.0（rembg：MIT） |
+| [TEED](https://github.com/xavysp/TEED)（Tiny and Efficient Edge Detector） | AI 框選的邊緣輔助（4.2） | MIT |
 | [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)（realesr-animevideov3） | AI 精修 | BSD 3-Clause |
 | [SortableJS](https://github.com/SortableJS/Sortable) 1.15.3 | 頁面拖曳排序 | MIT |
 | [QR Code Generator](https://github.com/kazuhikoarase/qrcode-generator)（Kazuhiko Arase） | 電腦版顯示網址 QR Code | MIT |
