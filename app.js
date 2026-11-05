@@ -397,7 +397,7 @@ window.addEventListener('popstate', (e) => {
   if (current === 'live') stopLive();
   if (current === 'crop') pipClose();
   if (capRes.resolve && !capRes.flying) { $('#capRes').classList.remove('on'); capRes.resolve('back'); } // 3.1 成品畫面按返回鍵＝當作確定（頁面已經存好）
-  if (current === 'crop' && cropCtx && cropCtx.onCancel) { const f = cropCtx.onCancel; cropCtx = null; f(true); }
+  if (current === 'crop' && cropCtx && cropCtx.onCancel) { const f = cropCtx.onCancel; cropFree(cropCtx); cropCtx = null; f(true); } // 4.2.3：返回鍵離開也放掉大圖
   closeSheet();
   if (s === 'cover') { show('cover'); }
   else if (s === 'home') { renderHome(); show('home'); }
@@ -1089,6 +1089,8 @@ function grabInto(c, v) {
   return c;
 }
 function grabFull(v) { return grabInto(fullCanvases[0], v); }
+// 4.2.3：進框選畫面時放掉（每張約 50 MB，原本整個拍攝過程都留著）；下一張倒數時 grabInto 會自動重建
+function freeFullCanvases() { live.best = null; for (const c of fullCanvases) c.width = c.height = 0; }
 
 async function liveLoop() {
   if (!live.running) return;
@@ -1433,7 +1435,7 @@ async function capture(sig, full, quadAt, userPress) {
         try {
           const r = await aiFixPage(page.id, blob, corners, true);
           if (r && r.corners) { corners = r.corners; curve = r.curve; } else aiReport(r, live.count);
-        } finally { if (!fx) unbusy(); }
+        } finally { if (!fx) unbusy(); aiReleaseNow(); } // 4.2.3：立即裁切每張都用 AI，原本引擎從頭到尾不釋放
       }
       if (fx) { fx.release(); await fx.ready; }
       live.capturing = false; openLiveCrop(page, blob, corners, curve);
@@ -1561,6 +1563,7 @@ $('#camTipX').onclick = () => { clearTimeout(camTipT); $('#camTip').classList.re
 /* 1.19 立即裁切：拍完直接進裁切畫面；相機不關，只暫停找框，回來就能接著拍 */
 function openLiveCrop(page, blob, corners, curve, replace) {
   live.paused = true;
+  freeFullCanvases(); // 4.2.3
   camPause(); // 3.1.5
   openCrop({
     blob, corners, curve: curve || null, rotation: page.rotation || 0, retake: true, liveCrop: true, replace,
@@ -2024,7 +2027,7 @@ function showCapResult(pageId) {
   const result = new Promise((res) => {
     capRes.resolve = (v) => { if (done) return; done = true; if (sw) sw.stop(); capRes.resolve = null; res(v); };
   });
-  $('#crEdit').onclick = () => { el.classList.remove('on'); capRes.resolve && capRes.resolve('edit'); };
+  $('#crEdit').onclick = () => { el.classList.remove('on'); for (const c of el.querySelectorAll('canvas')) c.width = c.height = 1; capRes.resolve && capRes.resolve('edit'); }; // 4.2.3：放掉成品大圖
   $('#crOk').onclick = () => capRes.resolve && capRes.resolve('ok');
   (async () => {
     try {
@@ -2184,8 +2187,10 @@ async function setCropView(c) {
   ci.onload = ci.onerror = null;
 }
 function cropUrls(c) { if (c.url) URL.revokeObjectURL(c.url); if (c.viewUrl) URL.revokeObjectURL(c.viewUrl); }
+// 4.2.3：離開框選畫面時連放大鏡用的大圖（約 2400 像素）一起放掉
+function cropFree(c) { cropUrls(c); if (c.loupeSrc) c.loupeSrc.width = c.loupeSrc.height = 0; }
 async function openCrop(opts) {
-  if (cropCtx) cropUrls(cropCtx);
+  if (cropCtx) cropFree(cropCtx);
   const { img, url } = await loadImg(opts.blob);
   const rot = ((opts.rotation || 0) % 360 + 360) % 360;
   const curve0 = opts.curve ? normCurve(opts.corners, opts.curve) : null;
@@ -2618,7 +2623,7 @@ $('#cropOk').onclick = async () => {
   if (area < 0.01) { toast('範圍太小了'); return; }
   if (c.rotating) return;
   cropCtx = null;
-  cropUrls(c);
+  cropFree(c);
   pipClose();
   // 3.1.7：換算回原始照片座標，旋轉另外交給呼叫的地方存進 page.rotation
   const o = rotQuad(q, c.curve, 360 - c.rot);
@@ -2628,7 +2633,7 @@ $('#cropOk').onclick = async () => {
   await c.onConfirm(o.corners, cv, edited, c.rot);
 };
 $('#cropCancel').onclick = () => history.back();
-$('#cropRetake').onclick = () => { const c = cropCtx; cropCtx = null; if (c) cropUrls(c); pipClose(); if (c && c.onRetake) c.onRetake(); history.back(); };
+$('#cropRetake').onclick = () => { const c = cropCtx; cropCtx = null; if (c) cropFree(c); pipClose(); if (c && c.onRetake) c.onRetake(); history.back(); };
 $('#cropPrev').onclick = () => ($('#pipFull').classList.contains('show') ? pipFullClose() : pipFullOpen()); // 3.1：再按一次回到框選
 
 /* ---------- 裁切即時成品預覽（1.13 方案 B，1.14 改對角） ----------
@@ -3895,6 +3900,8 @@ function aiReset() {
 /* 4.2.1：用完就釋放 AI 引擎（整個 ai-worker 結束掉，GPU 與 WebAssembly 的記憶體都還給系統；下次用再載入，約 0.5 秒）。
    一次框選做完、AI 精修做完後排一次；閒置 3 秒、沒有工作、沒有批次與精修進行中才真的釋放 */
 let aiLastUse = 0, aiRelT = 0, aiBatchOn = false;
+// 4.2.3：沒有工作在跑就馬上釋放，有的話等閒置再釋放
+function aiReleaseNow() { if (aiWorker && !aiPending.size && !aiBatchOn && !srProg.size) aiReset(); else aiReleaseSoon(); }
 function aiReleaseSoon() {
   clearTimeout(aiRelT);
   aiRelT = setTimeout(() => {
@@ -4293,7 +4300,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '4.2.2';
+const APP_VER = '4.2.3';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
