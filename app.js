@@ -62,9 +62,20 @@ function saveSettings() { try { localStorage.setItem('cocoscan-settings', JSON.s
 
 /* ---------- IndexedDB ---------- */
 const DB = {
-  _db: null,
+  _db: null, _p: null, cleaned: 0, rebuilt: false,
+  // 4.2.4：第一次開啟時先整理資料庫（dbMaint），其他地方都等整理完才讀寫，不會和拍照同時進行
   open() {
     if (this._db) return Promise.resolve(this._db);
+    if (this._p) return this._p;
+    this._p = (async () => {
+      let d = await this._raw();
+      try { d = await dbMaint(d); } catch (e) { console.warn('整理資料庫', e); }
+      this._db = d; return d;
+    })();
+    this._p.catch(() => { this._p = null; });
+    return this._p;
+  },
+  _raw() {
     return new Promise((res, rej) => {
       const r = indexedDB.open('cocoscan', 1);
       r.onupgradeneeded = () => {
@@ -73,10 +84,12 @@ const DB = {
         const p = d.createObjectStore('pages', { keyPath: 'id' });
         p.createIndex('docId', 'docId');
       };
-      r.onsuccess = () => { this._db = r.result; res(r.result); };
+      r.onsuccess = () => res(r.result);
       r.onerror = () => rej(r.error);
     });
   },
+  // 只取編號（不讀照片，幾乎不占記憶體）
+  async keys(store) { return (await this.tx(store, 'readonly', (s) => s.getAllKeys())) || []; },
   async tx(store, mode, fn) {
     const d = await this.open();
     return new Promise((res, rej) => {
@@ -108,6 +121,41 @@ function unpackRec(v) {
   return v;
 }
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+/* 4.2.4 資料庫整理（打開 App 時做一次，在任何讀寫之前）：
+   1. 孤兒頁面：頁面存進資料庫、還沒登記到文件就閃退，刪文件時刪不到，一直占空間。
+      只刪「所屬文件已經不存在」的（用 docId 索引只看編號，不讀照片）；文件還在、只是沒登記進去的先不動（可能是意外遺失的頁），設定裡顯示數量
+   2. 一份文件、一頁都沒有時，整個資料庫刪掉重建：Safari 刪資料後檔案不一定縮小，重建才會把空間還回來 */
+function idbReq(q) { return new Promise((res, rej) => { q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); }); }
+async function dbMaint(d) {
+  const t = d.transaction(['docs', 'pages'], 'readonly');
+  const qDocs = idbReq(t.objectStore('docs').getAll()); // 兩個讀取同時送出，不在中間 await（舊版 Safari 會提早結束交易）
+  const qPairs = new Promise((res, rej) => { // [頁面編號, 所屬文件]
+    const out = [], q = t.objectStore('pages').index('docId').openKeyCursor();
+    q.onsuccess = () => { const c = q.result; if (!c) { res(out); return; } out.push([c.primaryKey, c.key]); c.continue(); };
+    q.onerror = () => rej(q.error);
+  });
+  const [docs, pairs] = await Promise.all([qDocs, qPairs]);
+  const docIds = new Set(docs.map((x) => x.id));
+  const dead = pairs.filter(([, did]) => !docIds.has(did)).map(([pid]) => pid);
+  if (dead.length) {
+    const w = d.transaction('pages', 'readwrite'), st = w.objectStore('pages');
+    for (const pid of dead) st.delete(pid);
+    await new Promise((res, rej) => { w.oncomplete = res; w.onerror = () => rej(w.error); w.onabort = () => rej(w.error); });
+    DB.cleaned = dead.length;
+  }
+  if (docs.length || pairs.length > dead.length) return d;
+  // 完全沒有資料：刪掉重建
+  d.close();
+  await new Promise((res) => { const q = indexedDB.deleteDatabase('cocoscan'); q.onsuccess = q.onerror = q.onblocked = () => res(); setTimeout(res, 3000); });
+  DB.rebuilt = true;
+  return DB._raw();
+}
+// 設定畫面用：文件數、頁面數、沒登記到文件的頁數（只看編號）
+async function storeCounts() {
+  const docs = await DB.all('docs'), keys = await DB.keys('pages');
+  const ref = new Set(); for (const x of docs) for (const id of x.pageIds) ref.add(id);
+  return { docs: docs.length, pages: keys.length, loose: keys.filter((k) => !ref.has(k)).length };
+}
 
 /* ---------- Worker ---------- */
 const worker = new Worker('worker.js');
@@ -534,8 +582,24 @@ function updateHomeStrip(pages) {
 
 /* ---------- 全部文件（多選、合併、刪除） ---------- */
 const lib = { selecting: false, order: [] };
-async function renderLibrary() {
-  const docs = (await DB.all('docs')).sort((a, b) => b.updated - a.updated);
+/* 4.2.4：原本每次重畫（打開、點選、全選）都 DB.all('pages') 一次把所有頁（含原圖、成品，存成 ArrayBuffer、讀出來整份在記憶體）
+   讀進來，作者全選幾十頁就閃退。改成打開時一頁一頁讀，只留第一頁縮圖和待裁切頁數（libLoad）；點選、全選只用留下的資料重畫（libPaint） */
+async function renderLibrary() { await libLoad(); libPaint(); }
+async function libLoad() {
+  lib.docs = (await DB.all('docs')).sort((a, b) => b.updated - a.updated);
+  lib.info = new Map();
+  for (const doc of lib.docs) {
+    let first = null, need = 0;
+    for (const pid of doc.pageIds) {
+      const p = await DB.get('pages', pid); if (!p) continue;
+      if (!first) first = { id: p.id, th: p.thumb || p.original, ver: verOf(p, 'thumb') };
+      if (p.needCrop) need++;
+    }
+    lib.info.set(doc.id, { first, need });
+  }
+}
+function libPaint() {
+  const docs = lib.docs || [];
   const list = $('#libList');
   lib.order = lib.order.filter((id) => docs.some((d) => d.id === id));
   $('#libSelect').textContent = lib.selecting ? '取消' : '選取';
@@ -547,32 +611,31 @@ async function renderLibrary() {
   if (!docs.length) { list.style.display = 'block'; list.innerHTML = EMPTY_HTML; $('#libSelect').style.visibility = 'hidden'; return; }
   $('#libSelect').style.visibility = '';
   list.style.display = '';
-  const pages = new Map((await DB.all('pages')).map((p) => [p.id, p]));
   list.innerHTML = '';
   list.classList.toggle('selecting', lib.selecting);
   for (const doc of docs) {
-    const first = pages.get(doc.pageIds[0]);
+    const inf = lib.info.get(doc.id) || {}, first = inf.first;
     const b = document.createElement('button');
     const n = lib.order.indexOf(doc.id);
     b.className = 'doc' + (n >= 0 ? ' sel' : '');
-    const th = first && (first.thumb || first.original);
-    b.innerHTML = `<div class="th">${th ? `<img src="${blobUrl('lib:' + first.id, th, verOf(first, 'thumb'))}" alt="">` : ''}<span class="n">${doc.pageIds.length} 頁</span>${(() => { const w = doc.pageIds.filter((id) => (pages.get(id) || {}).needCrop).length; return w ? `<span class="w">✂ ${w} 頁待裁切</span>` : ''; })()}<span class="ck">${n >= 0 ? n + 1 : ''}</span></div><div class="meta"><div class="t"></div><div class="d">${fmtDate(doc.updated)}</div></div>`;
+    const th = first && first.th;
+    b.innerHTML = `<div class="th">${th ? `<img src="${blobUrl('lib:' + first.id, th, first.ver)}" alt="">` : ''}<span class="n">${doc.pageIds.length} 頁</span>${inf.need ? `<span class="w">✂ ${inf.need} 頁待裁切</span>` : ''}<span class="ck">${n >= 0 ? n + 1 : ''}</span></div><div class="meta"><div class="t"></div><div class="d">${fmtDate(doc.updated)}</div></div>`;
     b.querySelector('.t').textContent = doc.title;
     b.onclick = () => {
       if (!lib.selecting) { openDoc(doc.id); return; }
       const i = lib.order.indexOf(doc.id);
       if (i >= 0) lib.order.splice(i, 1); else lib.order.push(doc.id);
-      renderLibrary();
+      libPaint();
     };
     list.appendChild(b);
   }
 }
 $('#libBack').onclick = () => history.back();
-$('#libSelect').onclick = () => { lib.selecting = !lib.selecting; lib.order = []; renderLibrary(); };
-$('#libAll').onclick = async () => {
-  const docs = (await DB.all('docs')).sort((a, b) => b.updated - a.updated);
+$('#libSelect').onclick = () => { lib.selecting = !lib.selecting; lib.order = []; libPaint(); };
+$('#libAll').onclick = () => {
+  const docs = lib.docs || [];
   lib.order = lib.order.length === docs.length ? [] : docs.map((d) => d.id);
-  renderLibrary();
+  libPaint();
 };
 $('#libDel').onclick = async () => {
   const n = lib.order.length; if (!n) return;
@@ -3735,7 +3798,9 @@ $('#btnSettings').onclick = () => {
     });
     s.querySelectorAll('.tg[data-k]').forEach((b) => b.onclick = () => { settings[b.dataset.k] = !settings[b.dataset.k]; saveSettings(); b.classList.toggle('on', settings[b.dataset.k]); });
     if (navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then((e) => {
-      s.querySelector('#storeInfo').textContent = `已使用空間 ${(e.usage / 1048576).toFixed(0)} MB`;
+      const el = s.querySelector('#storeInfo');
+      el.textContent = `已使用空間 ${(e.usage / 1048576).toFixed(0)} MB`;
+      storeCounts().then((c) => { el.textContent = `已使用空間 ${(e.usage / 1048576).toFixed(0)} MB・文件 ${c.docs} 份・頁面 ${c.pages} 頁${c.loose ? `（其中 ${c.loose} 頁沒有登記到文件）` : ''}`; }).catch(() => {}); // 4.2.4
     });
   });
 };
@@ -4300,7 +4365,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '4.2.3';
+const APP_VER = '4.2.4';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -4343,6 +4408,7 @@ const verGt = (a, b) => { const x = verNum(a), y = verNum(b); for (let i = 0; i 
 function logSeen() { try { return localStorage.getItem(LOG_KEY); } catch (_) { return null; } }
 function logMarkSeen() { try { localStorage.setItem(LOG_KEY, APP_VER); } catch (_) {} }
 // 1.29：只有「目前這一版」新增的項目是紅字；之前版本的一律黑字
+setTimeout(() => { DB.open().then(() => { if (DB.cleaned) toast(`已清除 ${DB.cleaned} 頁未使用的資料`); }).catch(() => {}); }, 1200); // 4.2.4
 const isNewItem = (it) => it.since === APP_VER; // 只用來判斷要不要自動跳出日誌（3.0.1 起不再標紅字，一律黑字）
 function showChangelog() {
   const seen = logSeen();
