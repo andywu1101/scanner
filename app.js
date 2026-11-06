@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '5.1.9'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '5.2.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -57,8 +57,32 @@ const userDefAll = () => Object.fromEntries(MODES.map((m) => [m.id, userDefOf(m.
 // 處理結果的「身分」：模式、旋轉、四角、這一頁實際用的調整數值，任何一項變了就要重算
 function procKey(p) { return JSON.stringify([p.mode, p.rotation || 0, p.corners, p.curve || null, pageAdjOf(p), settings.upscale, p.ai ? p.aiSide || 1 : 0]); }
 // 1.29：沒有照片資料的壞頁面（弱手機轉檔失敗留下的）不處理，避免每個畫面一直跳錯誤
-const isBroken = (p) => !(p && p.original instanceof Blob && p.original.size > 0);
-function isStale(p) { if (isBroken(p)) return false; return !p.processed || p.pkey !== procKey(p); }
+const isBroken = (p) => !(p && (p.lite ? p.liteOrig > 0 : p.original instanceof Blob && p.original.size > 0));
+function isStale(p) { if (isBroken(p)) return false; return !(p.lite ? p.liteProc : p.processed) || p.pkey !== procKey(p); }
+/* 5.2：輕量版頁面（作者：修正大量讀檔有可能閃退的問題）。資料庫一頁是一整筆，只能整筆讀出；文件畫面、主畫面最近掃描、匯出前的清單
+   以前把每一頁整筆（原圖＋處理後大圖＋精修圖）同時讀進來而且一直留著（30 頁約 180 MB 以上），單頁檢視每滑一頁還整份重讀一次。
+   改成：清單只留縮圖和設定（lite），大圖要用時（單頁檢視、裁切、調整、匯出、分享、AI）才讀那一頁，用完就放掉。
+   lite 頁不能存回資料庫（packRec 會擋，免得把原圖蓋掉）；要改頁面一律重新整筆讀出來再存 */
+const LITE_DROP = ['original', 'processed', 'plain', 'srBuf', 'sr'];
+function liteOf(p) {
+  if (!p) return p;
+  const o = Object.assign({}, p);
+  o.lite = true;
+  o.liteOrig = p.original instanceof Blob ? p.original.size : 0;
+  o.liteProc = p.processed instanceof Blob ? p.processed.size : 0;
+  o.liteSr = p.srBuf instanceof ArrayBuffer ? p.srBuf.byteLength : 0;
+  for (const k of LITE_DROP) delete o[k];
+  if (!o.thumb && p.original instanceof Blob) o.original = p.original; // 還沒處理好、沒有縮圖：先用原圖當縮圖（處理完就換掉）
+  return o;
+}
+const hasProc = (p) => !!(p && (p.lite ? p.liteProc : p.processed));
+// 依順序讀一串頁面，同時最多讀 3 頁（一次全部讀會同時佔用全部頁面的記憶體）；full＝要完整資料
+async function pagesOf(ids, full) {
+  const out = new Array(ids.length); let k = 0;
+  const work = async () => { while (k < ids.length) { const i = k++; const p = await DB.get('pages', ids[i]); out[i] = full ? p : liteOf(p); } };
+  await Promise.all([work(), work(), work()]);
+  return out.filter(Boolean);
+}
 function saveSettings() { try { localStorage.setItem('cocoscan-settings', JSON.stringify(settings)); } catch (_) {} }
 
 /* ---------- IndexedDB ---------- */
@@ -112,6 +136,7 @@ const DB = {
 };
 const BLOB_FIELDS = ['original', 'processed', 'thumb'];
 async function packRec(v) {
+  if (v && v.lite) throw new Error('輕量版頁面不能存回資料庫'); // 5.2：防呆，避免把原圖蓋掉
   const o = Object.assign({}, v);
   for (const f of BLOB_FIELDS) if (o[f] instanceof Blob) o[f] = { __ab: await o[f].arrayBuffer(), type: o[f].type || 'image/jpeg' };
   return o;
@@ -263,7 +288,7 @@ function blobUrl(key, blob, ver) {
   urlCache.set(key, { ver, url });
   return url;
 }
-const verOf = (p, field) => (p[field] ? field + (p.ver || 0) : 'o');
+const verOf = (p, field) => (p[field] || (p.lite && field === 'processed' && p.liteProc) ? field + (p.ver || 0) : 'o');
 function dropUrls(prefix) {
   for (const [k, v] of urlCache) if (k.startsWith(prefix)) { URL.revokeObjectURL(v.url); urlCache.delete(k); }
 }
@@ -348,7 +373,7 @@ async function waitQueue() { await queue; }
 function ensureFresh(pages) {
   for (const p of pages) {
     // 1.29：拍攝失敗的頁沒辦法裁切，拿掉 ✂ 標記（只能刪除重拍）
-    if (p && isBroken(p) && p.needCrop) { delete p.needCrop; DB.put('pages', p).catch(() => {}); }
+    if (p && isBroken(p) && p.needCrop) { delete p.needCrop; DB.get('pages', p.id).then((q) => { if (q) { delete q.needCrop; return DB.put('pages', q); } }).catch(() => {}); } // 5.2：重新整筆讀出再存
     if (p && isStale(p) && !processing.has(p.id)) enqueue(p.id);
   }
 }
@@ -387,8 +412,9 @@ async function loadDocAdj() {
     docAdjCache.set(d.id, d.adj);
   }
   if (fix115) {
-    // 單頁設定一般存完整數值；萬一有缺，也固定成舊值
-    for (const p of await DB.all('pages')) {
+    // 單頁設定一般存完整數值；萬一有缺，也固定成舊值（5.2.1：一頁一頁讀，不再一次讀全部頁面）
+    for (const id of await DB.keys('pages')) {
+      const p = await DB.get('pages', id); if (!p) continue;
       const b = p.adj && p.adj.bw;
       if (b && (b.sharp === undefined || b.despeckle === undefined)) {
         if (b.sharp === undefined) b.sharp = 35;
@@ -400,7 +426,8 @@ async function loadDocAdj() {
     settings.adjFix115 = true; saveSettings();
   }
   if (fix130) {
-    for (const p of await DB.all('pages')) {
+    for (const id of await DB.keys('pages')) { // 5.2.1：一頁一頁讀
+      const p = await DB.get('pages', id); if (!p) continue;
       const b = p.adj && p.adj.bw;
       if (b && (b.sharp === undefined || b.smooth === undefined)) {
         if (b.sharp === undefined) b.sharp = 82;
@@ -526,7 +553,7 @@ async function renderHome() {
   const body = $('#homeBody');
   if (!docs.length) { body.innerHTML = EMPTY_HTML; return; }
   const doc = docs[0];
-  const pages = (await Promise.all(doc.pageIds.map((id) => DB.get('pages', id)))).filter(Boolean);
+  const pages = await pagesOf(doc.pageIds); // 5.2：輕量版
   // 正在改名時不要重畫，避免打斷輸入
   const active = document.activeElement;
   if (active && active.id === 'recentName' && body.dataset.doc === doc.id) { updateHomeStrip(pages); return; }
@@ -3007,11 +3034,22 @@ async function openDoc(id, push = true) {
   else if (current === 'doc') show('doc');
   else go('doc', push);
 }
+// 5.2：回傳輕量版（只有縮圖和設定）；要大圖的地方自己用 DB.get 讀那一頁
 async function getDocPages(docId) {
   const doc = await DB.get('docs', docId);
   if (!doc) return { doc: null, pages: [] };
-  const pages = await Promise.all(doc.pageIds.map((pid) => DB.get('pages', pid)));
-  return { doc, pages: pages.filter(Boolean) };
+  return { doc, pages: await pagesOf(doc.pageIds) };
+}
+// 5.2：只要頁面編號（不讀任何頁面資料；只看編號清單，去掉資料庫裡已經不存在的）
+async function docPageIds(docId) {
+  const doc = await DB.get('docs', docId);
+  if (!doc) return { doc: null, ids: [] };
+  const have = new Set(await DB.keys('pages'));
+  return { doc, ids: doc.pageIds.filter((id) => have.has(id)) };
+}
+// 5.2：單頁檢視只留正在看的那一頁的大圖網址，其他頁放掉
+function dropViewUrls(keepId) {
+  for (const [k, v] of urlCache) if ((k.startsWith('v:') || k.startsWith('plain:')) && k.slice(k.indexOf(':') + 1) !== keepId) { URL.revokeObjectURL(v.url); urlCache.delete(k); }
 }
 const docSel = { on: false, ids: new Set(), docId: null };
 function updateDocSelUI(total) {
@@ -3026,6 +3064,7 @@ function updateDocSelUI(total) {
   document.querySelectorAll('#pageGrid .pg:not(.add)').forEach((el) => el.classList.toggle('sel', docSel.ids.has(el.dataset.id)));
 }
 async function renderDoc() {
+  dropViewUrls(''); // 5.2：回到文件畫面，單頁檢視的大圖網址放掉
   const { doc, pages } = await getDocPages(state.docId);
   if (!doc) return;
   ensureFresh(pages);
@@ -3198,9 +3237,9 @@ async function openDocAdjust(mode) {
   if (!pages.length) return;
   // 1.25：記下調整前的狀態，完成後可以一鍵還原
   docAdjSnap = { docId: doc.id, docAdj: doc.adj ? JSON.parse(JSON.stringify(doc.adj)) : null, pages: pages.map((p) => ({ id: p.id, mode: p.mode, adj: p.adj ? JSON.parse(JSON.stringify(p.adj)) : null })) };
-  for (const p of pages) { if (p.mode !== mode) { p.mode = mode; await DB.put('pages', p); } } // 先不重算，按完成後一起處理
+  for (const p of pages) { if (p.mode !== mode) { const q = await DB.get('pages', p.id); if (q) { q.mode = mode; await DB.put('pages', q); } p.mode = mode; } } // 先不重算，按完成後一起處理（5.2：整筆讀出再存）
   state.pageIndex = 0;
-  viewPage = pages[0];
+  viewPage = await DB.get('pages', pages[0].id); // 5.2：預覽要大圖
   history.pushState({ s: 'page', doc: state.docId, i: 0, adj: 1, scope: 'doc' }, '');
   show('page');
   setAdjNav(pages.length);
@@ -3219,10 +3258,13 @@ function modeDesc(id) {
 let viewPage = null;
 const zoom = { s: 1, x: 0, y: 0, base: null };
 async function renderPage(keepZoom) {
-  const { pages } = await getDocPages(state.docId);
-  if (!pages.length) { history.back(); return; }
-  state.pageIndex = Math.max(0, Math.min(state.pageIndex, pages.length - 1));
-  const p = pages[state.pageIndex];
+  // 5.2：只讀頁面編號＋正在看的那一頁（以前每滑一頁就把整份文件每一頁整筆重讀一次）
+  const { ids } = await docPageIds(state.docId);
+  if (!ids.length) { history.back(); return; }
+  state.pageIndex = Math.max(0, Math.min(state.pageIndex, ids.length - 1));
+  const p = await DB.get('pages', ids[state.pageIndex]);
+  if (!p) { history.back(); return; }
+  const pages = ids;
   viewPage = p;
   $('#pageTitle').textContent = `第 ${state.pageIndex + 1} / ${pages.length} 頁`;
   $('#prevBtn').style.visibility = state.pageIndex > 0 ? 'visible' : 'hidden';
@@ -3236,6 +3278,7 @@ async function renderPage(keepZoom) {
       // 4.1.2：比例幾乎一樣（精修開關前後只差一兩個像素）就保留放大的位置，方便比較
       if (!keepZoom || !(zoom.ar && Math.abs(ar / zoom.ar - 1) < 0.01)) { zoom.s = 1; zoom.x = 0; zoom.y = 0; }
       zoom.nat = nat; zoom.ar = ar; fitView();
+      dropViewUrls(p.id); // 5.2：新的那頁顯示出來後，放掉其他頁的大圖
     };
     img.src = url;
   }
@@ -3460,14 +3503,15 @@ async function adjPrepare(p) {
 }
 // 統一調整時切換預覽的頁面
 async function adjSwitch(d) {
-  const { pages } = await getDocPages(state.docId);
+  const { ids } = await docPageIds(state.docId); // 5.2：只讀要預覽的那一頁
   const j = state.pageIndex + d;
-  if (j < 0 || j >= pages.length) return;
-  state.pageIndex = j; viewPage = pages[j];
+  if (j < 0 || j >= ids.length) return;
+  const pj = await DB.get('pages', ids[j]); if (!pj) return;
+  state.pageIndex = j; viewPage = pj;
   history.replaceState({ s: 'page', doc: state.docId, i: j, adj: 1, scope: 'doc' }, '');
-  setAdjNav(pages.length);
+  setAdjNav(ids.length);
   $('#adjMain').style.display = 'none';
-  adjPrepare(pages[j]);
+  adjPrepare(pj);
 }
 function fitAdj() {
   if (!adj.pw) return;
@@ -3643,7 +3687,7 @@ async function applyDocAdjust(docId, mode, vals, changed) {
     const custom = pages.filter((p) => p.adj && p.adj[mode] && JSON.stringify(fillAdj(mode, p.adj[mode])) !== JSON.stringify(vals));
     if (custom.length) overwrite = confirm(`有 ${custom.length} 頁單獨調整過。\n要一起套用新的統一設定嗎？\n\n確定：全部套用\n取消：保留那幾頁自己的設定`);
     for (const p of pages) {
-      if (p.adj && p.adj[mode] && (overwrite || JSON.stringify(fillAdj(mode, p.adj[mode])) === JSON.stringify(vals))) { delete p.adj[mode]; await DB.put('pages', p); }
+      if (p.adj && p.adj[mode] && (overwrite || JSON.stringify(fillAdj(mode, p.adj[mode])) === JSON.stringify(vals))) { const q = await DB.get('pages', p.id); if (q && q.adj) { delete q.adj[mode]; await DB.put('pages', q); } } // 5.2：整筆讀出再存
     }
   }
   const { pages: fresh } = await getDocPages(docId);
@@ -3754,7 +3798,10 @@ async function buildPdf(title, pages, sizeMode, onProgress) {
   obj(3, `<< /Title ${utf16hex(title)} /Producer (WuDi Score Scan) /CreationDate (D:${new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)}) >>`);
   for (let i = 0; i < n; i++) {
     onProgress && onProgress(i + 1, n);
-    const im = await pageImageForPdf(pages[i]);
+    // 5.2：做到這一頁才讀它的大圖，放進 PDF 後就放掉
+    const full = pages[i].lite ? await DB.get('pages', pages[i].id) : pages[i];
+    if (!full || !full.processed) throw new Error(`第 ${i + 1} 頁讀取失敗`);
+    const im = await pageImageForPdf(full);
     let PW, PH;
     const land = im.w > im.h;
     if (sizeMode === 'a4') { PW = 595.28; PH = 841.89; }
@@ -3830,7 +3877,7 @@ function openPdfSheet() {
         ensureFresh((await getDocPages(state.docId)).pages);
         await waitQueue();
         const { doc, pages } = await getDocPages(state.docId);
-        const ready = pages.filter((p) => p.processed);
+        const ready = pages.filter(hasProc);
         const pdf = await buildPdf(doc.title, ready, settings.pdfSize, (i, n) => busy(`產生 PDF ${i} / ${n}`));
         unbusy();
         deliverSheet([new File([pdf], name + '.pdf', { type: 'application/pdf' })], 'PDF ');
@@ -3850,12 +3897,16 @@ $('#docImg').onclick = () => openSheet(`<h3>匯出圖片</h3><div class="lbl">�
       ensureFresh((await getDocPages(state.docId)).pages);
       await waitQueue();
       const { pages } = await getDocPages(state.docId);
-      const ready = pages.filter((p) => p.processed);
-      const files = ready.map((p, i) => {
-        const ext = p.processed.type === 'image/png' ? 'png' : 'jpg';
+      const ready = pages.filter(hasProc);
+      // 5.2：一頁一頁讀，只留處理後的圖（分享時檔案要同時在，但不再連原圖一起讀進來）
+      const files = [];
+      for (let i = 0; i < ready.length; i++) {
+        busy(`準備圖片 ${i + 1} / ${ready.length}`);
+        const q = await DB.get('pages', ready[i].id); if (!q || !q.processed) continue;
+        const ext = q.processed.type === 'image/png' ? 'png' : 'jpg';
         const suffix = ready.length > 1 ? '_' + String(i + 1).padStart(2, '0') : '';
-        return new File([p.processed], `${name}${suffix}.${ext}`, { type: p.processed.type });
-      });
+        files.push(new File([q.processed], `${name}${suffix}.${ext}`, { type: q.processed.type }));
+      }
       unbusy();
       deliverSheet(files, '圖片');
     } catch (e) { unbusy(); toast('匯出失敗：' + e.message); }
@@ -4480,7 +4531,7 @@ function srBoxOf(p) {
 const srBlobOf = (p) => (p.srBuf ? new Blob([p.srBuf], { type: 'image/jpeg' }) : null);
 function srDrop(p) { for (const k of ['sr', 'srBuf', 'srBox', 'srSide', 'srV', 'srKey']) delete p[k]; }
 function srUsable(p) {
-  if (!p || !(p.srBuf instanceof ArrayBuffer) || !p.srBuf.byteLength || p.srV !== SR_VER || !p.srBox) return false;
+  if (!p || !(p.lite ? p.liteSr > 0 : p.srBuf instanceof ArrayBuffer && p.srBuf.byteLength) || p.srV !== SR_VER || !p.srBox) return false;
   const [x0, y0, x1, y1] = p.srBox, e = 1e-6;
   return srPts(p).every(([x, y]) => x >= x0 - e && x <= x1 + e && y >= y0 - e && y <= y1 + e);
 }
@@ -4687,6 +4738,7 @@ const CHANGELOG = [
     { t: '提升 AI 框選穩定性，減少一次處理多張時閃退', since: '5.0' },
     { t: '新增倒數拍攝按鈕：當偵測不到框選範圍時，將自動倒數 3 秒拍下', since: '5.1' },
     { t: '加入拍攝聚焦動畫，框到後更有預備感', since: '5.1' },
+    { t: '修正大量讀檔有可能閃退的問題', since: '5.2' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
