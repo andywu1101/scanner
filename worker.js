@@ -1500,6 +1500,11 @@ self.onmessage = async (e) => {
       const { buffer, width, height, fast } = e.data;
       const r = detectQuad(cv, new Uint8Array(buffer), width, height, !!fast);
       self.postMessage({ id, ok: true, result: r });
+    } else if (type === 'teedQuad') {
+      // 4.3：即時掃描的 TEED 後援，只用 TEED 自己的框（沒把握回傳 null）
+      const T = { data: new Uint8Array(e.data.buffer), width: e.data.width, height: e.data.height };
+      const q = teedRegionQuad(cv, T);
+      self.postMessage({ id, ok: true, result: q ? { corners: q.map((p) => [Math.min(1, Math.max(0, p[0] / T.width)), Math.min(1, Math.max(0, p[1] / T.height))]), area: polyArea(q) / (T.width * T.height), teed: true } : null });
     } else if (type === 'maskQuad') {
       const r0 = maskQuad(cv, e.data);
       let r = r0;

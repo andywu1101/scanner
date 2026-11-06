@@ -21,16 +21,39 @@ function load(eng) {
   if (eng === 'old') ort.env.wasm.simd = true;
   engine = eng;
 }
+/* 5.1.8：所有 AI 工作（框選、精修、TEED、測速）的建立與執行一律排隊（aiQ），一個做完才做下一個。ONNX Runtime 同時做會撞車：
+   GPU：「another WebGPU EP inference session is being created」→ 這一頁或這次測速改用 CPU（作者 iPhone 17 實測，精修一頁變 1 分鐘以上）；
+   新 worker 第一次同時建立：「multiple calls to 'initWasm()' detected」→ 被當成新引擎載入失敗，改用相容模式（舊引擎沒有 GPU）。
+   GPU 工作在執行時建立另一個 GPU 工作：兩個都卡住不動（軟體 WebGPU 重現）。所以執行也排進同一條隊伍。
+   這個 worker 本來就是單執行緒，排隊只差在 GPU 計算時不能同時建別的工作；即時 TEED 最多多等一塊精修（iPhone GPU 約 0.15 秒）。
+   萬一還是遇到「being created」，等一下再試（最多 5 次），不馬上改用 CPU */
+let aiQ = Promise.resolve();
+function serial(fn) { const job = aiQ.then(fn); aiQ = job.catch(() => {}); return job; }
+const qRel = (s) => serial(() => s.release()).catch(() => {}); // 釋放也排隊
+// 執行一次並讀回第一個輸出（GPU 的結果要讀回來，讀回也算在執行裡）
+// tm：測速時傳入，記下真正執行的時間（不含排隊等待），免得排隊時把 GPU 量成比較慢
+function qRun(s, feeds, tm) { return serial(async () => { const t0 = performance.now(); const o = await s.run(feeds); const t = o[s.outputNames[0]]; const d = t.getData ? await t.getData() : t.data; if (tm) tm.ms = performance.now() - t0; return d; }); }
+// 同一種工作同時有好幾個請求（例如連拍時框選）：共用同一次建立，不重複建立兩份（多一份就多占一份記憶體）
+const once = (fn) => { let p = null; return () => p || (p = fn().finally(() => { p = null; })); };
+const getSess = once(() => getSess0()), srGet = once(() => srGet0()), teedGet = once(() => teedGet0());
+function mkSess(model, want) {
+  return serial(async () => {
+    for (let k = 0; ; k++) {
+      try { return await ort.InferenceSession.create(model, { executionProviders: [want], graphOptimizationLevel: 'all' }); }
+      catch (err) { if (k >= 4 || !/being created|initWasm/i.test(String(err && err.message))) throw err; await new Promise((r) => setTimeout(r, 300 * (k + 1))); }
+    }
+  });
+}
 async function create(want) {
   try {
-    return await ort.InferenceSession.create(MODEL, { executionProviders: [want], graphOptimizationLevel: 'all' });
+    return await mkSess(MODEL, want);
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
     throw new Error(want === 'wasm' ? 'ENGINE:' + msg : msg);
   }
 }
-async function release() { if (sess) { try { await sess.release(); } catch (_) {} } sess = null; sessEP = null; }
-async function getSess() {
+async function release() { const s0 = sess; sess = null; sessEP = null; if (s0) await qRel(s0); }
+async function getSess0() {
   if (sess && sessEP === ep) return sess;
   await release();
   try { sess = await create(ep); sessEP = ep; }
@@ -48,10 +71,8 @@ function input(buffer) {
   for (let i = 0; i < N; i++) for (let c = 0; c < 3; c++) f[c * N + i] = (src[i * 4 + c] / mx - MEAN[c]) / STD[c];
   return f;
 }
-async function run(s, f) {
-  const out = await s.run({ [s.inputNames[0]]: new ort.Tensor('float32', f, [1, 3, 320, 320]) });
-  const t = out[s.outputNames[0]];
-  return t.getData ? await t.getData() : t.data; // GPU 的結果要讀回來
+async function run(s, f, tm) {
+  return qRun(s, { [s.inputNames[0]]: new ort.Tensor('float32', f, [1, 3, 320, 320]) }, tm); // 5.1.8 排隊
 }
 // 一次性的速度比較：CPU 跑一次、GPU 跑一次（GPU 第一次已含準備時間，實測和之後差不多），回傳毫秒；不支援 GPU 時 gpu＝null
 async function bench() {
@@ -59,15 +80,15 @@ async function bench() {
   await release();
   let cpu = null, gpu = null;
   const sc = await create('wasm');
-  let t = performance.now(); await run(sc, f); cpu = performance.now() - t;
-  try { await sc.release(); } catch (_) {}
+  const tm = {}; await run(sc, f, tm); cpu = tm.ms;
+  await qRel(sc);
   let hasGpu = false;
   try { hasGpu = !!(self.navigator && self.navigator.gpu && (await self.navigator.gpu.requestAdapter())); } catch (_) {}
   if (engine === 'new' && hasGpu) {
     try {
       const sg = await create('webgpu');
-      t = performance.now(); await run(sg, f); gpu = performance.now() - t;
-      try { await sg.release(); } catch (_) {}
+      await run(sg, f, tm); gpu = tm.ms;
+      await qRel(sg);
     } catch (_) { gpu = null; }
   }
   return { cpu, gpu };
@@ -76,21 +97,20 @@ async function bench() {
 /* 4.1：AI 精修（Real-ESRGAN animevideov3「線稿」模型，2.5 MB，BSD-3）。app.js 把拉正後的頁面縮小、切成固定大小的塊送來，
    每塊 SR_IN×SR_IN（RGBA）→ 放大 4 倍的 RGBA；接縫由 app.js 多讀邊緣處理。和框選用不同的 session，GPU／CPU 各自選（srEP） */
 const SR_MODEL = new URL('lib/ai/sr-anime.onnx', self.location.href).href;
-let srSess = null, srSessEP = null, srEP = 'wasm';
-async function srCreate(want) { return ort.InferenceSession.create(SR_MODEL, { executionProviders: [want], graphOptimizationLevel: 'all' }); }
-async function srRelease() { if (srSess) { try { await srSess.release(); } catch (_) {} } srSess = null; srSessEP = null; }
-async function srGet() {
+let srSess = null, srSessEP = null, srEP = 'wasm', srErr = '';
+async function srCreate(want) { return mkSess(SR_MODEL, want); }
+async function srRelease() { const s0 = srSess; srSess = null; srSessEP = null; if (s0) await qRel(s0); }
+async function srGet0() {
   if (srSess && srSessEP === srEP) return srSess;
   await srRelease();
   try { srSess = await srCreate(srEP); srSessEP = srEP; }
-  catch (err) { if (srEP !== 'webgpu') throw err; srEP = 'wasm'; srSess = await srCreate('wasm'); srSessEP = 'wasm'; }
+  catch (err) { if (srEP !== 'webgpu') throw err; srErr = err && err.message ? err.message : String(err); srEP = 'wasm'; srSess = await srCreate('wasm'); srSessEP = 'wasm'; }
   return srSess;
 }
-async function srRun(s, buf, n) {
+async function srRun(s, buf, n, tm) {
   const src = new Uint8ClampedArray(buf), N2 = n * n, f = new Float32Array(3 * N2);
   for (let i = 0; i < N2; i++) { f[i] = src[i * 4] / 255; f[N2 + i] = src[i * 4 + 1] / 255; f[2 * N2 + i] = src[i * 4 + 2] / 255; }
-  const out = await s.run({ [s.inputNames[0]]: new ort.Tensor('float32', f, [1, 3, n, n]) });
-  const t = out[s.outputNames[0]], y = t.getData ? await t.getData() : t.data;
+  const y = await qRun(s, { [s.inputNames[0]]: new ort.Tensor('float32', f, [1, 3, n, n]) }, tm); // 5.1.8 排隊
   const O = n * 4, M = O * O, p = new Uint8ClampedArray(M * 4);
   for (let i = 0; i < M; i++) { const a = i * 4; p[a] = y[i] * 255 + 0.5; p[a + 1] = y[M + i] * 255 + 0.5; p[a + 2] = y[2 * M + i] * 255 + 0.5; p[a + 3] = 255; }
   return p.buffer;
@@ -99,35 +119,39 @@ async function srRun(s, buf, n) {
 async function srBench(n) {
   const buf = () => new Uint8ClampedArray(n * n * 4).fill(200).buffer;
   await srRelease();
-  let cpu = null, gpu = null, t;
+  let cpu = null, gpu = null, why = '';
   const sc = await srCreate('wasm');
-  await srRun(sc, buf(), n); t = performance.now(); await srRun(sc, buf(), n); cpu = performance.now() - t;
-  try { await sc.release(); } catch (_) {}
+  const tm = {}; await srRun(sc, buf(), n); await srRun(sc, buf(), n, tm); cpu = tm.ms;
+  await qRel(sc);
+  // 5.1.7：GPU 用不了時記下原因（舊引擎／瀏覽器沒有 WebGPU／拿不到顯示卡／建立或執行出錯）
   let hasGpu = false;
-  try { hasGpu = !!(self.navigator && self.navigator.gpu && (await self.navigator.gpu.requestAdapter())); } catch (_) {}
+  if (engine !== 'new') why = '舊引擎（相容模式）';
+  else if (!(self.navigator && self.navigator.gpu)) why = '這個環境沒有 WebGPU';
+  else { try { hasGpu = !!(await self.navigator.gpu.requestAdapter()); if (!hasGpu) why = '拿不到 GPU'; } catch (err) { why = '拿不到 GPU：' + (err && err.message ? err.message : err); } }
   if (engine === 'new' && hasGpu) {
-    try { const sg = await srCreate('webgpu'); await srRun(sg, buf(), n); t = performance.now(); await srRun(sg, buf(), n); gpu = performance.now() - t; try { await sg.release(); } catch (_) {} }
-    catch (_) { gpu = null; }
+    try { const sg = await srCreate('webgpu'); await srRun(sg, buf(), n); await srRun(sg, buf(), n, tm); gpu = tm.ms; await qRel(sg); }
+    catch (err) { gpu = null; why = 'GPU 出錯：' + (err && err.message ? err.message : err); }
   }
-  return { cpu, gpu };
+  return { cpu, gpu, why: why.slice(0, 80) };
 }
 
 /* 4.2：TEED 邊緣模型（MIT，0.25 MB）。app.js 送來照片縮小後的 RGBA（長邊 640、寬高為 8 的倍數），
    回傳每個像素的邊緣強度（0～255）。worker.js 的 teedFuse 用它跟 AI 遮罩互助框選。4.2.1 起一律用 CPU */
 const TEED_MODEL = new URL('lib/ai/teed.onnx', self.location.href).href;
 let teedSess = null, teedSessEP = null, teedNoGpu = true; // 4.2.1：一律用 CPU（iPhone 只多約 0.1 秒，少占 GPU 記憶體；輸入大小隨照片比例變，GPU 每種大小都要另開記憶體）
-async function teedGet() {
+async function teedGet0() {
   const want = teedNoGpu ? 'wasm' : ep;
   if (teedSess && teedSessEP === want) return teedSess;
-  if (teedSess) { try { await teedSess.release(); } catch (_) {} teedSess = null; teedSessEP = null; }
-  try { teedSess = await ort.InferenceSession.create(TEED_MODEL, { executionProviders: [want], graphOptimizationLevel: 'all' }); teedSessEP = want; }
-  catch (err) { if (want !== 'webgpu') throw err; teedNoGpu = true; return teedGet(); }
+  if (teedSess) { const s0 = teedSess; teedSess = null; teedSessEP = null; await qRel(s0); }
+  try { teedSess = await mkSess(TEED_MODEL, want); teedSessEP = want; }
+  catch (err) { if (want !== 'webgpu') throw err; teedNoGpu = true; return teedGet0(); }
   return teedSess;
 }
+let teedQ = Promise.resolve();
 async function teedRun(buffer, w, h) {
   const d = new Uint8ClampedArray(buffer), n = w * h, f = new Float32Array(3 * n);
   for (let i = 0; i < n; i++) { f[i] = d[i * 4 + 2] - 103.939; f[n + i] = d[i * 4 + 1] - 116.779; f[2 * n + i] = d[i * 4] - 123.68; } // BGR 減平均
-  const go = async (s) => { const o = await s.run({ [s.inputNames[0]]: new ort.Tensor('float32', f, [1, 3, h, w]) }); const t = o[s.outputNames[0]]; return t.getData ? await t.getData() : t.data; };
+  const go = (s) => qRun(s, { [s.inputNames[0]]: new ort.Tensor('float32', f, [1, 3, h, w]) }); // 5.1.8 排隊
   let y;
   try { y = await go(await teedGet()); }
   catch (err) { if (teedSessEP !== 'webgpu') throw err; teedNoGpu = true; y = await go(await teedGet()); } // GPU 出錯改用 CPU
@@ -143,15 +167,19 @@ self.onmessage = async (e) => {
     if (type === 'bench') { self.postMessage({ id, ok: true, result: await bench() }); return; }
     if (type === 'setEP') { ep = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: ep }); return; }
     if (type === 'srBench') { self.postMessage({ id, ok: true, result: await srBench(e.data.n) }); return; }
-    if (type === 'srEP') { srEP = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: srEP }); return; }
+    if (type === 'srEP') { srErr = ''; srEP = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: srEP }); return; }
     if (type === 'srTile') {
       let r;
       try { r = await srRun(await srGet(), e.data.buffer, e.data.n); }
-      catch (err) { if (srSessEP !== 'webgpu') throw err; srEP = 'wasm'; r = await srRun(await srGet(), e.data.buffer, e.data.n); } // GPU 出錯改用 CPU（buffer 還在：送進來的是複本）
+      catch (err) { if (srSessEP !== 'webgpu') throw err; srErr = err && err.message ? err.message : String(err); srEP = 'wasm'; r = await srRun(await srGet(), e.data.buffer, e.data.n); } // GPU 出錯改用 CPU（buffer 還在：送進來的是複本）
       self.postMessage({ id, ok: true, result: r }, [r]); return;
     }
+    if (type === 'srState') { self.postMessage({ id, ok: true, result: { ep: srSessEP || srEP, err: srErr } }); return; } // 5.1.7
     if (type === 'srRelease') { await srRelease(); self.postMessage({ id, ok: true, result: null }); return; }
-    if (type === 'teed') { const r = await teedRun(e.data.buffer, e.data.width, e.data.height); self.postMessage({ id, ok: true, result: r }, [r]); return; }
+    if (type === 'teed') { // 4.3：即時掃描與框選可能同時送來，排隊一個一個跑（同一個 session 不能同時跑）
+      const job = teedQ.then(() => teedRun(e.data.buffer, e.data.width, e.data.height)); teedQ = job.catch(() => {});
+      const r = await job; self.postMessage({ id, ok: true, result: r }, [r]); return;
+    }
     const s = await getSess();
     if (type === 'warm') { self.postMessage({ id, ok: true, result: { ep: sessEP } }); return; }
     const f = input(e.data.buffer);

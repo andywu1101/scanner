@@ -1,5 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
+const APP_VER = '5.1.9'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -27,7 +28,7 @@ const HAS_IC = 'ImageCapture' in window; // Android Chrome 有；新版 iPhone S
 
 /* ---------- 設定 ---------- */
 // 3.1：新使用者預設「稍後裁切」（立即裁切改成每張都進框選，連拍會變慢）；已經存過設定的老使用者維持原本的值。sound＝拍攝音效
-const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: true, autoAI: false, confirmCrop: true, upscale: 'auto', landscape: true, sound: true, v: 2 };
+const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: true, autoAI: false, confirmCrop: true, upscale: 'auto', landscape: true, sound: true, countdown: true, v: 2 }; // 5.1.3：倒數拍攝預設開（手動關過的人維持關）
 const settings = (() => {
   let s = {};
   try { s = JSON.parse(localStorage.getItem('cocoscan-settings') || '{}'); } catch (_) {}
@@ -556,6 +557,8 @@ async function renderHome() {
   inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); });
   updateHomeStrip(pages);
   $('#recentOpen').onclick = () => openDoc(doc.id);
+  // 5.1.9：點卡片空白處也開啟文件（名稱、縮圖、按鈕維持原本功能）
+  body.querySelector('.recent').onclick = (e) => { if (!e.target.closest('input, label, button')) openDoc(doc.id); };
   $('#recentPdf').onclick = () => { state.docId = doc.id; openPdfSheet(); };
   $('#allDocs').onclick = () => { renderLibrary(); go('library'); };
 }
@@ -817,7 +820,7 @@ async function aiCorners(blob) {
     let r = null;
     try { r = await aiFrame(img); } finally { URL.revokeObjectURL(url); }
     if (!r || !r.corners) return { fail: 'reject', msg: r && r.reject };
-    return { corners: r.corners, curve: r.curve ? normCurve(r.corners, r.curve) : null };
+    return { corners: r.corners, curve: r.curve ? normCurve(r.corners, r.curve) : null, teed: teedNote(r) };
   } catch (e) { console.warn('auto AI', e); return { fail: 'error', msg: e && e.message ? e.message : String(e) }; }
 }
 $('#fileCamera').addEventListener('change', async (e) => {
@@ -830,7 +833,7 @@ $('#fileCamera').addEventListener('change', async (e) => {
   if (await aiAutoOn()) {
     busy('AI 框選中…');
     const r = await aiCorners(blob);
-    if (r.corners) { corners = r.corners; curve = r.curve; }
+    if (r.corners) { corners = r.corners; curve = r.curve; if (r.teed && teedMarkOn()) toast(r.teed); }
     else toast(r.fail === 'reject' ? 'AI 判斷不適合，保留原框' : 'AI 框選失敗：' + (r.msg || '未知原因'));
   }
   unbusy();
@@ -853,7 +856,7 @@ $('#fileGallery').addEventListener('change', async (e) => {
   let docId = cameraTarget;
   if (!docId) docId = (await createDoc()).id;
   const useAI = await aiAutoOn();
-  let rejected = 0, aiErr = null;
+  let rejected = 0, aiErr = null, tdone = 0;
   // 4.2.2：開著自動 AI 框選時，和 4.2.1 的批次框選一樣先暫停頁面處理、全部框完再處理（相簿照片解析度高，一邊框一邊處理容易閃退）
   if (useAI) { busy(`AI 框選中 1 / ${files.length}`); await holdQueue(); aiBatchMark(true); }
   try {
@@ -864,7 +867,7 @@ $('#fileGallery').addEventListener('change', async (e) => {
       let c = await detectBlob(blob), cv = null;
       if (useAI) {
         const r = await aiCorners(blob);
-        if (r.corners) { c = r.corners; cv = r.curve; } else if (r.fail === 'reject') rejected++; else aiErr = aiErr || r.msg || '未知原因';
+        if (r.corners) { c = r.corners; cv = r.curve; if (r.teed) tdone++; } else if (r.fail === 'reject') rejected++; else aiErr = aiErr || r.msg || '未知原因';
       }
       await addPage(docId, blob, c, cv);
     } catch (err) { toast(err.message); }
@@ -873,12 +876,13 @@ $('#fileGallery').addEventListener('change', async (e) => {
   unbusy();
   openDoc(docId, current !== 'doc');
   if (aiErr) toast('AI 框選失敗：' + aiErr);
-  else if (rejected) toast(files.length === 1 ? 'AI 判斷不適合，保留原框' : `${rejected} 張 AI 判斷不適合，保留原框`);
+  else if (rejected) toast((files.length === 1 ? 'AI 判斷不適合，保留原框' : `${rejected} 張 AI 判斷不適合，保留原框`) + teedCount(tdone));
+  else if (teedCount(tdone)) toast(`AI 框選完成${teedCount(tdone)}`); // 5.0
 });
 
 /* ---------- 即時掃描 ---------- */
 const live = { running: false };
-const STABLE_MS = 500;   // 鎖定後大致不動多久就拍
+const STABLE_MS = 1000;  // 鎖定後大致不動多久就拍（5.1.3：作者覺得 0.5 秒太突然、聚焦圓環來不及顯示，iPhone、Android 都改 1 秒）
 const STABLE_TOL = 0.05;  // 容許的手抖（畫面比例；1.21 從 3% 放寬，作者覺得拿穩了還是拍不下去）
 const EDGE_MARGIN = 0.01; // 紙張四角至少離畫面邊緣 1%（1.4～1.15 是 3%，作者覺得要拿太遠，1.16 放寬）
 async function startLive(docId) {
@@ -892,7 +896,10 @@ async function startLive(docId) {
     hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0, paused: false,
     aiLater: [], lastRes: null, lastPageId: null, deferring: false, deferDone: null, finishing: false, camOff: false,
     seenT: performance.now(), idleT0: performance.now(), tipOn: false, // 4.1.7
+    teedOK: false, teedBusy: false, teedNext: 0, teedErr: 0, capSrc: null, tT0: null, tCapped: false, tCapSig: null, // 4.3
+    cd: null, cdT0: null, cdBlock: null, cdPrev: null, cdNext: 0, cdBase: 0, // 5.1；5.1.4 cdBase
   });
+  aiHas([TEED_FILE]).then((ok) => { if (live.running) live.teedOK = ok; }); // 4.3：有 TEED 才有即時後援
   aiErrShown = false; aiTag(aiPend ? 'AI ' + aiPend : '', !!aiPend);
   pauseQueue(); // 掃描期間暫停高解析度處理，讓抓邊保持流暢
   resetLock();
@@ -1042,6 +1049,7 @@ function camResume() {
 }
 function stopLive() {
   live.running = false; live.camOff = false; live.tipOn = false; tipSync();
+  if (live.teedOK) aiReleaseSoon(); // 4.3：即時 TEED 用過，離開後釋放 AI 引擎
   clearTimeout(camTipT); $('#camTip').classList.remove('show');
   if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
   live.stream = null;
@@ -1072,7 +1080,7 @@ function medianQuad(list) {
   return [0, 1, 2, 3].map((i) => [med(list.map((q) => q[i][0])), med(list.map((q) => q[i][1]))]);
 }
 function resetLock() {
-  Object.assign(live, { cand: [], acc: [], lockQ: null, outliers: 0, miss: 0, anchorQ: null, stableSince: 0, progress: 0, best: null, prevQs: null, lastQs: null, edge: false, motionHits: 0, moveHits: 0 });
+  Object.assign(live, { edgeT0: 0, cand: [], tCand: [], lockSrc: null, acc: [], lockQ: null, outliers: 0, miss: 0, anchorQ: null, stableSince: 0, progress: 0, best: null, prevQs: null, lastQs: null, edge: false, motionHits: 0, moveHits: 0 });
   live.lastQuad = null;
 }
 // 清晰度（梯度能量），用來從穩定期間挑最清楚的一格
@@ -1155,12 +1163,113 @@ function grabFull(v) { return grabInto(fullCanvases[0], v); }
 // 4.2.3：進框選畫面時放掉（每張約 50 MB，原本整個拍攝過程都留著）；下一張倒數時 grabInto 會自動重建
 function freeFullCanvases() { live.best = null; for (const c of fullCanvases) c.width = c.height = 0; }
 
+/* ---------- 4.3 即時掃描的 TEED 後援 ----------
+   白色／淺色背景時原本的偵測鎖不到框：鎖不到 2 秒後，相機畫面縮成長邊 640 交給 TEED（ai-worker，CPU），
+   worker.js 的 teedRegionQuad 找出「中間沒被線切斷的最大區塊」當框，交給同一套鎖定、倒數、拍照流程（onDetect 的 src 'teed'）。
+   - 跑完一次休息至少和這次一樣久（iPhone 17 約每 0.4 秒、Y31 約每 1.6 秒一次），原本的偵測照常一起找，誰先鎖到聽誰的
+   - TEED 鎖到後，這一頁由 TEED 負責到拍完、換頁為止（teedOwns：原本的偵測不參與、也不跑）
+   - 連續跑 20 秒沒結果就先停（控制發熱），畫面明顯改變（frameSig 差 > 18）才再開始；只有下載過 AI 資料（有 TEED）的手機才有 */
+const TEED_AFTER = 1000, TEED_CAP = 20000; // 5.1.4：2 → 1 秒，讓 TEED 在倒數（2 秒）開始前有機會先試
+function teedOwns() { return !!live.teedOK && (live.armed ? live.lockSrc === 'teed' : live.capSrc === 'teed'); }
+function teedWanted(now) {
+  if (!live.teedOK || !live.running || !settings.autoShutter || live.paused || live.capturing || live.cd) return false;
+  if (live.armed) return live.lockQ ? live.lockSrc === 'teed' : now - Math.max(live.idleT0 || now, live.seenT || 0) > TEED_AFTER;
+  return live.capSrc === 'teed';
+}
+function teedRearm() { live.capSrc = null; live.tT0 = null; live.tCapped = false; live.tCand = []; }
+function teedTick(v) {
+  if (!live.teedOK || live.teedBusy) return;
+  const now = performance.now();
+  if (live.tCapped) { // 停下來了：畫面明顯改變才重新開始
+    if (now < (live.teedNext || 0)) return;
+    live.teedNext = now + 500;
+    if (live.tCapSig && sigDiff(frameSig(v), live.tCapSig) > 18) { live.tCapped = false; live.tT0 = null; }
+    return;
+  }
+  if (!teedWanted(now)) { if (!teedOwns()) live.tT0 = null; return; }
+  if (live.tT0 == null) live.tT0 = now;
+  if (now - live.tT0 > TEED_CAP) { live.tCapped = true; live.tCapSig = frameSig(v); live.tCand = []; if (live.armed && live.lockSrc === 'teed') { resetLock(); setRing(0); } return; }
+  if (now < (live.teedNext || 0)) return;
+  live.teedBusy = true;
+  teedLiveRun(v).then(() => { live.teedErr = 0; }).catch((e) => { console.warn('TEED 即時', e); if (++live.teedErr >= 3) live.teedOK = false; })
+    .finally(() => { const dt = performance.now() - now; live.teedBusy = false; live.teedNext = performance.now() + Math.min(1200, Math.max(250, dt)); }); // 休息和這次一樣久（最少 0.25、最多 1.2 秒；第一次含載入引擎，比較慢）
+}
+async function teedLiveRun(v) {
+  const pre = live.armed && live.lockQ && live.lockSrc === 'teed' && live.progress > 0 && !live.ic;
+  let full = null;
+  if (pre) { const spare = live.best && live.best.canvas === fullCanvases[0] ? fullCanvases[1] : fullCanvases[0]; full = grabInto(spare, v); }
+  const sig = frameSig(v);
+  const [w, h] = sourceSize(v), s = 640 / Math.max(w, h);
+  const W = Math.max(8, Math.floor((w * s) / 8) * 8), H = Math.max(8, Math.floor((h * s) / 8) * 8);
+  const c = canvasOf(W, H), x = c.getContext('2d', { willReadFrequently: true });
+  x.drawImage(v, 0, 0, W, H);
+  const d = x.getImageData(0, 0, W, H);
+  const sharp = sharpness(d), gt = grayThumb(d);
+  const buf = await aiCall({ type: 'teed', buffer: d.data.buffer, width: W, height: H }, [d.data.buffer]);
+  if (!teedWanted(performance.now())) return;
+  const r = await wcall('teedQuad', { buffer: buf, width: W, height: H }, [buf]);
+  if (!teedWanted(performance.now())) return; // 這段時間原本的偵測鎖到了、拍下了、或離開了
+  onDetect(r, sig, full, sharp, gt, 'teed');
+}
+/* ---------- 5.1 倒數拍攝（5.1.1：開始倒數後就暫停框選，一般晃動不影響，只有大幅移動才停；設定 countdown，預設關；拍攝畫面 AI 按鈕右邊的碼錶按鈕，手動拍攝時隱藏） ----------
+   自動拍攝時框選鎖不到 2 秒、而且畫面拿穩（5.1.5 起要連續 1 秒）→ 中央圓環倒數（5.1.5 起 3、2、1，原本 5 秒；每秒嗶一聲）→ 拍下整個畫面
+   （和自己按快門一樣：開著自動 AI 框選就交給 AI 框，否則標 ✂ 待裁切）。點相機畫面取消；拍下或取消後，畫面明顯改變（差 > 18，翻頁、換紙）才會再倒數，同一頁不會重拍。
+   倒數中原本的偵測或 TEED 鎖到合理的框 → 停止倒數，走正常流程。開著倒數時不顯示 4 秒「直接按快門」提示 */
+const CD_STILL = 10, CD_STILL_LOOSE = 20, CD_LOOSE_AFTER = 5000, CD_WAIT = '拿穩後開始倒數', CD_LEAVE = 25, CD_LEAVE_N = 3, CD_EDGE = 3000, CD_AFTER = 2000, CD_LEN = 3000, CD_MOVE = 10, CD_CHANGE = 18, CD_HINT = '倒數拍攝中，點畫面可取消';
+const cdOn = () => !!(settings.countdown && settings.autoShutter);
+function cdStop() { live.cdT0 = null; live.cd = null; live.cdAnchor = null; live.cdOut = 0; live.cdWait = false; }
+// 5.1.3：兩張小縮圖的差異，先各自扣掉平均亮度（相機自動曝光造成的整體變亮變暗不算）
+function sigDiffN(a, b) {
+  let ma = 0, mb = 0; for (let i = 0; i < a.length; i++) { ma += a[i]; mb += b[i]; } ma /= a.length; mb /= b.length;
+  let d = 0; for (let i = 0; i < a.length; i++) d += Math.abs(a[i] - ma - (b[i] - mb));
+  return d / a.length;
+}
+function cdTick(v) {
+  const now = performance.now();
+  if (!cdOn() || !live.running || live.paused || live.capturing || !v.videoWidth) { cdStop(); return; }
+  if (now < (live.cdNext || 0)) return;
+  live.cdNext = now + 150;
+  const sig = frameSig(v);
+  if (live.cdBlock) { if (sigDiff(sig, live.cdBlock) > CD_CHANGE) live.cdBlock = null; else { cdStop(); live.cdPrev = sig; return; } }
+  const diff = live.cdPrev ? sigDiff(sig, live.cdPrev) : 0;
+  live.cdPrev = sig;
+  if (live.cdT0 != null) {
+    // 5.1.3：倒數已經開始就靠倒數拍完：跟「倒數開始那一刻的畫面」比（扣掉整體亮度，相機自動調亮暗不算），
+    // 差 > 25 連續 3 次（約 0.45 秒）才停（紙被拿走、翻頁、鏡頭轉到別處），重新等 2 秒。
+    // 作者影片：手持 5 秒內與起點最多差約 17；不同場景之間 23～39（5.1.1 是跟上一次比、差 > 18 一次就停，偶爾會被打斷）
+    live.cdOut = live.cdAnchor && sigDiffN(sig, live.cdAnchor) > CD_LEAVE ? (live.cdOut || 0) + 1 : 0;
+    if (!live.armed || live.cdOut >= CD_LEAVE_N) { cdStop(); live.idleT0 = now; return; }
+  } else {
+    // 5.1.5：要「連續 1 秒都拿穩」才開始倒數（作者：放好紙時倒數早就在跑了）：現在的畫面和最近 1 秒內每一次取樣比（扣亮度），都 ≤ 10；
+    // 鎖不到超過 5 秒還沒開始就放寬到 20。作者影片：手持跟 1 秒前比，門檻 10 時 96% 的時間算穩定（含刻意移動、翻頁）
+    live.cdHist = (live.cdHist || []).filter((h) => now - h.t <= 1400); live.cdHist.push({ t: now, sig }); // 鎖不到時拍攝迴圈約 0.2 秒一圈，留 1.4 秒內的取樣，最舊的要超過 0.9 秒
+    const idle = now - Math.max(live.idleT0 || now, live.cdBase || 0);
+    const tol = idle > CD_LOOSE_AFTER ? CD_STILL_LOOSE : CD_STILL;
+    const still = live.cdHist[0].t <= now - 900 && live.cdHist.every((h) => sigDiffN(sig, h.sig) <= tol);
+    // 5.1.2：框一直卡在「請稍微拉遠一點」超過 3 秒也可以倒數（拍下後交給 AI 框）
+    const stuck = live.lockQ && live.edge && live.edgeT0 && now - live.edgeT0 > CD_EDGE;
+    // 5.1.4：從「這一頁開始找」或「上一次真正鎖穩（聚焦過半）」算 2 秒；一閃而過的鎖定（原本的偵測或 TEED）不延後倒數
+    const want = live.armed && (stuck || (!live.lockQ && now - Math.max(live.idleT0 || now, live.cdBase || 0) > CD_AFTER));
+    live.cdWait = want && !still; // 等使用者拿穩：提示「拿穩後開始倒數」
+    if (!want || !still) return;
+    live.cdWait = false; live.cdHist = [];
+    live.cdT0 = now; live.cdLastN = Math.ceil(CD_LEN / 1000) + 1; live.cdAnchor = sig; live.cdOut = 0;
+    resetLock(); setRing(0); live.tCand = []; // 5.1.1：開始倒數就暫停框選，畫面上不顯示框
+  }
+  const el = now - live.cdT0, n = Math.ceil((CD_LEN - el) / 1000);
+  live.cd = true;
+  setHint(CD_HINT); // 5.1.5：倒數中不偵測，提示要在這裡設
+  if (n >= 1 && n < live.cdLastN) { live.cdLastN = n; sfxPlay('tick'); }
+  if (el >= CD_LEN) { cdStop(); capture(sig, null, null, true); }
+}
 async function liveLoop() {
   if (!live.running) return;
   const v = $('#video');
   // 手動模式不找框（1.19）；提示語只顯示 3 秒（1.20，作者覺得一直掛著礙眼）
   if (!settings.autoShutter && !live.paused && !live.capturing) { if (performance.now() < (live.manualHintUntil || 0)) setHint(MANUAL_HINT); else hideHint(); }
-  if (workerReady && settings.autoShutter && !live.paused && !live.detecting && !live.capturing && v.videoWidth) {
+  if (workerReady && settings.autoShutter && !live.paused && !live.capturing && v.videoWidth && !live.cd) teedTick(v); // 4.3；5.1.1 倒數中不跑
+  cdTick(v); // 5.1
+  if (workerReady && settings.autoShutter && !live.paused && !live.detecting && !live.capturing && v.videoWidth && !teedOwns() && !live.cd) { // 5.1.1：倒數中不偵測
     live.detecting = true;
     try {
       // 進入穩定倒數後，每一格都先存全解析度畫面（與偵測用的是同一瞬間）
@@ -1185,14 +1294,50 @@ async function liveLoop() {
   if (live.running) setTimeout(liveLoop, settings.autoShutter && performance.now() - (live.seenT || 0) > 3000 ? 200 : 20);
 }
 
-function onDetect(r, sig, full, sharp, gt) {
+/* 5.0.2：即時掃描的框要「像一張紙」才算數（作者：白色背景時常出現貼著畫面邊框的怪框，還會鎖定，TEED 因此沒機會上場）
+   - 兩條以上的邊貼著畫面邊框（兩端都在 1.5% 內）：真正的紙四周一定會露出背景，這是把畫面邊框當成紙邊
+   - 四個角要在 70～110 度、相對兩邊長度差不到 1.5 倍、凸四邊形（作者 95 張樣張正確的紙是 79～99 度、最多 1.27 倍）
+   作者 4 段影片 250 格：擋掉 88／128 個錯框，誤擋 0／120 個正確框；錄影裡的兩個怪框都擋得到 */
+const QP_EDGE = 0.015, QP_AMIN = 70, QP_AMAX = 110, QP_OPP = 1.5;
+function quadPlausible(q) {
+  if (!q || q.length !== 4) return false;
+  let hug = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) % 4];
+    for (const k of [0, 1]) for (const e of [0, 1]) if (Math.abs(a[k] - e) < QP_EDGE && Math.abs(b[k] - e) < QP_EDGE) hug++;
+  }
+  if (hug >= 2) return false;
+  // 5.1.2：一條邊從畫面的一角延伸到另一角（兩端都在角落 3% 內）＝把畫面邊框當成紙邊（作者截圖：上方被淺色布蓋住，框的上緣就是畫面上緣）
+  const atCorner = (p) => Math.min(p[0], 1 - p[0]) < 0.03 && Math.min(p[1], 1 - p[1]) < 0.03;
+  for (let i = 0; i < 4; i++) if (atCorner(q[i]) && atCorner(q[(i + 1) % 4])) return false;
+  const v = $('#video'), ar = v && v.videoWidth && v.videoHeight ? v.videoWidth / v.videoHeight : 0.75; // 角度要用實際比例算
+  const P = q.map((p) => [p[0] * ar, p[1]]);
+  let sgn = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = P[(i + 3) % 4], b = P[i], c = P[(i + 1) % 4];
+    const x1 = a[0] - b[0], y1 = a[1] - b[1], x2 = c[0] - b[0], y2 = c[1] - b[1];
+    const ang = (Math.acos(Math.max(-1, Math.min(1, (x1 * x2 + y1 * y2) / (Math.hypot(x1, y1) * Math.hypot(x2, y2) || 1)))) * 180) / Math.PI;
+    if (ang < QP_AMIN || ang > QP_AMAX) return false;
+    const cr = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]), s1 = Math.sign(cr);
+    if (!s1 || (sgn && s1 !== sgn)) return false;
+    sgn = s1;
+  }
+  const L = [0, 1, 2, 3].map((i) => Math.hypot(P[(i + 1) % 4][0] - P[i][0], P[(i + 1) % 4][1] - P[i][1]));
+  const rt = (x, y) => Math.max(x, y) / Math.max(1e-9, Math.min(x, y));
+  return rt(L[0], L[2]) <= QP_OPP && rt(L[1], L[3]) <= QP_OPP;
+}
+function onDetect(r, sig, full, sharp, gt, src) {
   if (!live.running || live.capturing) return;
+  src = src || 'det';
+  if (live.cd) return; // 5.1.1：倒數中不框選（倒數開始前送出的偵測結果也丟掉）
+  if (src === 'det' && teedOwns()) return; // 4.3：TEED 鎖定的頁、或 TEED 負責判斷換頁時，原本的偵測不參與
+  const tq = src === 'teed'; // 4.3：TEED 一秒只有 1～2 格，累積的格數門檻較低
   const now = performance.now();
-  const ok = r && r.area > 0.1;
+  const ok = r && r.area > 0.1 && quadPlausible(r.corners); // 5.0.2：不像一張紙的框當作沒找到
   const qs = ok ? quadSig(gt, r.corners) : null;
   // 4.2：自動拍攝時框選鎖不到 4 秒，提示可以直接按快門（快門鈕呼吸）；鎖到或拍下就收起，每一頁都會再提示
   //（4.1.7 原本是 10 秒後提示一次改成手動拍攝）
-  if (live.armed && settings.autoShutter && !live.tipOn && !live.lockQ && now - Math.max(live.idleT0 || now, live.seenT || 0) > TIP_MS) live.tipOn = true;
+  if (live.armed && settings.autoShutter && !cdOn() && !live.tipOn && !live.lockQ && now - Math.max(live.idleT0 || now, live.seenT || 0) > TIP_MS) live.tipOn = true; // 5.1：開著倒數時不顯示
   tipSync();
   live.dbg = { motion: live.prevQs && qs ? qsDiff(qs, live.prevQs) : null, change: live.capturedQs && qs ? qsDiff(qs, live.capturedQs) : null };
 
@@ -1207,15 +1352,15 @@ function onDetect(r, sig, full, sharp, gt) {
     const changed = qs && live.capturedQs && qsDiff(qs, live.capturedQs) > CHANGE_TOL;
     live.chgHits = changed ? (live.chgHits || 0) + 1 : 0;
     if (!ok) live.miss++; else live.miss = 0;
-    if (live.chgHits >= 3 || live.miss >= 3) { live.rearm = live.chgHits >= 3 ? 'changed' : 'miss'; live.armed = true; live.chgHits = 0; resetLock(); live.idleT0 = now; } // 4.2：換頁後重新計時提示
+    const hitN = tq ? 2 : 3;
+    if (live.chgHits >= hitN || live.miss >= hitN) { live.rearm = live.chgHits >= hitN ? 'changed' : 'miss'; live.armed = true; live.chgHits = 0; resetLock(); live.idleT0 = now; teedRearm(); } // 4.2：換頁後重新計時提示
     else { setHint('已拍好，請換下一頁', true); return; }
   }
 
   if (!ok) {
-    live.miss++;
-    live.cand = [];
-    if (live.miss >= 4 && live.lockQ) resetLock();
-    if (!live.lockQ) { setRing(0); setHint(live.tipOn ? waitTip() : live.count ? '放入下一頁' : '將文件放進畫面中'); }
+    if (tq) { live.tCand = []; if (live.lockQ) { if (++live.miss >= 2) resetLock(); } }
+    else { live.miss++; live.cand = []; if (live.miss >= 4 && live.lockQ) resetLock(); }
+    if (!live.lockQ) { setRing(0); setHint(live.cd ? CD_HINT : live.cdWait ? CD_WAIT : live.tipOn ? waitTip() : live.count ? '放入下一頁' : '將文件放進畫面中'); }
     return;
   }
   live.miss = 0;
@@ -1223,12 +1368,14 @@ function onDetect(r, sig, full, sharp, gt) {
 
   if (!live.lockQ) {
     // 尚未鎖定：需要連續 3 格位置一致，才確定是文件
-    if (live.cand.length && maxDisp(q, live.cand[live.cand.length - 1]) > 0.05) live.cand = [];
-    live.cand.push(q);
-    if (live.cand.length < 3) { setHint(live.tipOn ? waitTip() : '尋找文件中…'); return; }
-    live.lockQ = medianQuad(live.cand);
-    live.acc = live.cand.slice();
-    live.cand = [];
+    // 4.3：原本的偵測和 TEED 各自累積（白色背景時原本的偵測一直跳，混在一起 TEED 永遠累積不起來），先鎖到的當這一頁的來源
+    const C = tq ? 'tCand' : 'cand', need = tq ? 2 : 3;
+    if (live[C].length && maxDisp(q, live[C][live[C].length - 1]) > 0.05) live[C] = [];
+    live[C].push(q);
+    if (live[C].length < need) { setHint(live.cd ? CD_HINT : live.cdWait ? CD_WAIT : live.tipOn ? waitTip() : '尋找文件中…'); return; }
+    live.lockQ = medianQuad(live[C]);
+    live.acc = live[C].slice();
+    live.cand = []; live.tCand = []; live.lockSrc = src; live.tT0 = null;
     live.anchorQ = live.lockQ; live.stableSince = now; live.best = null;
   } else {
     // 已鎖定：離群值忽略，連續 3 次離群才放棄鎖定（例如紙被拿走）
@@ -1257,20 +1404,22 @@ function onDetect(r, sig, full, sharp, gt) {
   if (live.moveHits >= 2) { live.anchorQ = live.lockQ; live.stableSince = now; live.best = null; live.moveHits = 0; }
   const progress = Math.min(1, (now - live.stableSince) / STABLE_MS);
   live.progress = progress;
+  if (progress >= 0.5) live.cdBase = now; // 5.1.4：真正鎖穩才重新計時倒數
 
   // 紙張太靠近畫面邊緣：照片四周會沒有空間可以重新裁切，先不拍
   // 1.19：只有「一整條邊」貼著畫面的一側（例如書本攤開，旁邊那頁超出畫面）照樣可以拍；兩側以上或只有一個角碰到才擋
   live.edge = edgeBlocked(live.lockQ);
+  if (live.edge) { if (!live.edgeT0) live.edgeT0 = now; } else live.edgeT0 = 0; // 5.1.2：卡在「拉遠一點」多久
   if (live.edge) {
     live.stableSince = now; live.progress = 0; live.best = null;
-    setRing(0); setHint(live.tipOn ? waitTip() : '請稍微拉遠一點'); return;
+    setRing(0); setHint(live.cd ? CD_HINT : live.cdWait ? CD_WAIT : live.tipOn ? waitTip() : '請稍微拉遠一點'); return;
   }
 
   // 記錄倒數期間最清楚的一格
   if (full && (!live.best || sharp > live.best.sharp)) live.best = { canvas: full, sharp, quad: q.map((p) => p.slice()) };
 
   if (!settings.autoShutter) { setRing(0); setHint('按下快門拍攝', true); return; }
-  setRing(progress);
+  if (progress <= 0) setRing(0); // 5.1.5：進度圈改由 drawOverlay 照時間畫
   if (live.tipOn && progress < 0.05) { setHint(waitTip()); } else { live.tipOn = false; setHint('對準了，保持住…', true); }
   if (progress >= 1 && Date.now() - live.lastCapT > 800) {
     const b = live.best;
@@ -1316,6 +1465,19 @@ function videoRect() {
   const s = Math.min(st.width / vw, st.height / vh);
   return { x: (st.width - vw * s) / 2, y: (st.height - vh * s) / 2, w: vw * s, h: vh * s, cw: st.width, ch: st.height };
 }
+function centerRing(ctx, c, p, num, color, alpha) {
+  const r = num ? 40 : 30;
+  ctx.save(); ctx.globalAlpha = alpha == null ? 1 : alpha; ctx.lineCap = 'round';
+  ctx.lineWidth = num ? 7 : 6; ctx.strokeStyle = 'rgba(255,255,255,.38)';
+  ctx.beginPath(); ctx.arc(c[0], c[1], r, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = color; ctx.beginPath(); ctx.arc(c[0], c[1], r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.max(0.001, p)); ctx.stroke();
+  if (num) {
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.beginPath(); ctx.arc(c[0], c[1], r - 6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = '800 34px -apple-system,"PingFang TC","Noto Sans TC",sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(String(num), c[0], c[1] + 1);
+  }
+  ctx.restore();
+}
 function drawOverlay() {
   if (!live.running) return;
   if (live.camOff) { requestAnimationFrame(drawOverlay); return; } // 3.1.5 相機暫停時不重畫
@@ -1334,18 +1496,28 @@ function drawOverlay() {
   } else { live.shown = null; live.fade = 0; }
   if (live.shown) {
     const pts = live.shown.map((p) => [R.x + p[0] * R.w, R.y + p[1] * R.h]);
-    const pr = settings.autoShutter ? live.progress : 1;
+    // 5.1.5：進度照時間算（每次重畫都算，約每秒 60 次），不再跟著偵測結果一格一格跳；不穩時 stableSince 會被重設，圓環就退回去
+    const pr = settings.autoShutter ? (live.progress > 0 && live.stableSince ? Math.min(1, (performance.now() - live.stableSince) / STABLE_MS) : 0) : 1;
+    if (settings.autoShutter && live.armed && live.lockQ && !live.edge) setRing(pr); // 快門鈕外圈也一起
     ctx.globalAlpha = live.fade;
     ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))); ctx.closePath();
     // 綠色隨倒數逐漸變濃
-    ctx.fillStyle = live.edge ? 'rgba(242,196,141,.18)' : `rgba(143,179,138,${0.12 + 0.3 * pr})`;
+    const gold = settings.teedMark && live.lockSrc === 'teed' && !live.edge; // 5.0：TEED 協助標記開著時，TEED 找到的框用金色
+    ctx.fillStyle = live.edge ? 'rgba(242,196,141,.18)' : gold ? `rgba(255,200,40,${0.12 + 0.3 * pr})` : `rgba(143,179,138,${0.12 + 0.3 * pr})`;
     ctx.fill();
     ctx.lineWidth = 3 + pr; ctx.lineJoin = 'round';
-    ctx.strokeStyle = live.edge ? '#F2C48D' : '#A8D4A1';
+    ctx.strokeStyle = live.edge ? '#F2C48D' : gold ? '#FFC828' : '#A8D4A1';
     ctx.stroke();
     ctx.fillStyle = '#fff';
     pts.forEach((p) => { ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, 7); ctx.fill(); });
     ctx.globalAlpha = 1;
+    // 5.1 聚焦：框的中央一個圓環跟著穩定進度填滿，填滿就拍（拍攝動畫關閉時不畫）
+    if (settings.autoShutter && live.armed && !live.edge && pr > 0 && animOn()) centerRing(ctx, [pts.reduce((a, p) => a + p[0], 0) / 4, pts.reduce((a, p) => a + p[1], 0) / 4], pr, null, gold ? '#FFC828' : '#7ED67E', live.fade);
+  }
+  // 5.1 倒數拍攝：畫面中央的圓環，中間顯示 5～1
+  if (live.cd && live.cdT0 != null && !live.capturing) {
+    const el = performance.now() - live.cdT0;
+    centerRing(ctx, [R.x + R.w / 2, R.y + R.h / 2], Math.min(1, el / CD_LEN), Math.max(1, Math.ceil((CD_LEN - el) / 1000)), '#7ED67E', 1);
   }
   requestAnimationFrame(drawOverlay);
 }
@@ -1386,8 +1558,13 @@ async function capture(sig, full, quadAt, userPress) {
   const steady = !manualMode && !!live.lockQ && !live.edge;
   const needUser = !!userPress && !steady;
   const quad = needUser ? null : quadAt || live.lockQ;
+  // 4.3：TEED 在找或已鎖定時拍下，換頁由 TEED 判斷（原本的偵測在白色背景會誤以為紙拿開，同一頁被重拍）
+  live.capSrc = live.teedOK && (live.lockSrc === 'teed' || live.tT0 != null || live.tCapped) ? 'teed' : 'det';
+  const capQsOk = live.capSrc === 'det' || live.lockSrc === 'teed'; // 不是 TEED 鎖定的框：內容指紋留給拍完後 TEED 的第一格補
+  live.tT0 = null; live.tCapped = false;
   const v = $('#video');
   if (!sig) sig = frameSig(v);
+  cdStop(); live.cdBlock = sig; // 5.1：畫面明顯改變才會再倒數
   setRing(0);
   // 3.1 拍攝動畫：拍下那一格先存一張小圖（Android 另外拍照要等，先用預覽畫面）；立即裁切＝每一張都進框選（自動拍攝也一樣）
   const fxOn = animOn(), now2crop = !settings.cropLater;
@@ -1423,7 +1600,7 @@ async function capture(sig, full, quadAt, userPress) {
       src = full || grabFull(v); // 畫面在這一刻已經固定
       flash(); sfxPlay('shutter'); if (fxOn) startFx(); else shotFx('ok'); // 這一格已經固定下來，手可以移開了
       setHint('已拍好，請換下一頁', true);
-      live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; // 立刻隱藏框
+      live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = capQsOk ? live.lastQs : null; // 立刻隱藏框
       await deferSave();
       // 1.33：iPhone 省記憶體檔：存檔前縮到上限以內
       const cap = photoCap();
@@ -1441,7 +1618,7 @@ async function capture(sig, full, quadAt, userPress) {
         toast('這張沒拍成功，請再拍一次'); shotFx(''); if (fx) fx.stop();
         live.armed = true; resetLock(); live.capturing = false; endDefer(); return;
       }
-    } else { flash(); sfxPlay('shutter'); if (fxOn) startFx(); else shotFx('ok'); setHint('已拍好，請換下一頁', true); live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; await deferSave(); }
+    } else { flash(); sfxPlay('shutter'); if (fxOn) startFx(); else shotFx('ok'); setHint('已拍好，請換下一頁', true); live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = capQsOk ? live.lastQs : null; await deferSave(); }
     let corners = quad ? quad.map((p) => p.slice()) : FULL.map((p) => p.slice());
     // 用較高解析度重新精算四個角（只在結果相近時採用，避免抓錯）
     try {
@@ -1497,7 +1674,7 @@ async function capture(sig, full, quadAt, userPress) {
         if (!fx) busy('AI 框選中…');
         try {
           const r = await aiFixPage(page.id, blob, corners, true);
-          if (r && r.corners) { corners = r.corners; curve = r.curve; } else aiReport(r, live.count);
+          if (r && r.corners) { corners = r.corners; curve = r.curve; if (r.teed && teedMarkOn()) setTimeout(() => toast(r.teed), 600); } else aiReport(r, live.count);
         } finally { if (!fx) unbusy(); aiReleaseNow(); } // 4.2.3：立即裁切每張都用 AI，原本引擎從頭到尾不釋放
       }
       if (fx) { fx.release(); await fx.ready; }
@@ -1664,7 +1841,7 @@ async function removeLivePage(pageId) {
   if (last) { live.lastPageId = last.id; th.querySelector('img').src = blobUrl('live:last', last.original, last.id); refreshLiveThumb(last.id); }
 }
 function liveResume() {
-  live.paused = false; live.idleT0 = live.seenT = performance.now(); // 4.1.7
+  live.paused = false; live.idleT0 = live.seenT = performance.now(); live.tT0 = null; live.tCapped = false; // 4.1.7；4.3
   if (!live.track || live.track.readyState === 'ended') { finishLive(); return; } // 中途被切到背景，相機已經關了
   camResume(); // 3.1.5：相機恢復送畫面
   // 1.20：iPhone 從裁切畫面回來時，相機畫面會用錯誤的大小重畫（縮成約四分之三、四周變黑）。
@@ -1683,6 +1860,7 @@ function tipSync() { const b = $('#shutter'); if (b) b.classList.toggle('nudge',
 function manualHint() { live.manualHintUntil = performance.now() + 3000; setHint(MANUAL_HINT); }
 function updateLiveBtns() {
   $('#aiBtn').classList.toggle('on', !!settings.autoAI);
+  $('#cdBtn').classList.toggle('on', !!settings.countdown); $('#cdBtn').style.display = settings.autoShutter ? '' : 'none'; // 5.1：手動拍攝時隱藏，開關狀態不變
   $('#autoBtn').classList.toggle('on', settings.autoShutter);
   $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
   $('#cropModeBtn').textContent = settings.cropLater ? '稍後裁切' : '立即裁切';
@@ -1704,12 +1882,23 @@ $('#cropModeBtn').onclick = () => {
   else liveTip('立即裁切', '每拍一張就進入裁切畫面<br>確認成品後再拍下一張');
 };
 $('#liveClose').onclick = () => finishLive();
+$('#cdBtn').onclick = () => {
+  sfxPrime();
+  settings.countdown = !settings.countdown; saveSettings(); cdStop(); updateLiveBtns();
+  liveTip('倒數拍攝', settings.countdown ? '偵測不到框選範圍時<br>拿穩後倒數 3 秒自動拍下（點畫面可取消）' : '已關閉倒數拍攝');
+};
+// 5.1：倒數中點相機畫面取消，這一頁不再倒數，畫面明顯改變後才重新開始
+$('#live .stage').addEventListener('click', (e) => {
+  if (!live.cd || e.target.closest('button,.pill,#liveTip,#camTip')) return;
+  cdStop(); live.cdBlock = frameSig($('#video'));
+  toast('已取消倒數，翻頁或換紙後會重新開始');
+});
 $('#liveDone').onclick = () => finishLive();
 $('#liveThumb').onclick = () => finishLive();
 $('#autoBtn').onclick = () => {
   settings.autoShutter = !settings.autoShutter; saveSettings();
   updateLiveBtns();
-  live.armed = true; resetLock(); setRing(0); live.tipOn = false; tipSync(); live.idleT0 = live.seenT = performance.now(); // 4.1.7
+  live.armed = true; resetLock(); teedRearm(); setRing(0); live.tipOn = false; tipSync(); live.idleT0 = live.seenT = performance.now(); // 4.1.7；4.3
   if (settings.autoShutter) { setHint('將文件放進畫面中'); liveTip('自動拍攝', '對準文件，穩定後自動拍下'); }
   else { manualHint(); liveTip('手動拍攝', '不自動框選，拍完再自己調整範圍'); }
 };
@@ -1785,7 +1974,7 @@ async function aiFixPage(pageId, blob, c0, keepCrop) {
     enqueue(p.id);
     if (current === 'doc' && state.docId === p.docId) onPageUpdated(p.id);
     if (live.running && live.lastPageId === p.id) refreshLiveThumb(p.id);
-    return { corners: p.corners, curve: p.curve };
+    return { corners: p.corners, curve: p.curve, teed: teedNote(r) };
   } catch (e) { console.warn('auto AI', e); return { fail: 'error', msg: e && e.message ? e.message : String(e) }; }
 }
 // 1.31：背景 AI 的狀態（左下角縮圖上方的「AI n」標籤）；不適合或失敗時提示
@@ -1814,7 +2003,7 @@ function aiBg(pageId, blob, c0, n) {
 }
 // Android：按「完成」後把這次拍的頁一次用 AI 框好
 async function aiRunLater(ids) {
-  let done = 0, firstErr = null;
+  let done = 0, firstErr = null, tdone = 0;
   busy(`AI 框選中 1 / ${ids.length}`);
   await holdQueue(); aiBatchMark(true);
   try {
@@ -1822,12 +2011,12 @@ async function aiRunLater(ids) {
       busy(`AI 框選中 ${i + 1} / ${ids.length}`);
       const p = await DB.get('pages', ids[i]); if (!p || isBroken(p)) continue;
       const r = await aiFixPage(p.id, p.original, p.corners, false);
-      if (r && r.corners) done++;
+      if (r && r.corners) { done++; if (r.teed) tdone++; }
       else if (r && r.fail === 'error' && !firstErr) firstErr = r.msg;
     }
   } finally { aiBatchMark(false); unbusy(); releaseQueue(); aiReleaseSoon(); }
   if (current === 'doc') renderDoc();
-  toast(firstErr ? `AI 框選失敗：${firstErr}` : `AI 框選完成：${done} / ${ids.length} 頁${done < ids.length ? '（其餘判斷不適合，保留原框）' : ''}`);
+  toast(firstErr ? `AI 框選失敗：${firstErr}` : `AI 框選完成：${done} / ${ids.length} 頁${done < ids.length ? '（其餘判斷不適合，保留原框）' : ''}${teedCount(tdone)}`);
 }
 let torchOn = false;
 $('#torchBtn').onclick = async () => {
@@ -1894,6 +2083,10 @@ function sfxBuild(name) {
     const a = out(0.2); add(a, click(1), 0); add(a, click(0.7), 0.075);
     return norm(a, 0.9);
   }
+  if (name === 'tick') { // 5.1 倒數拍攝每秒一聲短促的「嗶」
+    const a = out(0.09); for (let i = 0; i < a.length; i++) { const t = i / sr; a[i] = Math.sin(2 * Math.PI * 1320 * t) * Math.min(1, t / 0.004) * Math.exp(-t / 0.03); }
+    return norm(a, 0.7);
+  }
   if (name === 'ding') { // 4.0：只留原本掃描音效最後的「叮」（刷的聲音拿掉）；用同一段合成再取 0.78 秒之後，音量與音色和 3.1 一樣
     const a = sfxBuild('scan'); return a.slice(Math.round(0.78 * sr));
   }
@@ -1912,7 +2105,7 @@ function sfxBuild(name) {
   add(a, ch, 0.78);
   return norm(a, 0.8);
 }
-const SFX_GAIN = { shutter: 0.4, scan: 0.45, ding: 0.45 }; // 提示音：比一般影片聲音小一點
+const SFX_GAIN = { shutter: 0.4, scan: 0.45, ding: 0.45, tick: 0.3 }; // 提示音：比一般影片聲音小一點
 function sfxPlay(name) {
   if (settings.sound === false || !sfx.ctx) return;
   try {
@@ -3720,6 +3913,7 @@ $('#btnSettings').onclick = () => {
     <div class="switch"><span>即時掃描自動拍攝<small>文件穩定約 1 秒後自動按快門</small></span><button class="tg ${settings.autoShutter ? 'on' : ''}" data-k="autoShutter"></button></div>
     <div class="switch"><span>拍照後先確認裁切<small>高畫質拍照後進入四角微調畫面</small></span><button class="tg ${settings.confirmCrop ? 'on' : ''}" data-k="confirmCrop"></button></div>
     <div class="switch"><span>✨ 自動 AI 框選<small id="aiStat">即時掃描、高畫質拍照、相簿匯入都自動用 AI 框選紙張</small></span><button class="tg ${settings.autoAI ? 'on' : ''}" id="setAuto"></button></div>
+    <div class="switch"><span>倒數拍攝<small>即時掃描偵測不到框選範圍時，拿穩後倒數 3 秒自動拍下（只在自動拍攝時）</small></span><button class="tg ${settings.countdown ? 'on' : ''}" data-k="countdown"></button></div>
     <div class="switch"><span>拍攝動畫<small id="animNote">即時掃描拍下時的攤平、掃描光動畫；手機較舊覺得卡可以關掉</small></span><button class="tg ${animPref() ? 'on' : ''}" id="setAnim"></button></div>
     <div class="switch"><span>拍攝音效<small>快門聲與掃描音效，跟著手機音量（iPhone 開靜音時不會響）</small></span><button class="tg ${settings.sound !== false ? 'on' : ''}" data-k="sound"></button></div>
     <button class="srow" id="setAiUp" style="display:none"><span>有可升級的AI 引擎，點擊升級 ›<span class="sub">AI 框選速度更快，需要下載約 ${AI_UP_MB} MB</span></span></button>
@@ -3736,7 +3930,25 @@ $('#btnSettings').onclick = () => {
     <button class="srow" id="setLog"><span>更新日誌 ›<span class="sub">目前版本 v${APP_VER}</span></span></button>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描的畫質見上方「即時掃描畫質」：iPhone 最高約 1200 萬畫素（網頁相機的上限），Android 最高 1600 萬畫素。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
+    <div class="switch" id="teedMarkRow" style="${settings.teedMarkShown ? '' : 'display:none'}"><span>顯示 TEED 協助標記<small>測試用：即時掃描 TEED 找到的框改成金色；AI 框選時提示 TEED 換了哪幾條邊</small></span><button class="tg ${settings.teedMark ? 'on' : ''}" data-k="teedMark"></button></div>
+    <div class="note" id="srInfo" style="font-size:12px;${settings.teedMarkShown ? '' : 'display:none'}"><div id="srInfoTx">${srInfoText()}</div><button class="srow" id="srRebench" style="margin-top:6px"><span>重新測速（精修與框選）</span></button><button class="srow" id="aiUnsafe" style="${settings.aiSafeCPU || settings.aiCrashN ? '' : 'display:none'}"><span>解除框選閃退保護</span></button></div>
+    <div class="note" id="setVer" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
+    // 5.0：隱藏區（TEED 協助標記開關、AI 診斷）。5.1.9 起入口改在更新日誌的「目前版本」連點 5 下（logCurrent），這裡不再能點
+    s.querySelector('#srRebench').onclick = async () => { // 5.1.7：隱藏區手動重測；5.1.9 精修與框選一起
+      try {
+        if (!(await srEnsureModel())) return;
+        settings.aiBenchV = null; settings.aiBenchN = 0; aiBenchedNow = false; saveSettings();
+        await srBenchNow(true); await aiInit(); await aiBench();
+      } catch (e) { toast('測速失敗：' + (e && e.message ? e.message : e)); }
+      const t = s.querySelector('#srInfoTx'); if (t) t.innerHTML = srInfoText();
+    };
+    s.querySelector('#aiUnsafe').onclick = () => { // 5.1.9：手動解除框選閃退保護
+      settings.aiSafeCPU = false; settings.aiCrashN = 0; aiSafeNow = false; settings.aiBenchV = null; settings.aiBenchN = 0; aiBenchedNow = false; saveSettings();
+      aiNote('手動解除框選閃退保護'); aiReleaseNow();
+      s.querySelector('#aiUnsafe').style.display = 'none';
+      const t = s.querySelector('#srInfoTx'); if (t) t.innerHTML = srInfoText();
+      toast('已解除，下次 AI 框選會重新比較 CPU／GPU');
+    };
     s.querySelector('#setDefAdj').onclick = () => openDefAdj('bw');
     // 3.0：還在用舊 AI 引擎的人（按過「暫時不要」或還沒被問）才顯示，升級後消失（3.0.1 搬到自動 AI 框選開關下方）
     // 3.0.1：自動 AI 框選開關（和拍攝畫面的 AI 按鈕同一個設定，整個 App 共用）；下面一行顯示 AI 資料的狀態。
@@ -3954,9 +4166,24 @@ async function aiState() {
   return { model, neu, old };
 }
 // 能用 AI 的引擎：新引擎（沒被安全網停用）優先，其次舊引擎
-function aiPickEngine(st) { return st.neu && !settings.aiForceOld ? 'new' : st.old ? 'old' : st.neu ? 'new' : null; }
+function aiPickEngine(st) { return st.neu && !aiOldNow ? 'new' : st.old ? 'old' : st.neu ? 'new' : null; }
+/* 5.1.7：AI 的「退一步」都只算暫時，之後自動再試（作者：不希望正式版使用者被永久卡在慢速；測試版 iPhone 17 精修一頁超過 1 分鐘、GPU 無法使用，
+   正式版同一支手機不到 20 秒）。原本三個永久降級：
+   (1) 新引擎載入失敗一次 → settings.aiForceOld 永久用舊引擎（沒有 GPU）→ 改成 aiOldNow 只在這次打開期間；舊的 aiForceOld 啟動時清掉、記一筆
+   (2) 精修測速只測一次 → 測到 CPU（GPU 無法使用或比較慢）就每次打開第一次精修重測，連續 3 次（SR_RETRY）才定案；精修途中 GPU 出錯改用 CPU 的那次不算進速度
+   (3) 框選閃退保護一次就永久 CPU → 第一次只在這次打開期間用 CPU（aiSafeNow），下次再試 GPU；第二次（settings.aiCrashN ≥ 2）才永久；GPU 批次框選順利做完就歸零
+   設定最下方隱藏區（連點版號 5 次）顯示引擎、GPU 狀態、原因與最近紀錄（settings.aiLog，保留 8 筆），並有「重新測速」按鈕 */
+let aiOldNow = false, aiSafeNow = false, aiEPNow = null, srBenchedNow = false;
+function aiNote(t) {
+  const d = new Date(), z = (n) => String(n).padStart(2, '0');
+  settings.aiLog = [`${d.getMonth() + 1}/${d.getDate()} ${z(d.getHours())}:${z(d.getMinutes())} ${t}`, ...(settings.aiLog || [])].slice(0, 8); saveSettings();
+}
+if (settings.aiForceOld) { settings.aiForceOld = false; saveSettings(); aiNote('啟動時是相容模式（舊引擎），改試新引擎'); }
+if (settings.aiSafeCPU && settings.aiCrashN == null) { settings.aiSafeCPU = false; settings.aiCrashN = 1; settings.aiBenchV = null; saveSettings(); aiNote('框選閃退保護（舊版一次就永久 CPU）改回可試 GPU'); }
+// 5.1.9：閃退保護定案（一律 CPU）後，更新到新版本時再給一次機會（再中斷一次就又定案）
+else if (settings.aiSafeCPU && settings.aiSafeVer !== APP_VER) { settings.aiSafeCPU = false; settings.aiCrashN = 1; settings.aiBenchV = null; settings.aiBenchN = 0; saveSettings(); aiNote('更新到新版本，框選閃退保護再給一次 GPU 機會'); }
 async function aiCached() { const st = await aiState(); return st.model && !!aiPickEngine(st); }
-const aiUpgradable = (st) => st.model && st.old && !st.neu && !settings.aiForceOld;
+const aiUpgradable = (st) => st.model && st.old && !st.neu && !aiOldNow;
 function aiReset() {
   if (aiWorker) aiWorker.terminate();
   for (const p of aiPending.values()) p.rej(new Error('AI 重新載入'));
@@ -3980,11 +4207,15 @@ const AI_BATCH_KEY = 'cocoscan-aibatch';
 function aiBatchMark(on) {
   aiBatchOn = on;
   try { if (on) localStorage.setItem(AI_BATCH_KEY, String(Date.now())); else localStorage.removeItem(AI_BATCH_KEY); } catch (_) {}
+  if (!on && aiEPNow === 'webgpu' && settings.aiCrashN) { settings.aiCrashN = 0; saveSettings(); } // 5.1.7：GPU 順利做完一批，閃退次數歸零
 }
 function aiCrashCheck() {
   let was = null; try { was = localStorage.getItem(AI_BATCH_KEY); localStorage.removeItem(AI_BATCH_KEY); } catch (_) {}
   if (!was) return;
-  settings.aiEP = 'wasm'; settings.aiSafeCPU = true; saveSettings();
+  settings.aiCrashN = (settings.aiCrashN || 0) + 1; aiSafeNow = true; // 5.1.7：這次打開期間先用 CPU
+  if (settings.aiCrashN >= 2) { settings.aiEP = 'wasm'; settings.aiSafeCPU = true; settings.aiSafeVer = APP_VER; aiNote('框選又中斷（第 2 次），這個版本一律用 CPU'); }
+  else aiNote('框選中斷（第 1 次），這次先用 CPU，下次打開再試 GPU');
+  saveSettings();
   setTimeout(() => toast('上次 AI 框選中斷，已改用較省記憶體的方式'), 1500);
 }
 aiCrashCheck();
@@ -4000,21 +4231,29 @@ function aiInit() {
     aiWorker = new Worker('ai-worker.js');
     aiWorker.onmessage = (e) => { const p = aiPending.get(e.data.id); if (!p) return; aiPending.delete(e.data.id); e.data.ok ? p.res(e.data.result) : p.rej(new Error(e.data.error)); };
     aiWorker.onerror = (e) => { for (const p of aiPending.values()) p.rej(new Error('ENGINE:' + (e.message || 'AI 載入失敗'))); aiPending.clear(); aiWorker = null; aiInitP = null; };
-    await aiPost({ type: 'init', engine: eng, ep: settings.aiEP || 'wasm' });
-    aiEngineNow = eng;
+    const r0 = await aiPost({ type: 'init', engine: eng, ep: aiSafeNow ? 'wasm' : settings.aiEP || 'wasm' });
+    aiEngineNow = eng; aiEPNow = r0 && r0.ep;
     // 新引擎還沒比較過 CPU／GPU（例如剛下載完、或新版第一次用）：在背景比較一次
-    if (eng === 'new' && settings.aiBenchV !== AI_NEW_VER) aiBench();
+    // 5.1.9：比出 CPU（GPU 無法使用或比較慢）就每次打開再比一次，連續 3 次（AI_RETRY）才定案；閃退保護中不比
+    if (eng === 'new' && !settings.aiSafeCPU && (settings.aiBenchV !== AI_NEW_VER || (settings.aiEP !== 'webgpu' && (settings.aiBenchN || 1) < AI_RETRY && !aiBenchedNow))) aiBench();
   })();
   aiInitP.catch(() => { aiInitP = null; }); // 載入失敗下次重來
   return aiInitP;
 }
-async function aiBench() {
+const AI_RETRY = 3;
+let aiBenchedNow = false, aiBenchP = null;
+function aiBench() { return aiBenchP || (aiBenchP = aiBench0().finally(() => { aiBenchP = null; })); } // 同時叫兩次共用同一次
+async function aiBench0() {
   try {
     const r = await aiPost({ type: 'bench' });
+    const prev = settings.aiBenchV === AI_NEW_VER ? settings.aiEP : null;
     settings.aiEP = !settings.aiSafeCPU && r.gpu != null && r.gpu < r.cpu * 0.8 ? 'webgpu' : 'wasm'; // 4.2.1：閃退保護改過 CPU 就不再改回 GPU
-    settings.aiBenchV = AI_NEW_VER; saveSettings();
+    settings.aiBenchN = settings.aiEP === 'webgpu' ? 0 : prev === 'wasm' ? (settings.aiBenchN || 1) + 1 : 1; // 5.1.9：連續比出 CPU 的次數
+    settings.aiBenchR = { cpu: Math.round(r.cpu), gpu: r.gpu != null ? Math.round(r.gpu) : null };
+    if (prev && prev !== settings.aiEP) aiNote(`框選重新比較：${prev === 'webgpu' ? 'GPU' : 'CPU'} → ${settings.aiEP === 'webgpu' ? 'GPU' : 'CPU'}`);
+    aiBenchedNow = true; settings.aiBenchV = AI_NEW_VER; saveSettings();
     console.info('AI bench', r, settings.aiEP);
-    await aiPost({ type: 'setEP', ep: settings.aiEP });
+    aiEPNow = await aiPost({ type: 'setEP', ep: aiSafeNow ? 'wasm' : settings.aiEP }); // 5.1.7：閃退保護第一次只影響這次打開
   } catch (e) { console.warn('AI bench', e); }
 }
 // 送一個工作給 AI；新引擎載入失敗（ENGINE:）時啟動安全網：改用舊引擎再試一次
@@ -4027,7 +4266,7 @@ async function aiCall(payload, transfer, retried) {
     const m = String(e && e.message);
     if (retried || !m.startsWith('ENGINE:') || aiEngineNow === 'old') throw new Error(m.replace(/^ENGINE:/, ''));
     console.warn('AI 新引擎載入失敗，改用舊引擎', m);
-    settings.aiForceOld = true; saveSettings(); aiReset();
+    aiOldNow = true; aiReset(); aiNote('新引擎載入失敗，這次改用相容模式：' + m.replace(/^ENGINE:/, '').slice(0, 60)); // 5.1.7：只在這次打開期間
     if (!(await aiHas(AI_OLD)) && !(await aiDownload(AI_OLD, 'AI 改用相容模式，下載中…'))) throw new Error('無法載入 AI 引擎');
     return aiCall(keep ? Object.assign({}, payload, { buffer: keep }) : payload, keep ? [keep] : [], true);
   }
@@ -4069,14 +4308,14 @@ async function aiEnsure(inApp, noAsk, what) {
   const st = await aiState();
   const need = [...(st.model ? [] : [AI_MODEL]), ...AI_NEW, ...((await aiHas([TEED_FILE])) ? [] : [TEED_FILE])];
   if (!(await aiDownload(need, '下載 AI 資料中…'))) return false;
-  settings.aiForceOld = false; settings.aiBenchV = null; saveSettings();
+  aiOldNow = false; settings.aiBenchV = null; saveSettings();
   await aiDropOld(); aiReset();
   return true;
 }
 // 舊使用者升級成新引擎（拍攝畫面的詢問、設定裡的按鈕）
 async function aiUpgrade() {
   if (!(await aiDownload(AI_NEW, '升級 AI 引擎中…'))) return false;
-  settings.aiForceOld = false; settings.aiBenchV = null; settings.aiUpAsked = true; saveSettings();
+  aiOldNow = false; settings.aiBenchV = null; settings.aiUpAsked = true; saveSettings();
   await aiDropOld(); aiReset();
   aiInit().catch(() => {}); // 載入新引擎並在背景比較 CPU／GPU
   return true;
@@ -4125,6 +4364,15 @@ function teedFetchBg() {
   return teedFetching;
 }
 setTimeout(() => { if (navigator.onLine !== false) teedFetchBg(); }, 8000);
+// 5.0：TEED 協助標記（設定裡隱藏的開關，作者測試用）：這次的 AI 框選 TEED 有沒有介入
+function teedNote(r) {
+  const src = r && r.fuse && r.fuse.src;
+  if (!r || !r.corners || !src || !src.includes('t')) return null;
+  if (src === 'tttt' && !r.aiCorners) return 'TEED 補框';
+  return 'TEED 協助：' + ['上', '右', '下', '左'].filter((_, i) => src[i] === 't').map((x) => x + '邊').join('、');
+}
+const teedMarkOn = () => !!settings.teedMark;
+const teedCount = (n) => (teedMarkOn() && n ? `（TEED 協助 ${n} 頁）` : '');
 function aiRejectMsg(r) {
   return r && r.reject === 'book' ? '這頁看起來是攤開的書，AI 框選不適合，請用「自動偵測」或手動調整' : 'AI 找不到合適的紙張範圍，請手動調整';
 }
@@ -4141,7 +4389,8 @@ $('#cropAI').onclick = async () => {
     if (r.curve) c.curve = normCurve(c.corners, r.curve);
     else c.curve = c.curveMode ? straightCurve(c.corners) : null;
     drawCrop();
-    toast(r.curve ? '已用 AI 框選，並貼合書頁彎曲' : '已用 AI 框選，可以再微調');
+    const tn = teedMarkOn() && teedNote(r); // 5.0
+    toast((r.curve ? '已用 AI 框選，並貼合書頁彎曲' : '已用 AI 框選，可以再微調') + (tn ? `｜${tn}` : ''));
   } catch (e) { console.warn(e); toast('AI 框選失敗：' + e.message); }
   finally { unbusy(); }
 };
@@ -4156,7 +4405,7 @@ async function aiFrameDoc() {
   let overwrite = true;
   if (mine) overwrite = confirm(`有 ${mine} 頁自己調整過範圍。\n要一起用 AI 重新框選嗎？\n\n確定：全部重新框選\n取消：保留那幾頁`);
   const before = [], tag = 'ai:' + Date.now();
-  let changed = 0, kept = 0;
+  let changed = 0, kept = 0, tdone = 0;
   busy(`AI 框選中 1 / ${pages.length}`);
   await holdQueue(); aiBatchMark(true);
   try {
@@ -4167,6 +4416,7 @@ async function aiFrameDoc() {
       let r = null;
       try { const { img, url } = await loadImg(p.original); try { r = await aiFrame(img); } finally { URL.revokeObjectURL(url); } }
       catch (e) { console.warn('ai page', e); }
+      if (teedNote(r)) tdone++;
       if (r && r.corners && !(nearSame(r.corners, p.corners) && !p.curve && !r.curve)) {
         pushHist(p, tag);
         before.push({ id: p.id, corners: p.corners, curve: p.curve || null, needCrop: !!p.needCrop, cropUser: !!p.cropUser });
@@ -4178,7 +4428,7 @@ async function aiFrameDoc() {
     }
   } finally { aiBatchMark(false); unbusy(); releaseQueue(); aiReleaseSoon(); }
   if (current === 'doc' && state.docId === docId) renderDoc();
-  undoBar(`AI 框選完成：${changed} 頁已重新框選${kept ? `，${kept} 頁維持原框` : ''}`, changed ? async () => {
+  undoBar(`AI 框選完成：${changed} 頁已重新框選${kept ? `，${kept} 頁維持原框` : ''}${teedCount(tdone)}`, changed ? async () => {
     for (const b of before) {
       const p = await DB.get('pages', b.id); if (!p) continue;
       p.corners = b.corners; p.curve = b.curve; if (b.needCrop) p.needCrop = true; else delete p.needCrop;
@@ -4245,14 +4495,38 @@ async function srEnsureModel() {
   if (await aiHas([SR_FILE])) return true;
   return aiDownload([SR_FILE], '下載 AI 精修資料中…');
 }
-async function srBenchNow() {
+/* 5.1.6：測速結果改版 v2，舊的（v1）作廢重測一次。測試版 iPhone 曾被記成 CPU（可能測的時候 GPU 被框選佔著），之後永遠用 CPU，
+   一頁超過 1 分鐘（正式版同一支手機重測後用 GPU，約 20 秒內）。測之前先把 AI 引擎整個重開，讓 GPU 乾淨 */
+const SR_BENCH_V = 2, SR_RETRY = 3;
+const esc = (t) => String(t).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+// 5.1.7：隱藏區的 AI 診斷（引擎、GPU 狀態與原因、精修速度、框選、最近紀錄）
+function srInfoText() {
+  const b = settings.srBench, L = settings.srLast, out = [];
+  out.push(`AI 引擎：${aiEngineNow ? (aiEngineNow === 'new' ? '新引擎' : '舊引擎（相容模式）') + `，框選用 ${aiEPNow === 'webgpu' ? 'GPU' : 'CPU'}` : aiOldNow ? '這次用相容模式（尚未載入）' : '尚未載入'}`);
+  const ab = settings.aiBenchR, abN = settings.aiBenchN || 1;
+  out.push(`框選：${settings.aiSafeCPU ? '閃退保護，這個版本一律 CPU' : aiSafeNow ? '閃退保護，這次先用 CPU' : settings.aiEP === 'webgpu' ? 'GPU' : 'CPU'}${settings.aiCrashN ? `（中斷 ${settings.aiCrashN} 次）` : ''}` +
+    (ab ? `（比較 CPU ${ab.cpu}、${ab.gpu != null ? 'GPU ' + ab.gpu : 'GPU 無法使用'}${settings.aiEP !== 'webgpu' && !settings.aiSafeCPU ? `；第 ${abN} 次，${abN >= AI_RETRY ? '已定案' : '下次打開再比'}` : ''}）` : ''));
+  if (b && b.v === SR_BENCH_V && b.ms > 0) {
+    const why = b.gpu != null ? `GPU ${b.gpu}` : `GPU 無法使用${b.gpuWhy ? '：' + b.gpuWhy : ''}`;
+    out.push(`精修：${b.ep === 'webgpu' ? 'GPU' : 'CPU'}，每塊約 ${b.ms} 毫秒（測速 CPU ${b.cpu}、${why}${b.ep === 'wasm' ? `；第 ${b.n || 1} 次，${(b.n || 1) >= SR_RETRY ? '已定案' : '下次打開再測'}` : ''}）`);
+  } else out.push('精修：尚未測速（下次精修時測）');
+  if (L) out.push(`上次精修：${L.ep === 'webgpu' ? 'GPU' : 'CPU'}，每塊 ${L.per} 毫秒${L.fell ? `（途中 GPU 出錯改 CPU：${L.err || ''}）` : ''}`);
+  for (const t of settings.aiLog || []) out.push('・' + t);
+  return out.map(esc).join('<br>');
+}
+async function srBenchNow(force) {
   const b = settings.srBench;
-  if (b && b.v === 1 && b.ms > 0) return b;
+  // 5.1.7：GPU 的結果沿用；CPU 的結果每次打開第一次精修重測，連續 SR_RETRY 次才定案
+  if (!force && b && b.v === SR_BENCH_V && b.ms > 0 && (b.ep === 'webgpu' || (b.n || 1) >= SR_RETRY || srBenchedNow)) return b;
   busy('正在測試這支手機的速度…');
   try {
+    if (!aiPending.size && !aiBatchOn && !srProg.size) aiReset(); // 5.1.6：重開 AI 引擎，框選、TEED 的記憶體都清掉再測
     const r = await aiCall({ type: 'srBench', n: SR_IN });
     const ep = r.gpu != null && r.gpu < r.cpu * 0.8 ? 'webgpu' : 'wasm';
-    settings.srBench = { v: 1, ep, ms: Math.round(ep === 'webgpu' ? r.gpu : r.cpu) };
+    const n = ep === 'webgpu' || force ? 1 : b && b.v === SR_BENCH_V && b.ep === 'wasm' ? (b.n || 1) + 1 : 1;
+    srBenchedNow = true;
+    settings.srBench = { v: SR_BENCH_V, ep, ms: Math.round(ep === 'webgpu' ? r.gpu : r.cpu), cpu: Math.round(r.cpu), gpu: r.gpu != null ? Math.round(r.gpu) : null, gpuWhy: r.why || '', n };
+    if (b && b.v === SR_BENCH_V && b.ep !== ep) aiNote(`精修重新測速：${b.ep === 'webgpu' ? 'GPU' : 'CPU'} → ${ep === 'webgpu' ? 'GPU' : 'CPU'}${r.why ? '（' + r.why + '）' : ''}`);
     saveSettings(); console.info('SR bench', r, settings.srBench);
     return settings.srBench;
   } finally { unbusy(); }
@@ -4310,7 +4584,13 @@ async function srRun(page) {
     }
     // 實際每塊時間（指數平均），下次預估更準
     const per = (performance.now() - t0) / total, b = settings.srBench;
-    if (b && b.v === 1) { b.ms = Math.round(b.ms * 0.5 + per * 0.5); saveSettings(); }
+    // 5.1.7：問 worker 這次實際用什麼跑；GPU 途中出錯改 CPU 的那次不算進速度（免得以為手機變慢、改用小尺寸）
+    let st = null; try { st = await aiCall({ type: 'srState' }); } catch (_) {}
+    const used = st ? st.ep : b && b.ep, fell = !!(b && b.ep === 'webgpu' && used !== 'webgpu');
+    settings.srLast = { ep: used, per: Math.round(per), fell, err: fell && st ? String(st.err || '').slice(0, 60) : '' };
+    if (fell) aiNote('精修途中 GPU 出錯，這頁改用 CPU' + (st && st.err ? '：' + String(st.err).slice(0, 60) : ''));
+    if (b && b.v === SR_BENCH_V && !fell) b.ms = Math.round(b.ms * 0.5 + per * 0.5);
+    saveSettings();
     return { blob: await toBlob(out, 'image/jpeg', 0.95), box, side };
   } finally {
     small.width = small.height = 0; out.width = out.height = 0; tmp.width = tmp.height = 0;
@@ -4365,7 +4645,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '4.2.4';
+// APP_VER 在檔案開頭宣告（5.1.9：AI 閃退保護在載入時就要用到）
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -4398,8 +4678,15 @@ const CHANGELOG = [
     { t: '最佳化高畫質拍照流程體驗', since: '4.0' },
     { t: '新增 ✨ AI 精修：讓樂譜線條與文字更清晰', since: '4.1.2' },
     { t: '最佳化拍攝運作流程，減少拍攝時發熱', since: '4.1.7' },
+  ] },
+  // 5.0：加入 TEED 邊緣模型的 AI 框選升級（作者選的切法：4.2 起的框選改進都放 v5）
+  { v: 'v5', items: [
     { t: '最佳化淺色背景AI框選準確度', since: '4.2' },
     { t: '偵測不到框選範圍時，將提示直接按快門', since: '4.2' },
+    { t: '淺色背景即時掃描時，也能自動找到框選範圍', since: '4.3' },
+    { t: '提升 AI 框選穩定性，減少一次處理多張時閃退', since: '5.0' },
+    { t: '新增倒數拍攝按鈕：當偵測不到框選範圍時，將自動倒數 3 秒拍下', since: '5.1' },
+    { t: '加入拍攝聚焦動畫，框到後更有預備感', since: '5.1' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
@@ -4421,6 +4708,19 @@ function showChangelog() {
 }
 // 有沒有「看過之後才新增」的項目
 // 4.0.2：改成「比上次看過的版本還新」的項目（原本只認 since === APP_VER，出小版本 4.0.1 時 since '4.0' 的項目就不會跳）
+// 5.1.9：更新日誌的「目前版本」快速連點 5 下，顯示／隱藏設定最下方的測試資訊（TEED 協助標記開關、AI 診斷；隱藏時一併關掉標記）
+{
+  let taps = 0, tapT = 0;
+  $('#logCurrent').addEventListener('click', () => {
+    clearTimeout(tapT); tapT = setTimeout(() => { taps = 0; }, 1500);
+    if (++taps < 5) return;
+    taps = 0;
+    settings.teedMarkShown = !settings.teedMarkShown;
+    if (!settings.teedMarkShown) settings.teedMark = false;
+    saveSettings();
+    toast(settings.teedMarkShown ? '已顯示測試資訊（在設定最下方）' : '已隱藏測試資訊');
+  });
+}
 function hasNewLog() { const seen = logSeen() || '0'; return seen !== APP_VER && CHANGELOG.some((g) => g.items.some((it) => it.since && verGt(it.since, seen))); }
 $('#cvVer').textContent = '▸ v' + APP_VER;
 $('#cvVer').onclick = () => showChangelog();
