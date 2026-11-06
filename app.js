@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '5.2.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '5.2.2'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -1242,7 +1242,7 @@ async function teedLiveRun(v) {
    自動拍攝時框選鎖不到 2 秒、而且畫面拿穩（5.1.5 起要連續 1 秒）→ 中央圓環倒數（5.1.5 起 3、2、1，原本 5 秒；每秒嗶一聲）→ 拍下整個畫面
    （和自己按快門一樣：開著自動 AI 框選就交給 AI 框，否則標 ✂ 待裁切）。點相機畫面取消；拍下或取消後，畫面明顯改變（差 > 18，翻頁、換紙）才會再倒數，同一頁不會重拍。
    倒數中原本的偵測或 TEED 鎖到合理的框 → 停止倒數，走正常流程。開著倒數時不顯示 4 秒「直接按快門」提示 */
-const CD_STILL = 10, CD_STILL_LOOSE = 20, CD_LOOSE_AFTER = 5000, CD_WAIT = '拿穩後開始倒數', CD_LEAVE = 25, CD_LEAVE_N = 3, CD_EDGE = 3000, CD_AFTER = 2000, CD_LEN = 3000, CD_MOVE = 10, CD_CHANGE = 18, CD_HINT = '倒數拍攝中，點畫面可取消';
+const CD_STILL = 10, CD_STILL_LOOSE = 20, CD_LOOSE_AFTER = 3000, CD_STUCK = 3000, CD_WAIT = '拿穩後開始倒數', CD_LEAVE = 25, CD_LEAVE_N = 3, CD_EDGE = 3000, CD_AFTER = 2000, CD_LEN = 3000, CD_MOVE = 10, CD_CHANGE = 18, CD_HINT = '倒數拍攝中，點畫面可取消';
 const cdOn = () => !!(settings.countdown && settings.autoShutter);
 function cdStop() { live.cdT0 = null; live.cd = null; live.cdAnchor = null; live.cdOut = 0; live.cdWait = false; }
 // 5.1.3：兩張小縮圖的差異，先各自扣掉平均亮度（相機自動曝光造成的整體變亮變暗不算）
@@ -1268,15 +1268,18 @@ function cdTick(v) {
     if (!live.armed || live.cdOut >= CD_LEAVE_N) { cdStop(); live.idleT0 = now; return; }
   } else {
     // 5.1.5：要「連續 1 秒都拿穩」才開始倒數（作者：放好紙時倒數早就在跑了）：現在的畫面和最近 1 秒內每一次取樣比（扣亮度），都 ≤ 10；
-    // 鎖不到超過 5 秒還沒開始就放寬到 20。作者影片：手持跟 1 秒前比，門檻 10 時 96% 的時間算穩定（含刻意移動、翻頁）
+    // 鎖不到超過 5 秒（5.2.2 改 3 秒）還沒開始就放寬到 20。作者影片：手持跟 1 秒前比，門檻 10 時 96% 的時間算穩定（含刻意移動、翻頁）
     live.cdHist = (live.cdHist || []).filter((h) => now - h.t <= 1400); live.cdHist.push({ t: now, sig }); // 鎖不到時拍攝迴圈約 0.2 秒一圈，留 1.4 秒內的取樣，最舊的要超過 0.9 秒
     const idle = now - Math.max(live.idleT0 || now, live.cdBase || 0);
     const tol = idle > CD_LOOSE_AFTER ? CD_STILL_LOOSE : CD_STILL;
     const still = live.cdHist[0].t <= now - 900 && live.cdHist.every((h) => sigDiffN(sig, h.sig) <= tol);
     // 5.1.2：框一直卡在「請稍微拉遠一點」超過 3 秒也可以倒數（拍下後交給 AI 框）
     const stuck = live.lockQ && live.edge && live.edgeT0 && now - live.edgeT0 > CD_EDGE;
+    // 5.2.2：畫面上有框、但從這一頁開始找起 3 秒還拍不下來（作者：通常是錯的框，例如一角頂到邊緣，框忽隱忽現或一直抖，
+    //   以前「有框」就永遠不倒數，只能一直舉著）也可以倒數；聚焦圓環已經轉超過三成（快拍下了）先讓它拍，但被「拉遠一點」擋住的不算
+    const lockedLong = live.lockQ && now - (live.idleT0 || now) > CD_STUCK && (live.edge || (live.progress || 0) < 0.3);
     // 5.1.4：從「這一頁開始找」或「上一次真正鎖穩（聚焦過半）」算 2 秒；一閃而過的鎖定（原本的偵測或 TEED）不延後倒數
-    const want = live.armed && (stuck || (!live.lockQ && now - Math.max(live.idleT0 || now, live.cdBase || 0) > CD_AFTER));
+    const want = live.armed && (stuck || lockedLong || (!live.lockQ && now - Math.max(live.idleT0 || now, live.cdBase || 0) > CD_AFTER));
     live.cdWait = want && !still; // 等使用者拿穩：提示「拿穩後開始倒數」
     if (!want || !still) return;
     live.cdWait = false; live.cdHist = [];
