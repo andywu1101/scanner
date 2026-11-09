@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '5.2.2'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '5.3.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -28,7 +28,7 @@ const HAS_IC = 'ImageCapture' in window; // Android Chrome 有；新版 iPhone S
 
 /* ---------- 設定 ---------- */
 // 3.1：新使用者預設「稍後裁切」（立即裁切改成每張都進框選，連拍會變慢）；已經存過設定的老使用者維持原本的值。sound＝拍攝音效
-const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: true, autoAI: false, confirmCrop: true, upscale: 'auto', landscape: true, sound: true, countdown: true, v: 2 }; // 5.1.3：倒數拍攝預設開（手動關過的人維持關）
+const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: false, autoAI: false, confirmCrop: true, upscale: 'auto', landscape: true, sound: true, countdown: true, v: 2 }; // 5.1.3：倒數拍攝預設開（手動關過的人維持關）；5.3.1：預設改回立即裁切（只影響新用戶，存過設定的人維持原本）
 const settings = (() => {
   let s = {};
   try { s = JSON.parse(localStorage.getItem('cocoscan-settings') || '{}'); } catch (_) {}
@@ -162,6 +162,29 @@ async function dbMaint(d) {
   });
   const [docs, pairs] = await Promise.all([qDocs, qPairs]);
   const docIds = new Set(docs.map((x) => x.id));
+  // 5.3：散頁（所屬文件還在、但文件的頁面清單裡沒有它）找回來，依拍攝時間放回去
+  //   頁面編號開頭 8 碼是建立時間（uid），不用讀頁面資料；放在「建立時間比它早的最後一頁」後面（沒有就放最前面）
+  //   所有刪除流程都是先刪頁面資料再改清單，所以刪掉的頁不會被找回來
+  const tOf = (id) => parseInt(String(id).slice(0, 8), 36) || 0;
+  const fixed = [];
+  for (const doc of docs) {
+    const listed = new Set(doc.pageIds);
+    const loose = pairs.filter(([pid, did]) => did === doc.id && !listed.has(pid)).map(([pid]) => pid).sort((a, b) => tOf(a) - tOf(b));
+    if (!loose.length) continue;
+    const ids = doc.pageIds.slice();
+    for (const pid of loose) {
+      let at = 0;
+      for (let i = 0; i < ids.length; i++) if (tOf(ids[i]) <= tOf(pid)) at = i + 1;
+      ids.splice(at, 0, pid);
+    }
+    fixed.push(Object.assign({}, doc, { pageIds: ids }));
+    DB.found = (DB.found || 0) + loose.length;
+  }
+  if (fixed.length) {
+    const w = d.transaction('docs', 'readwrite'), st = w.objectStore('docs');
+    for (const doc of fixed) st.put(doc);
+    await new Promise((res, rej) => { w.oncomplete = res; w.onerror = () => rej(w.error); w.onabort = () => rej(w.error); });
+  }
   const dead = pairs.filter(([, did]) => !docIds.has(did)).map(([pid]) => pid);
   if (dead.length) {
     const w = d.transaction('pages', 'readwrite'), st = w.objectStore('pages');
@@ -438,14 +461,21 @@ async function loadDocAdj() {
     settings.adjFix130 = true; saveSettings();
   }
 }
+/* 5.3：散頁（作者回報：設定裡算得到、文件裡看不到、刪文件也刪不掉的頁）。原因：存一頁是「存頁面 → 讀文件 → 頁面清單加一頁 → 存回文件」，
+   兩頁幾乎同時存（連拍、匯入多張）時兩邊讀到同一份舊清單，後存的蓋掉先存的。所有「讀文件 → 改頁面清單 → 存回」都排進 docEdit 這條隊伍，
+   一個做完才做下一個（新增、刪除、重拍、排序）。已經變成散頁的，打開 App 時 dbMaint 找回來（見上面） */
+let docQ = Promise.resolve();
+function docEdit(fn) { const job = docQ.then(fn); docQ = job.catch(() => {}); return job; }
 async function addPage(docId, blob, corners, curve, needCrop, rotation) {
   if (!(blob instanceof Blob) || !blob.size) throw new Error('照片沒有存成功，請再拍一次');
   const page = { id: uid(), docId, original: blob, corners, curve: curve || null, rotation: rotation || 0, mode: settings.mode, created: Date.now() };
   if (needCrop) page.needCrop = true; // 1.19：即時掃描時要自己裁切、還沒裁的頁
   await DB.put('pages', page);
-  const doc = await DB.get('docs', docId);
-  doc.pageIds.push(page.id); doc.updated = Date.now();
-  await DB.put('docs', doc);
+  await docEdit(async () => {
+    const doc = await DB.get('docs', docId);
+    doc.pageIds.push(page.id); doc.updated = Date.now();
+    await DB.put('docs', doc);
+  });
   enqueue(page.id);
   return page;
 }
@@ -820,10 +850,14 @@ $('#burstConfirm').onclick = () => { settings.confirmCrop = !settings.confirmCro
 $('#burstRetake').onclick = async () => {
   openCamera();
   if (!burst.lastPageId) return;
-  const doc = await DB.get('docs', burst.docId);
-  doc.pageIds = doc.pageIds.filter((id) => id !== burst.lastPageId);
-  await DB.put('docs', doc);
-  await DB.del('pages', burst.lastPageId);
+  // 5.3：排隊；先刪頁面再改清單（反過來的話中途關掉，留下的頁會被當散頁找回來）
+  const doc = await docEdit(async () => {
+    await DB.del('pages', burst.lastPageId);
+    const d = await DB.get('docs', burst.docId);
+    d.pageIds = d.pageIds.filter((id) => id !== burst.lastPageId);
+    await DB.put('docs', d);
+    return d;
+  });
   burst.count--; burst.lastPageId = doc.pageIds.length && burst.count ? doc.pageIds[doc.pageIds.length - 1] : null;
   renderBurst();
 };
@@ -926,7 +960,12 @@ async function startLive(docId) {
     teedOK: false, teedBusy: false, teedNext: 0, teedErr: 0, capSrc: null, tT0: null, tCapped: false, tCapSig: null, // 4.3
     cd: null, cdT0: null, cdBlock: null, cdPrev: null, cdNext: 0, cdBase: 0, // 5.1；5.1.4 cdBase
   });
-  aiHas([TEED_FILE]).then((ok) => { if (live.running) live.teedOK = ok; }); // 4.3：有 TEED 才有即時後援
+  aiHas([TEED_FILE]).then((ok) => {
+    if (!live.running) return;
+    live.teedOK = ok;
+    // 5.3：先暖機 TEED（載入模型＋跑一次小圖），第一次真的要用時（確認碰邊的框）才不會等太久
+    if (ok && !live.teedWarm) { const b = new Uint8ClampedArray(64 * 48 * 4).fill(128).buffer; aiCall({ type: 'teed', buffer: b, width: 64, height: 48 }, [b]).then(() => { live.teedWarm = true; }).catch(() => {}); }
+  }); // 4.3：有 TEED 才有即時後援
   aiErrShown = false; aiTag(aiPend ? 'AI ' + aiPend : '', !!aiPend);
   pauseQueue(); // 掃描期間暫停高解析度處理，讓抓邊保持流暢
   resetLock();
@@ -1107,7 +1146,7 @@ function medianQuad(list) {
   return [0, 1, 2, 3].map((i) => [med(list.map((q) => q[i][0])), med(list.map((q) => q[i][1]))]);
 }
 function resetLock() {
-  Object.assign(live, { edgeT0: 0, cand: [], tCand: [], lockSrc: null, acc: [], lockQ: null, outliers: 0, miss: 0, anchorQ: null, stableSince: 0, progress: 0, best: null, prevQs: null, lastQs: null, edge: false, motionHits: 0, moveHits: 0 });
+  Object.assign(live, { sus: false, susT0: 0, tChk: null, tChkN: 0, edgeT0: 0, cand: [], tCand: [], lockSrc: null, acc: [], lockQ: null, outliers: 0, miss: 0, anchorQ: null, stableSince: 0, progress: 0, best: null, prevQs: null, lastQs: null, edge: false, motionHits: 0, moveHits: 0 });
   live.lastQuad = null;
 }
 // 清晰度（梯度能量），用來從穩定期間挑最清楚的一格
@@ -1198,9 +1237,21 @@ function freeFullCanvases() { live.best = null; for (const c of fullCanvases) c.
    - 連續跑 20 秒沒結果就先停（控制發熱），畫面明顯改變（frameSig 差 > 18）才再開始；只有下載過 AI 資料（有 TEED）的手機才有 */
 const TEED_AFTER = 1000, TEED_CAP = 20000; // 5.1.4：2 → 1 秒，讓 TEED 在倒數（2 秒）開始前有機會先試
 function teedOwns() { return !!live.teedOK && (live.armed ? live.lockSrc === 'teed' : live.capSrc === 'teed'); }
+/* 5.3：原本的偵測鎖到的框碰到畫面邊緣（任一角離邊 2% 內）＝可疑，先不拍，請 TEED 確認一次（作者：布面、桌紋等有紋路的背景，
+   紙的一條邊被紋路連到畫面外；周報實拍：原本的偵測底邊在 0.99，TEED／AI 都在 0.86）。
+   TEED 找到形狀合理、完整在畫面內的框 → 改用它（這一頁交給 TEED，金框）；TEED 也碰邊或找不到（試 2 次）→ 照原本的框走（書本旁邊那頁超出畫面維持原樣）。
+   作者 84 張實拍樣張（大半是書）模擬：58 張沒碰邊不受影響；碰邊的 22 張裡 15 張改用 TEED 全部變準（含 7 張書），7 張 TEED 找不到維持原樣，沒有變差的。
+   最多等 2.5 秒（SUS_WAIT）；沒有 TEED、TEED 停了（20 秒上限）就直接照原本的走 */
+const SUS_EDGE = 0.02, SUS_WAIT = 2500;
+const edgeTouch = (q) => !!q && q.some(([x, y]) => x < SUS_EDGE || x > 1 - SUS_EDGE || y < SUS_EDGE || y > 1 - SUS_EDGE);
+function susPending(now) {
+  if (!(live.lockQ && live.lockSrc === 'det' && live.sus && !live.tChk)) return false;
+  if (!live.teedOK || live.tCapped || now - live.susT0 > (live.teedWarm ? SUS_WAIT : SUS_WAIT + 3500)) { live.tChk = 'keep'; return false; } // TEED 還在暖機最多多等 3.5 秒
+  return true;
+}
 function teedWanted(now) {
   if (!live.teedOK || !live.running || !settings.autoShutter || live.paused || live.capturing || live.cd) return false;
-  if (live.armed) return live.lockQ ? live.lockSrc === 'teed' : now - Math.max(live.idleT0 || now, live.seenT || 0) > TEED_AFTER;
+  if (live.armed) return live.lockQ ? live.lockSrc === 'teed' || susPending(now) : now - Math.max(live.idleT0 || now, live.seenT || 0) > TEED_AFTER;
   return live.capSrc === 'teed';
 }
 function teedRearm() { live.capSrc = null; live.tT0 = null; live.tCapped = false; live.tCand = []; }
@@ -1218,7 +1269,7 @@ function teedTick(v) {
   if (now - live.tT0 > TEED_CAP) { live.tCapped = true; live.tCapSig = frameSig(v); live.tCand = []; if (live.armed && live.lockSrc === 'teed') { resetLock(); setRing(0); } return; }
   if (now < (live.teedNext || 0)) return;
   live.teedBusy = true;
-  teedLiveRun(v).then(() => { live.teedErr = 0; }).catch((e) => { console.warn('TEED 即時', e); if (++live.teedErr >= 3) live.teedOK = false; })
+  teedLiveRun(v).then(() => { live.teedErr = 0; live.teedWarm = true; }).catch((e) => { console.warn('TEED 即時', e); if (++live.teedErr >= 3) live.teedOK = false; })
     .finally(() => { const dt = performance.now() - now; live.teedBusy = false; live.teedNext = performance.now() + Math.min(1200, Math.max(250, dt)); }); // 休息和這次一樣久（最少 0.25、最多 1.2 秒；第一次含載入引擎，比較慢）
 }
 async function teedLiveRun(v) {
@@ -1277,7 +1328,8 @@ function cdTick(v) {
     const stuck = live.lockQ && live.edge && live.edgeT0 && now - live.edgeT0 > CD_EDGE;
     // 5.2.2：畫面上有框、但從這一頁開始找起 3 秒還拍不下來（作者：通常是錯的框，例如一角頂到邊緣，框忽隱忽現或一直抖，
     //   以前「有框」就永遠不倒數，只能一直舉著）也可以倒數；聚焦圓環已經轉超過三成（快拍下了）先讓它拍，但被「拉遠一點」擋住的不算
-    const lockedLong = live.lockQ && now - (live.idleT0 || now) > CD_STUCK && (live.edge || (live.progress || 0) < 0.3);
+    const lockedLong = live.lockQ && now - (live.idleT0 || now) > CD_STUCK && (live.edge || (live.progress || 0) < 0.3)
+      && !(live.lockSrc === 'teed' && now - (live.tLockT || 0) < CD_STUCK); // 5.3：TEED 剛鎖到（或剛換成 TEED 的框）給它 3 秒自己拍完（TEED 一秒只有 1～2 格）
     // 5.1.4：從「這一頁開始找」或「上一次真正鎖穩（聚焦過半）」算 2 秒；一閃而過的鎖定（原本的偵測或 TEED）不延後倒數
     const want = live.armed && (stuck || lockedLong || (!live.lockQ && now - Math.max(live.idleT0 || now, live.cdBase || 0) > CD_AFTER));
     live.cdWait = want && !still; // 等使用者拿穩：提示「拿穩後開始倒數」
@@ -1387,6 +1439,15 @@ function onDetect(r, sig, full, sharp, gt, src) {
     else { setHint('已拍好，請換下一頁', true); return; }
   }
 
+  // 5.3：TEED 來確認可疑的框（原本的偵測鎖到、碰到畫面邊緣）
+  if (tq && live.lockQ && live.lockSrc === 'det') {
+    if (!susPending(now)) return;
+    if (ok && !edgeTouch(r.corners)) { // 改用 TEED 的框，這一頁交給 TEED
+      const q = r.corners;
+      Object.assign(live, { lockQ: q, acc: [q], cand: [], tCand: [], lockSrc: 'teed', tLockT: now, tT0: null, anchorQ: q, stableSince: now, best: null, outliers: 0, miss: 0, sus: false, tChk: 'teed', prevQs: null, lastQs: null });
+      live.teedSwaps = (live.teedSwaps || 0) + 1;
+    } else { if (++live.tChkN >= 2) live.tChk = 'keep'; return; }
+  }
   if (!ok) {
     if (tq) { live.tCand = []; if (live.lockQ) { if (++live.miss >= 2) resetLock(); } }
     else { live.miss++; live.cand = []; if (live.miss >= 4 && live.lockQ) resetLock(); }
@@ -1405,7 +1466,7 @@ function onDetect(r, sig, full, sharp, gt, src) {
     if (live[C].length < need) { setHint(live.cd ? CD_HINT : live.cdWait ? CD_WAIT : live.tipOn ? waitTip() : '尋找文件中…'); return; }
     live.lockQ = medianQuad(live[C]);
     live.acc = live[C].slice();
-    live.cand = []; live.tCand = []; live.lockSrc = src; live.tT0 = null;
+    live.cand = []; live.tCand = []; live.lockSrc = src; live.tT0 = null; if (tq) live.tLockT = now; // 5.3
     live.anchorQ = live.lockQ; live.stableSince = now; live.best = null;
   } else {
     // 已鎖定：離群值忽略，連續 3 次離群才放棄鎖定（例如紙被拿走）
@@ -1419,6 +1480,7 @@ function onDetect(r, sig, full, sharp, gt, src) {
     live.lockQ = medianQuad(live.acc);
   }
   live.lastQuad = live.lockQ;
+  if (live.lockSrc === 'det' && !live.sus && !live.tChk && edgeTouch(live.lockQ)) { live.sus = true; live.susT0 = now; live.tChkN = 0; } // 5.3
   live.seenT = now; // 4.1.7：「找到紙」＝框已鎖定（白色背景時偵測常回報亂跳的框，鎖不住，不算找到）
 
   // 紙內容在動（手經過、正在翻頁）→ 重新倒數
@@ -1451,7 +1513,7 @@ function onDetect(r, sig, full, sharp, gt, src) {
   if (!settings.autoShutter) { setRing(0); setHint('按下快門拍攝', true); return; }
   if (progress <= 0) setRing(0); // 5.1.5：進度圈改由 drawOverlay 照時間畫
   if (live.tipOn && progress < 0.05) { setHint(waitTip()); } else { live.tipOn = false; setHint('對準了，保持住…', true); }
-  if (progress >= 1 && Date.now() - live.lastCapT > 800) {
+  if (progress >= 1 && Date.now() - live.lastCapT > 800 && !susPending(now)) { // 5.3：可疑的框等 TEED 確認完才拍
     const b = live.best;
     capture(sig, b ? b.canvas : null, b ? b.quad : live.lockQ);
   }
@@ -1843,7 +1905,7 @@ function openLiveCrop(page, blob, corners, curve, replace) {
       p.corners = c; p.curve = cv; p.rotation = rot; delete p.needCrop;
       if (edited) p.cropUser = true;
       await DB.put('pages', p);
-      // 3.1：先看成品（#capRes）；「繼續編輯」回到框選，「確定」才回到拍攝畫面
+      // 3.1：先看成品（#capRes）；「繼續編輯」回到框選，「確定」才回到拍攝畫面（5.3.1 起自動確定，見 showCapResult）
       const act = await showCapResult(p.id);
       if (act === 'edit') { openLiveCrop(p, blob, c, cv, true); return; }
       if (act === 'ok') { capRes.flying = true; history.back(); try { await capResFly(); } finally { capRes.flying = false; } }
@@ -1855,15 +1917,18 @@ function openLiveCrop(page, blob, corners, curve, replace) {
   });
 }
 async function removeLivePage(pageId) {
-  const doc = await DB.get('docs', live.docId);
-  await DB.del('pages', pageId);
   live.count = Math.max(0, live.count - 1);
   live.armed = true; resetLock();
-  if (doc) {
-    doc.pageIds = doc.pageIds.filter((id) => id !== pageId);
-    if (!doc.pageIds.length && !live.fromDoc) { await DB.del('docs', doc.id); live.docId = null; }
-    else { doc.updated = Date.now(); await DB.put('docs', doc); }
-  }
+  const doc = await docEdit(async () => { // 5.3：排隊（可能和還在存的上一張同時）
+    const d = await DB.get('docs', live.docId);
+    await DB.del('pages', pageId);
+    if (d) {
+      d.pageIds = d.pageIds.filter((id) => id !== pageId);
+      if (!d.pageIds.length && !live.fromDoc) { await DB.del('docs', d.id); live.docId = null; }
+      else { d.updated = Date.now(); await DB.put('docs', d); }
+    }
+    return d;
+  });
   const th = $('#liveThumb');
   if (!live.count) { th.style.visibility = 'hidden'; return; }
   th.querySelector('span').textContent = live.count;
@@ -1906,10 +1971,10 @@ function liveTip(title, html) {
   liveTipT = setTimeout(() => t.classList.remove('show'), 2200);
 }
 $('#cropModeBtn').onclick = () => {
-  settings.cropLater = !settings.cropLater; saveSettings();
+  settings.cropLater = !settings.cropLater; settings.cropSet = true; saveSettings(); // 5.3.1：記下使用者自己切換過（以後改預設時可以分辨）
   updateLiveBtns();
   if (settings.cropLater) liveTip('稍後裁切', '拍完先存起來，可以連續拍<br>之後在文件裡點「✂」那頁裁切');
-  else liveTip('立即裁切', '每拍一張就進入裁切畫面<br>確認成品後再拍下一張');
+  else liveTip('立即裁切', '每拍一張就進入裁切畫面<br>完成後自動回到拍攝'); // 5.3.1：不用再按確定
 };
 $('#liveClose').onclick = () => finishLive();
 $('#cdBtn').onclick = () => {
@@ -2301,12 +2366,15 @@ function capResLayout(ar) {
   const w = Math.min(st.width - 2 * m, (st.height - 2 * m) * ar), h = w / ar;
   Object.assign(pw.style, { left: (st.width - w) / 2 + 'px', top: (st.height - h) / 2 + 'px', width: w + 'px', height: h + 'px', transform: '', transition: '' });
 }
+/* 5.3.1：成品畫面不用再按「確定」（作者：編輯畫面下方已經有成品可看，掃描動畫本身就是確認）。
+   拿掉「繼續編輯」「確定」；有動畫：掃描光刷完停 0.4 秒，飛進左下角縮圖；沒開動畫：成品出現停 1 秒直接收掉；點一下立刻回到拍攝 */
+const CAPRES_HOLD = 400, CAPRES_HOLD_STILL = 1000;
 function showCapResult(pageId) {
   const el = $('#capRes'), pw = el.querySelector('.cr-pw'), base = el.querySelector('.cr-base'), outC = el.querySelector('.cr-out');
   const clip = el.querySelector('.cr-clip'), band = el.querySelector('.cr-band'), spin = el.querySelector('.cr-spin');
   const anim = animOn();
   let sw = null, done = false;
-  el.style.background = ''; el.querySelector('.cr-top').style.visibility = ''; el.querySelector('.cr-bar').style.visibility = '';
+  el.style.background = ''; el.querySelector('.cr-top').style.visibility = ''; el.querySelector('.cr-bar').style.display = 'none'; // 5.3.1：不用按鈕
   base.width = base.height = outC.width = outC.height = 1; pw.style.width = '0px';
   clip.style.clipPath = 'inset(0 0 100% 0)'; clip.style.opacity = ''; clip.style.transition = ''; bandInit(band); spin.classList.toggle('on', true);
   el.classList.add('on');
@@ -2315,6 +2383,8 @@ function showCapResult(pageId) {
   });
   $('#crEdit').onclick = () => { el.classList.remove('on'); for (const c of el.querySelectorAll('canvas')) c.width = c.height = 1; capRes.resolve && capRes.resolve('edit'); }; // 4.2.3：放掉成品大圖
   $('#crOk').onclick = () => capRes.resolve && capRes.resolve('ok');
+  el.onclick = () => capRes.resolve && capRes.resolve('ok'); // 5.3.1：點一下立刻回到拍攝
+  const autoOk = (ms) => setTimeout(() => { if (!done && capRes.resolve) capRes.resolve('ok'); }, ms); // 只結束這一次的成品畫面
   (async () => {
     try {
       await whenReady();
@@ -2329,14 +2399,15 @@ function showCapResult(pageId) {
       const r = await job(f1, p.mode, pageAdjOf(p));
       if (done) return;
       drawTo(outC, r); spin.classList.remove('on');
-      if (!anim) { clip.style.clipPath = 'none'; band.style.display = 'none'; return; }
+      if (!anim) { clip.style.clipPath = 'none'; band.style.display = 'none'; autoOk(CAPRES_HOLD_STILL); return; }
       // 4.0：已掃過的部分淡入成品，剩下的跟著掃描光刷出來
       clip.style.clipPath = `inset(0 0 ${(1 - sw.p) * 100}% 0)`; clip.style.opacity = 0; clip.style.transition = 'opacity .2s';
       requestAnimationFrame(() => { clip.style.opacity = 1; });
       await sw.done();
       if (done) return;
       band.style.display = 'none'; clip.style.clipPath = 'none'; clip.style.transition = '';
-    } catch (e) { console.warn('capRes', e); if (sw) sw.stop(); spin.classList.remove('on'); clip.style.clipPath = 'none'; clip.style.opacity = ''; band.style.display = 'none'; }
+      autoOk(CAPRES_HOLD);
+    } catch (e) { console.warn('capRes', e); if (sw) sw.stop(); spin.classList.remove('on'); clip.style.clipPath = 'none'; clip.style.opacity = ''; band.style.display = 'none'; autoOk(CAPRES_HOLD_STILL); }
   })();
   return result;
 }
@@ -3124,10 +3195,13 @@ $('#docSelDel').onclick = async () => {
   const all = n === doc.pageIds.length;
   if (!confirm(all ? `要刪除全部 ${n} 頁嗎？整份文件也會一起刪除。` : `確定要刪除選取的 ${n} 頁？`)) return;
   if (all) { await deleteDocs([doc.id]); docSel.on = false; history.back(); return; }
+  await docEdit(async () => { // 5.3：排隊
   for (const id of docSel.ids) { await DB.del('pages', id); dropUrls('t:' + id); dropUrls('v:' + id); dropUrls('home:' + id); dropUrls('lib:' + id); dropUrls('strip:' + id); }
-  doc.pageIds = doc.pageIds.filter((id) => !docSel.ids.has(id));
-  doc.updated = Date.now();
-  await DB.put('docs', doc);
+  const d2 = await DB.get('docs', doc.id);
+  d2.pageIds = d2.pageIds.filter((id) => !docSel.ids.has(id));
+  d2.updated = Date.now();
+  await DB.put('docs', d2);
+  });
   docSel.on = false; docSel.ids.clear();
   renderDoc(); toast(`已刪除 ${n} 頁`);
 };
@@ -3150,10 +3224,12 @@ function setupSort(g) {
       lastDragEnd = Date.now();
       const ids = [...g.querySelectorAll('.pg:not(.add)')].map((el) => el.dataset.id);
       g.querySelectorAll('.pg:not(.add) .no').forEach((el, i) => { el.textContent = i + 1; });
-      const doc = await DB.get('docs', state.docId);
-      if (doc.pageIds.join() === ids.join()) return;
-      doc.pageIds = ids; doc.updated = Date.now();
-      await DB.put('docs', doc);
+      await docEdit(async () => { // 5.3：排隊
+        const doc = await DB.get('docs', state.docId);
+        if (doc.pageIds.join() === ids.join()) return;
+        doc.pageIds = ids; doc.updated = Date.now();
+        await DB.put('docs', doc);
+      });
     },
   });
 }
@@ -3435,17 +3511,18 @@ $('#pgUndo').onclick = () => undoPage(-1);
 $('#pgRedo').onclick = () => undoPage(1);
 $('#pageDel').onclick = async () => {
   if (!confirm('刪除這一頁？')) return;
-  const doc = await DB.get('docs', state.docId);
-  doc.pageIds = doc.pageIds.filter((id) => id !== viewPage.id);
-  doc.updated = Date.now();
-  await DB.del('pages', viewPage.id);
-  dropUrls('t:' + viewPage.id); dropUrls('v:' + viewPage.id); dropUrls('home:' + viewPage.id);
-  if (!doc.pageIds.length) {
-    await DB.del('docs', doc.id);
-    history.go(-2);
-    return;
-  }
-  await DB.put('docs', doc);
+  const pid = viewPage.id;
+  const left = await docEdit(async () => { // 5.3：排隊
+    const doc = await DB.get('docs', state.docId);
+    doc.pageIds = doc.pageIds.filter((id) => id !== pid);
+    doc.updated = Date.now();
+    await DB.del('pages', pid);
+    if (!doc.pageIds.length) { await DB.del('docs', doc.id); return 0; }
+    await DB.put('docs', doc);
+    return doc.pageIds.length;
+  });
+  dropUrls('t:' + pid); dropUrls('v:' + pid); dropUrls('home:' + pid);
+  if (!left) { history.go(-2); return; }
   renderPage();
 };
 
@@ -4742,6 +4819,8 @@ const CHANGELOG = [
     { t: '新增倒數拍攝按鈕：當偵測不到框選範圍時，將自動倒數 3 秒拍下', since: '5.1' },
     { t: '加入拍攝聚焦動畫，框到後更有預備感', since: '5.1' },
     { t: '修正大量讀檔有可能閃退的問題', since: '5.2' },
+    { t: '提升即時掃描框選準確度（紙張靠近畫面邊緣時）', since: '5.3' },
+    { t: '修正連拍時偶爾漏存頁面的問題', since: '5.3' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
@@ -4750,12 +4829,28 @@ const verGt = (a, b) => { const x = verNum(a), y = verNum(b); for (let i = 0; i 
 function logSeen() { try { return localStorage.getItem(LOG_KEY); } catch (_) { return null; } }
 function logMarkSeen() { try { localStorage.setItem(LOG_KEY, APP_VER); } catch (_) {} }
 // 1.29：只有「目前這一版」新增的項目是紅字；之前版本的一律黑字
-setTimeout(() => { DB.open().then(() => { if (DB.cleaned) toast(`已清除 ${DB.cleaned} 頁未使用的資料`); }).catch(() => {}); }, 1200); // 4.2.4
+setTimeout(() => { DB.open().then(() => { if (DB.found) { toast(`找回 ${DB.found} 頁之前漏存的頁面`); if (current === 'home') renderHome(); } else if (DB.cleaned) toast(`已清除 ${DB.cleaned} 頁未使用的資料`); }).catch(() => {}); }, 1200); // 4.2.4；5.3 找回散頁
 const isNewItem = (it) => it.since === APP_VER; // 只用來判斷要不要自動跳出日誌（3.0.1 起不再標紅字，一律黑字）
 function showChangelog() {
   const seen = logSeen();
   const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  $('#logList').innerHTML = CHANGELOG.map((g) => `<div class="log-item"><div class="log-ver">${esc(g.v)}</div><ul>${g.items.map((it) => `<li>${esc(it.t)}</li>`).join('')}</ul></div>`).join('');
+  // 5.3：作者：一個大版本的項目全擠在一起，看不出哪一次修的（選丙）。順序照舊：舊的在上、新的在最下面，打開時捲到最底；
+  //   目前的大版本展開、依小版本分段（項目的 since）；舊的大版本收起來（點標題展開）；這次更新新增的項目前面標「新」
+  //   v5 裡 since 4.2／4.3 的項目（4.2 起的功能當初併進 v5，切法 B）歸在 v5.0 那段
+  const cur = 'v' + APP_VER.split('.')[0];
+  const isNew = (it) => !!(seen && it.since && verGt(it.since, seen));
+  const subOf = (g, it) => { const base = g.v.slice(1); if (!it.since) return null; return 'v' + (verGt(base + '.0', it.since) || it.since.split('.')[0] !== base ? base + '.0' : it.since); };
+  const part = (g) => {
+    const subs = []; // [標題, 項目]，依出現順序
+    for (const it of g.items) { const k = subOf(g, it); const last = subs[subs.length - 1]; if (last && last[0] === k) last[1].push(it); else subs.push([k, [it]]); }
+    return subs.map(([k, its]) => `${k ? `<div class="log-sub">${esc(k)}</div>` : ''}<ul>${its.map((it) => `<li>${isNew(it) ? '<span class="log-new">新</span>' : ''}${esc(it.t)}</li>`).join('')}</ul>`).join('');
+  };
+  // 作者：每個舊大版本各一行收起來，上面空空的又佔位置 → 舊的大版本全部收進一個「過去版本」，點開後全部列出（大版本＋小版本分段）
+  const old = CHANGELOG.filter((g) => g.v !== cur), now = CHANGELOG.filter((g) => g.v === cur);
+  const block = (g) => `<div class="log-item"><div class="log-ver">${esc(g.v)}</div>${part(g)}</div>`;
+  $('#logList').innerHTML = (old.length ? `<details class="log-old"><summary class="log-ver">過去版本（${esc(old[0].v)}～${esc(old[old.length - 1].v)}）</summary>${old.map(block).join('')}</details>` : '') + now.map(block).join('');
+  const od = $('#logList').querySelector('details.log-old');
+  if (od) od.addEventListener('toggle', () => { $('#logList').scrollTop = $('#logList').scrollHeight; }); // 5.3.1：點開「過去版本」也置底，從新的往回看
   $('#logCurrent').textContent = '目前版本 v' + APP_VER;
   logMarkSeen();
   openModal('logModal');

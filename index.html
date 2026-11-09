@@ -521,6 +521,16 @@ input[type=file]{display:none}
 .log-ver{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;font-weight:700;color:var(--cocoa);margin-bottom:6px}
 .log-item ul{margin:0;padding-left:20px}
 .log-item li{font-size:14px;line-height:1.75;color:var(--text)}
+/* 5.3：大版本裡依小版本分段、舊的大版本全部收進「過去版本」、這次新增的標「新」 */
+.log-sub{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;font-weight:700;color:var(--muted,#8a7a6c);margin:10px 0 2px 2px}
+.log-sub:first-of-type{margin-top:2px}
+.log-new{display:inline-block;font-size:11px;font-weight:700;line-height:1;padding:3px 5px;margin-right:6px;border-radius:6px;background:var(--cocoa);color:#fff;vertical-align:1px}
+details.log-old{border-bottom:1px solid rgba(0,0,0,.08);padding:8px 2px}
+details.log-old>summary{list-style:none;cursor:pointer;margin-bottom:0;display:flex;align-items:center;gap:6px}
+details.log-old>summary::-webkit-details-marker{display:none}
+details.log-old>summary::after{content:'›';font-size:16px;transition:transform .2s;opacity:.7}
+details.log-old[open]>summary{margin-bottom:6px}
+details.log-old[open]>summary::after{transform:rotate(90deg)}
 .log-current{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;font-weight:700;color:var(--cocoa)!important;text-align:center;margin:12px 0 6px!important}
 /* 5.1.9：連點 5 下切換測試資訊，不要選到文字、不要雙擊放大 */
 .log-current{-webkit-user-select:none;user-select:none;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
