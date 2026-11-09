@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '5.3.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '5.3.2'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -4852,7 +4852,7 @@ function showChangelog() {
   const od = $('#logList').querySelector('details.log-old');
   if (od) od.addEventListener('toggle', () => { $('#logList').scrollTop = $('#logList').scrollHeight; }); // 5.3.1：點開「過去版本」也置底，從新的往回看
   $('#logCurrent').textContent = '目前版本 v' + APP_VER;
-  logMarkSeen();
+  // 5.3.2：按「關閉」（或點旁邊空白處）才記成看過；跳出來的當下不記（作者：更新後網頁自己重新整理，日誌一閃就不見，之後也不再跳）
   openModal('logModal');
   setTimeout(() => { $('#logList').scrollTop = $('#logList').scrollHeight; }, 30);
 }
@@ -4894,7 +4894,7 @@ function donatePanel(which) {
 function openDonate() { donatePanel(''); openModal('donateModal'); }
 document.querySelectorAll('.dmodal').forEach((m) => {
   m.addEventListener('click', (e) => {
-    if (e.target === m || e.target.closest('[data-close]')) { closeModal(m.id); return; }
+    if (e.target === m || e.target.closest('[data-close]')) { closeModal(m.id); if (m.id === 'logModal') logMarkSeen(); return; } // 5.3.2
     const pb = e.target.closest('[data-panel]'); if (pb) { donatePanel(pb.dataset.panel); return; }
     const cb = e.target.closest('[data-copy]'); if (cb) { copyText(cb, cb.dataset.copy); }
   });
