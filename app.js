@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '5.3.2'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '5.4.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -533,12 +533,13 @@ function openSheet(html, bind) {
 let sheetOnClose = null;
 function closeSheet() { $('#sheetWrap').classList.remove('show'); const f = sheetOnClose; sheetOnClose = null; if (f) f(); }
 // 1.31：App 內的確認視窗（iPhone 跳出系統 confirm 時會中斷相機）。回傳 true＝按了確定
-function askSheet(title, msg, okText, cancelText) {
+// 5.4.1：所有確認都用這張字卡（作者：統一風格，不用系統視窗）。danger＝刪除類，確定鈕紅色；msg 可以空著；點旁邊空白處＝取消
+function askSheet(title, msg, okText, cancelText, danger) {
   return new Promise((res) => {
     let done = false;
     const fin = (v) => { if (done) return; done = true; res(v); };
-    openSheet(`<h3>${title}</h3><div class="note" style="margin:2px 4px 14px;font-size:14.5px;line-height:1.6">${msg}</div>
-      <button class="bigbtn" id="askOk" style="width:100%">${okText || '確定'}</button>
+    openSheet(`<h3>${title}</h3>${msg ? `<div class="note" style="margin:2px 4px 14px;font-size:14.5px;line-height:1.6">${msg}</div>` : '<div style="height:8px"></div>'}
+      <button class="bigbtn${danger ? ' red' : ''}" id="askOk" style="width:100%">${okText || '確定'}</button>
       <button class="bigbtn alt" id="askNo" style="width:100%;margin-top:8px">${cancelText || '取消'}</button>`, (s) => {
       s.querySelector('#askOk').onclick = () => { sheetOnClose = null; closeSheet(); fin(true); };
       s.querySelector('#askNo').onclick = () => { sheetOnClose = null; closeSheet(); fin(false); };
@@ -595,8 +596,8 @@ async function renderHome() {
       <div class="rmeta">${pages.length} 頁・${fmtDate(doc.updated)}${pages.some((p) => p.needCrop) ? `・<span class="w">✂ ${pages.filter((p) => p.needCrop).length} 頁待裁切</span>` : ''}</div>
       <div class="strip" id="homeStrip"></div>
       <div class="rbtns">
-        <button class="bigbtn alt" id="recentOpen">開啟文件</button>
-        <button class="bigbtn" id="recentPdf">匯出 PDF</button>
+        <button class="bigbtn" id="recentOpen">開啟文件</button>
+        <button class="bigbtn alt danger" id="recentDel">刪除</button>
       </div>
     </div>
     <button class="allbtn" id="allDocs"><span>${ICON.folder}全部文件</span><span class="cnt">${docs.length} 份 ›</span></button>`;
@@ -616,7 +617,12 @@ async function renderHome() {
   $('#recentOpen').onclick = () => openDoc(doc.id);
   // 5.1.9：點卡片空白處也開啟文件（名稱、縮圖、按鈕維持原本功能）
   body.querySelector('.recent').onclick = (e) => { if (!e.target.closest('input, label, button')) openDoc(doc.id); };
-  $('#recentPdf').onclick = () => { state.docId = doc.id; openPdfSheet(); };
+  // 5.4：作者：大家都是點進文件才匯出，「匯出 PDF」沒人用 → 改成刪除（確認提示跟文件裡刪除一樣）
+  $('#recentDel').onclick = async () => {
+    if (!(await askSheet('確定要刪除這份文件與所有頁面？', '', '刪除', '取消', true))) return;
+    await deleteDocs([doc.id]);
+    renderHome();
+  };
   $('#allDocs').onclick = () => { renderLibrary(); go('library'); };
 }
 function updateHomeStrip(pages) {
@@ -699,7 +705,7 @@ $('#libAll').onclick = () => {
 };
 $('#libDel').onclick = async () => {
   const n = lib.order.length; if (!n) return;
-  if (!confirm(`確定要刪除這 ${n} 份文件？刪除後無法復原。`)) return;
+  if (!(await askSheet(`確定要刪除這 ${n} 份文件？`, '刪除後無法復原。', '刪除', '取消', true))) return;
   busy('刪除中…');
   await deleteDocs(lib.order);
   unbusy();
@@ -3193,7 +3199,7 @@ $('#docSelDel').onclick = async () => {
   const n = docSel.ids.size; if (!n) return;
   const doc = await DB.get('docs', state.docId);
   const all = n === doc.pageIds.length;
-  if (!confirm(all ? `要刪除全部 ${n} 頁嗎？整份文件也會一起刪除。` : `確定要刪除選取的 ${n} 頁？`)) return;
+  if (!(await (all ? askSheet(`要刪除全部 ${n} 頁嗎？`, '整份文件也會一起刪除。', '刪除', '取消', true) : askSheet(`確定要刪除選取的 ${n} 頁？`, '', '刪除', '取消', true)))) return;
   if (all) { await deleteDocs([doc.id]); docSel.on = false; history.back(); return; }
   await docEdit(async () => { // 5.3：排隊
   for (const id of docSel.ids) { await DB.del('pages', id); dropUrls('t:' + id); dropUrls('v:' + id); dropUrls('home:' + id); dropUrls('lib:' + id); dropUrls('strip:' + id); }
@@ -3299,7 +3305,7 @@ $('#docMore').onclick = () => openSheet(`<h3>文件</h3>
   s.querySelector('[data-a=rename]').onclick = () => { closeSheet(); renameDoc(); };
   s.querySelector('[data-a=del]').onclick = async () => {
     closeSheet();
-    if (!confirm('確定要刪除這份文件與所有頁面？')) return;
+    if (!(await askSheet('確定要刪除這份文件與所有頁面？', '', '刪除', '取消', true))) return;
     await deleteDocs([state.docId]);
     history.back();
   };
@@ -3510,7 +3516,7 @@ $('#pgCrop').onclick = () => {
 $('#pgUndo').onclick = () => undoPage(-1);
 $('#pgRedo').onclick = () => undoPage(1);
 $('#pageDel').onclick = async () => {
-  if (!confirm('刪除這一頁？')) return;
+  if (!(await askSheet('刪除這一頁？', '', '刪除', '取消', true))) return;
   const pid = viewPage.id;
   const left = await docEdit(async () => { // 5.3：排隊
     const doc = await DB.get('docs', state.docId);
@@ -3765,7 +3771,7 @@ async function applyDocAdjust(docId, mode, vals, changed) {
     docAdjCache.set(doc.id, doc.adj);
     await DB.put('docs', doc);
     const custom = pages.filter((p) => p.adj && p.adj[mode] && JSON.stringify(fillAdj(mode, p.adj[mode])) !== JSON.stringify(vals));
-    if (custom.length) overwrite = confirm(`有 ${custom.length} 頁單獨調整過。\n要一起套用新的統一設定嗎？\n\n確定：全部套用\n取消：保留那幾頁自己的設定`);
+    if (custom.length) overwrite = await askSheet(`有 ${custom.length} 頁單獨調整過。`, '要一起套用新的統一設定嗎？', '全部套用', '保留那幾頁自己的設定'); // 5.4.1
     for (const p of pages) {
       if (p.adj && p.adj[mode] && (overwrite || JSON.stringify(fillAdj(mode, p.adj[mode])) === JSON.stringify(vals))) { const q = await DB.get('pages', p.id); if (q && q.adj) { delete q.adj[mode]; await DB.put('pages', q); } } // 5.2：整筆讀出再存
     }
@@ -4132,6 +4138,7 @@ $('#btnSettings').onclick = () => {
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));
+      paintHomeModes(); // 5.4：主畫面的設定列跟著變
     });
     s.querySelectorAll('#setUp button').forEach((b) => b.onclick = () => {
       settings.upscale = b.dataset.k; saveSettings();
@@ -4435,7 +4442,7 @@ const AI_DL_MB = mbOf([AI_MODEL, ...AI_NEW, TEED_FILE]), AI_UP_MB = mbOf(AI_NEW)
 async function aiEnsure(inApp, noAsk, what) {
   if (await aiCached()) return true;
   const ask = `${what || 'AI 框選'}需要先下載約 ${what ? AI_DL_MB + 3 : AI_DL_MB} MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。要下載嗎？`;
-  if (!noAsk && (inApp ? !(await askSheet('下載 AI 資料', ask, '下載')) : !confirm(ask))) return false; // 2.1：noAsk＝已經在預設開啟的詢問裡問過
+  if (!noAsk && !(await askSheet('下載 AI 資料', ask, '下載'))) return false; // 2.1：noAsk＝已經在預設開啟的詢問裡問過；5.4.1 瀏覽器裡也用字卡
   const st = await aiState();
   const need = [...(st.model ? [] : [AI_MODEL]), ...AI_NEW, ...((await aiHas([TEED_FILE])) ? [] : [TEED_FILE])];
   if (!(await aiDownload(need, '下載 AI 資料中…'))) return false;
@@ -4534,7 +4541,7 @@ async function aiFrameDoc() {
   // 1.31：自己調整過範圍的頁（裁切畫面改過再按確定），先問要不要一起覆蓋（比照統一調整）
   const mine = pages.filter((p) => p.cropUser).length;
   let overwrite = true;
-  if (mine) overwrite = confirm(`有 ${mine} 頁自己調整過範圍。\n要一起用 AI 重新框選嗎？\n\n確定：全部重新框選\n取消：保留那幾頁`);
+  if (mine) overwrite = await askSheet(`有 ${mine} 頁自己調整過範圍。`, '要一起用 AI 重新框選嗎？', '全部重新框選', '保留那幾頁'); // 5.4.1
   const before = [], tag = 'ai:' + Date.now();
   let changed = 0, kept = 0, tdone = 0;
   busy(`AI 框選中 1 / ${pages.length}`);
@@ -4821,6 +4828,8 @@ const CHANGELOG = [
     { t: '修正大量讀檔有可能閃退的問題', since: '5.2' },
     { t: '提升即時掃描框選準確度（紙張靠近畫面邊緣時）', since: '5.3' },
     { t: '修正連拍時偶爾漏存頁面的問題', since: '5.3' },
+    { t: '主畫面可以直接選擇黑白、灰階、彩色、原圖', since: '5.4' },
+    { t: '最近掃描可以直接刪除文件', since: '5.4' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
@@ -4871,6 +4880,18 @@ function showChangelog() {
     toast(settings.teedMarkShown ? '已顯示測試資訊（在設定最下方）' : '已隱藏測試資訊');
   });
 }
+/* 5.4：主畫面拍攝按鈕上方的設定列（作者：有使用者沒去設定看，不知道還有彩色可以用）。
+   就是設定裡的「新頁面預設模式」（settings.mode），兩邊同步；v6 的「雙頁」小按鈕之後放在這一列右邊 */
+function paintHomeModes() {
+  const el = $('#homeModes'); if (!el) return;
+  if (!el.dataset.ok) {
+    el.innerHTML = MODES.map((m) => `<button data-m="${m.id}">${m.name}</button>`).join('');
+    el.querySelectorAll('button').forEach((b) => b.onclick = () => { settings.mode = b.dataset.m; saveSettings(); paintHomeModes(); });
+    el.dataset.ok = '1';
+  }
+  el.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.m === settings.mode));
+}
+paintHomeModes();
 function hasNewLog() { const seen = logSeen() || '0'; return seen !== APP_VER && CHANGELOG.some((g) => g.items.some((it) => it.since && verGt(it.since, seen))); }
 $('#cvVer').textContent = '▸ v' + APP_VER;
 $('#cvVer').onclick = () => showChangelog();
