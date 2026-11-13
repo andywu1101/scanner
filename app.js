@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.1.3'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.1.5'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -1027,14 +1027,14 @@ async function aiCorners(blob) {
    框選：自動 AI 框選開著用 AI 遮罩找整個攤開的範圍，否則用原本的偵測；書溝有 TEED 時一起用（AI 資料下載過就有）。
    書溝找不到 → 從正中間切；整個範圍都找不到 → 整張照片從中間切。這兩種情況兩頁都標 ✂ 待裁切（作者選甲） */
 const HALF_L = [[0, 0], [0.5, 0], [0.5, 1], [0, 1]], HALF_R = [[0.5, 0], [1, 0], [1, 1], [0.5, 1]];
-async function spreadSplit(blob, useAI, useTeed) {
+async function spreadSplit(blob, useAI, useTeed, rot) {
   const { img, url } = await loadImg(blob);
   try {
     await whenReady();
     const mask = useAI ? await aiMask(img) : null;
     const teed = useAI || useTeed ? await teedMap(img) : null;
     const f = smallFrame(img, 900);
-    const pl = { buffer: f.data.buffer, width: f.width, height: f.height }, tr = [f.data.buffer];
+    const pl = { buffer: f.data.buffer, width: f.width, height: f.height, rot: rot || 0 }, tr = [f.data.buffer]; // 6.1.4 rot：書在照片裡要轉幾度才正
     if (mask) { pl.mask = mask; tr.push(mask); }
     if (teed) { pl.teed = teed; tr.push(teed.buffer); }
     const r = await wcall('spreadQuad', pl, tr);
@@ -1044,7 +1044,7 @@ async function spreadSplit(blob, useAI, useTeed) {
     }
   } catch (e) { console.warn('spread', e); }
   finally { URL.revokeObjectURL(url); }
-  return { ok: false, outer: false, pages: [{ corners: HALF_L.map((p) => p.slice()), curve: null }, { corners: HALF_R.map((p) => p.slice()), curve: null }] };
+  return { ok: false, outer: false, pages: quadHalves(FULL, null, rot || 0).map((c) => ({ corners: c, curve: null })) };
 }
 const spreadMiss = (sp) => (sp.outer === false ? '找不到書的範圍，已從中間分成兩頁，請自己裁切（✂）' : '找不到書溝，已從中間分成兩頁，請檢查裁切（✂）');
 async function spreadSave(blob, list) {
@@ -1491,7 +1491,9 @@ function susPending(now) {
 function pageShaped(q) {
   const v = $('#video'), ar = v && v.videoWidth && v.videoHeight ? v.videoWidth / v.videoHeight : 0.75;
   const P = q.map((p) => [p[0] * ar, p[1]]), d = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
-  return (d(P[0], P[1]) + d(P[3], P[2])) / 2 < ((d(P[0], P[3]) + d(P[1], P[2])) / 2) * 1.05;
+  const wd = (d(P[0], P[1]) + d(P[3], P[2])) / 2, ht = (d(P[0], P[3]) + d(P[1], P[2])) / 2;
+  const r = pageRotNow(); if (r === 90 || r === 270) return ht < wd * 1.05; // 6.1.4：書躺著（Android 橫拿），整本在畫面裡是直的
+  return wd < ht * 1.05;
 }
 const polyAreaN = (q) => Math.abs(q.reduce((a, p, i) => { const n = q[(i + 1) % q.length]; return a + p[0] * n[1] - n[0] * p[1]; }, 0)) / 2;
 const gutterFor = (q) => (live.gutter && q && maxDisp(live.gutter.q, q) < 0.06 ? live.gutter.g : null);
@@ -1501,7 +1503,7 @@ function spreadGutterTick(v) {
   live.gutterBusy = true;
   const q = live.lockQ.map((p) => p.slice());
   (async () => {
-    const f = smallFrame(v, 640), pl = { buffer: f.data.buffer, width: f.width, height: f.height, outer: q }, tr = [f.data.buffer];
+    const f = smallFrame(v, 640), pl = { buffer: f.data.buffer, width: f.width, height: f.height, outer: q, rot: pageRotNow() }, tr = [f.data.buffer]; // 6.1.4 rot
     if (live.teedOK) {
       const [w, h] = sourceSize(v), sc = 640 / Math.max(w, h);
       const W = Math.max(8, Math.floor((w * sc) / 8) * 8), H = Math.max(8, Math.floor((h * sc) / 8) * 8);
@@ -1511,19 +1513,22 @@ function spreadGutterTick(v) {
       pl.teed = { buffer: buf, width: W, height: H }; tr.push(buf);
     }
     const sq = await wcall('spreadQuad', pl, tr);
-    if (sq && sq.pages && sq.gutter) live.gutter = { q, g: [sq.pages[0].corners[1], sq.pages[0].corners[2]] };
+    if (sq && sq.pages && sq.gutter) live.gutter = { q, g: sq.gut };
   })().catch((e) => console.warn('書溝', e)).finally(() => { live.gutterBusy = false; live.gutterNext = performance.now() + 800; });
 }
 // 鎖定的整本框＋書溝 → 左右兩頁（四角順序 左上、右上、右下、左下）
-function quadHalves(q, g) {
-  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-  const [gt, gb] = g || [mid(q[0], q[1]), mid(q[3], q[2])];
-  return [[q[0], gt, gb, q[3]], [gt, q[1], q[2], gb]].map((h) => h.map((p) => p.slice()));
+// 6.1.4：rot＝書要順時針轉幾度才正（Android 橫拿時畫面仍是直的）；四角先換成正著看的順序，拆完再換回照片的順序
+const rotQ = (q, rot) => { const sh = { 90: 3, 180: 2, 270: 1 }[((rot || 0) % 360 + 360) % 360] || 0; return sh ? [0, 1, 2, 3].map((i) => q[(i + sh) % 4]) : q; };
+function ordPts(pp) { const sm = pp.map((p) => p[0] + p[1]), df = pp.map((p) => p[1] - p[0]), ix = (a, f) => a.indexOf(f(...a)); return [pp[ix(sm, Math.min)], pp[ix(df, Math.min)], pp[ix(sm, Math.max)], pp[ix(df, Math.max)]]; }
+function quadHalves(q, g, rot) {
+  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], u = rotQ(q, rot);
+  const [gt, gb] = g || [mid(u[0], u[1]), mid(u[3], u[2])];
+  return [[u[0], gt, gb, u[3]], [gt, u[1], u[2], gb]].map((h) => (rot ? ordPts(h) : h).map((p) => p.slice()));
 }
 // 6.1.1：跟外框同色的虛線（作者：白色跟綠框不搭）；還沒找到書溝時淡一點，找到後跟外框一樣深
 function drawSpreadLine(ctx, R, q, a, color) {
-  const g = gutterFor(live.lockQ || q), mid = (p, r) => [(p[0] + r[0]) / 2, (p[1] + r[1]) / 2];
-  const [t, b] = g || [mid(q[0], q[1]), mid(q[3], q[2])];
+  const g = gutterFor(live.lockQ || q), mid = (p, r) => [(p[0] + r[0]) / 2, (p[1] + r[1]) / 2], u = rotQ(q, pageRotNow()); // 6.1.4
+  const [t, b] = g || [mid(u[0], u[1]), mid(u[3], u[2])];
   ctx.save(); ctx.globalAlpha = a * (g ? 1 : 0.5); ctx.lineWidth = g ? 3 : 2.5; ctx.strokeStyle = color || '#A8D4A1'; ctx.lineCap = 'round';
   ctx.setLineDash([9, 7]);
   ctx.beginPath(); ctx.moveTo(R.x + t[0] * R.w, R.y + t[1] * R.h); ctx.lineTo(R.x + b[0] * R.w, R.y + b[1] * R.h); ctx.stroke(); ctx.restore();
@@ -1568,11 +1573,11 @@ async function teedLiveRun(v) {
   if (settings.spread) { // 6.1 雙頁：TEED（＋自動 AI 框選開著時的 AI 遮罩）找整本書的外框與書溝（作者影片 9766：書溝很深、背景淺，原本的偵測只框到一頁）
     const mask = settings.autoAI ? await aiMask(v).catch(() => null) : null;
     if (!teedWanted(performance.now())) return;
-    const f2 = smallFrame(v, 640), pl = { buffer: f2.data.buffer, width: f2.width, height: f2.height, teed: { buffer: buf, width: W, height: H } }, tr = [f2.data.buffer, buf];
+    const f2 = smallFrame(v, 640), pl = { buffer: f2.data.buffer, width: f2.width, height: f2.height, teed: { buffer: buf, width: W, height: H }, rot: pageRotNow() }, tr = [f2.data.buffer, buf]; // 6.1.4 rot
     if (mask) { pl.mask = mask; tr.push(mask); }
     const sq = await wcall('spreadQuad', pl, tr);
     r = sq && sq.pages ? { corners: sq.outer, area: polyAreaN(sq.outer) } : null;
-    if (r && sq.gutter) live.gutter = { q: sq.outer, g: [sq.pages[0].corners[1], sq.pages[0].corners[2]] };
+    if (r && sq.gutter) live.gutter = { q: sq.outer, g: sq.gut };
   } else r = await wcall('teedQuad', { buffer: buf, width: W, height: H }, [buf]);
   if (!teedWanted(performance.now())) return; // 這段時間原本的偵測鎖到了、拍下了、或離開了
   onDetect(r, sig, full, sharp, gt, 'teed');
@@ -1959,7 +1964,7 @@ async function capture(sig, full, quadAt, userPress) {
   const fxOn = animOn(), now2crop = !settings.cropLater;
   const fxFrame = fxOn ? fxGrab(full || v) : null;
   let fx = null;
-  const startFx = () => { if (fxFrame) fx = playCapFx(fxFrame, quad || FULL, now2crop ? (settings.autoAI ? 'ai' : 'crop') : false, settings.spread ? { g: spGut } : null); };
+  const startFx = () => { if (fxFrame) fx = playCapFx(fxFrame, quad || FULL, now2crop ? (settings.autoAI ? 'ai' : 'crop') : false, settings.spread ? { g: spGut, rot: capRot } : null); };
   // 3.1.4：稍後裁切有動畫時，存照片（12 MP 轉 JPEG）、精算四角、存資料庫這些重活等紙飛進縮圖後才做。
   // 作者錄影：動畫在掃描光那段一頓一頓、飛進縮圖幾乎跳過——這些工作在主畫面執行，把動畫卡住。
   // 等待期間按「完成」或切到背景：先把動畫收掉，等這張存好再結束（finishLive）
@@ -2197,20 +2202,21 @@ $('#camTipX').onclick = () => { clearTimeout(camTipT); $('#camTip').classList.re
    - 立即裁切：自動 AI 框選開著先用 AI 拆好，再進兩頁一起調的裁切畫面；稍後裁切：自動 AI 框選開著，按「完成」後兩頁一起用 AI 重拆 */
 async function liveSpreadSave(o) {
   const { blob, quad, gut, needUser, capRot, thumbFrame, fx, now2crop, endDefer, defT0, fromPhoto } = o;
+  if (now2crop) { live.paused = true; camPause(); } // 6.1.4：跟單頁一樣一拍下就先暫停相機（作者 Y31：掃描光條那段還看得到鏡頭在動）
   let pages = null, ok = false, g = quad ? gut : null;
   if (g && fromPhoto) { // Android 另外拍的照片：跟預覽畫面同比例，鎖定的框才對得上
     try { const v = $('#video'), { img, url } = await loadImg(blob); const same = Math.abs(img.naturalWidth / img.naturalHeight - v.videoWidth / v.videoHeight) < 0.02; URL.revokeObjectURL(url); if (!same) g = null; } catch (_) { g = null; }
   }
   const useAI = !!settings.autoAI && (await aiCached());
-  if (g && !(now2crop && useAI)) { pages = quadHalves(quad, g).map((c) => ({ corners: c, curve: null })); ok = true; }
+  if (g && !(now2crop && useAI)) { pages = quadHalves(quad, g, capRot).map((c) => ({ corners: c, curve: null })); ok = true; }
   else {
     if (!fx) busy(useAI ? 'AI 框選中…' : '尋找書溝…');
     try {
-      const sp = await spreadSplit(blob, useAI, useAI || !!live.teedOK);
+      const sp = await spreadSplit(blob, useAI, useAI || !!live.teedOK, capRot); // 6.1.4
       if (sp.ok || !quad || fromPhoto) { pages = sp.pages; ok = sp.ok; }
     } catch (e) { console.warn('雙頁', e); }
     finally { if (!fx) unbusy(); if (useAI) aiReleaseNow(); }
-    if (!pages) pages = quadHalves(quad, g).map((c) => ({ corners: c, curve: null }));
+    if (!pages) pages = quadHalves(quad, g, capRot).map((c) => ({ corners: c, curve: null }));
   }
   const need = !!needUser || !ok;
   if (!live.docId) live.docId = (await createDoc()).id;
@@ -2487,7 +2493,7 @@ async function aiRunLater(ids) {
         const pp = await Promise.all(ids[i].map((id) => DB.get('pages', id)));
         if (pp.some((p) => !p || isBroken(p))) continue;
         try {
-          const sp = await spreadSplit(pp[0].original, true, true);
+          const sp = await spreadSplit(pp[0].original, true, true, pp[0].rotation || 0); // 6.1.4
           if (sp.ok) {
             for (let j = 0; j < 2; j++) { const p = pp[j]; if (p.cropUser) continue; p.corners = sp.pages[j].corners; p.curve = sp.pages[j].curve; delete p.needCrop; await DB.put('pages', p); enqueue(p.id); }
             done++;
@@ -2735,7 +2741,7 @@ function playCapFx(frame, quad, stay, sp) {
       if (stay) { band.style.display = 'none'; resolveReady(); return; } // 停在攤平的畫面，等進框選畫面後再 stop()
       band.style.display = 'none';
       if (sp) { // 6.1.1 雙頁：拆成左右兩張、錯開疊在一起（左頁在前），一起飛進縮圖（作者：讓使用者知道兩頁都進去了）
-        if (!sp.cards) sp.cards = fxCards(pw, rx, ry, rw, rh, quad, sp.g);
+        if (!sp.cards) sp.cards = fxCards(pw, rx, ry, rw, rh, quad, sp.g, sp.rot);
         const tb = $('#liveThumb').getBoundingClientRect(), u = clamp01((t - T.s1) / (T.y1 - T.s1 + 0.25));
         fxCardsAt(sp.cards, tb, u);
         dim.style.opacity = 0.82 * (1 - easeIn3(clamp01((u - 0.4) / 0.6)));
@@ -2757,10 +2763,14 @@ function playCapFx(frame, quad, stay, sp) {
 }
 /* 6.1.1 雙頁的拍攝動畫：攤平的整本照書溝切成左右兩張（各一份畫面副本，用 clip 只露出自己那半），
    前 4 成時間右頁滑到左頁右下方疊好，後 6 成兩張一起縮小飛進縮圖（左頁在前，作者決定） */
-function fxCards(pw, rx, ry, rw, rh, quad, g) {
-  let t = 0.5;
-  if (g) { const d = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]); t = Math.max(0.3, Math.min(0.7, d(quad[0], g[0]) / (d(quad[0], quad[1]) || 1))); }
-  const gx = rx + rw * t, rects = [{ x: rx, y: ry, w: gx - rx, h: rh }, { x: gx, y: ry, w: rx + rw - gx, h: rh }];
+function fxCards(pw, rx, ry, rw, rh, quad, g, rot) {
+  let t = 0.5; const u = rotQ(quad, rot);
+  if (g) { const d = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]); t = Math.max(0.3, Math.min(0.7, d(u[0], g[0]) / (d(u[0], u[1]) || 1))); }
+  let rects;
+  if (rot === 90 || rot === 270) { // 6.1.4：書躺著（Android 橫拿）：上下切；rot 90 時左頁在下半、270 時在上半
+    const gy = ry + rh * (rot === 90 ? 1 - t : t), top = { x: rx, y: ry, w: rw, h: gy - ry }, bot = { x: rx, y: gy, w: rw, h: ry + rh - gy };
+    rects = rot === 90 ? [bot, top] : [top, bot];
+  } else { const gx = rx + rw * (rot === 180 ? 1 - t : t), lf = { x: rx, y: ry, w: gx - rx, h: rh }, rt = { x: gx, y: ry, w: rx + rw - gx, h: rh }; rects = rot === 180 ? [rt, lf] : [lf, rt]; }
   const cards = rects.map((r, i) => {
     const el = pw.cloneNode(true), src = pw.querySelectorAll('canvas'), dst = el.querySelectorAll('canvas');
     dst.forEach((c, j) => { c.width = src[j].width; c.height = src[j].height; c.getContext('2d').drawImage(src[j], 0, 0); });
@@ -3633,7 +3643,7 @@ async function cropSpreadRedo(c, useAI) {
   busy(useAI ? 'AI 框選中…' : '偵測中…');
   try {
     const useTeed = useAI || (await aiCached());
-    const r = await spreadSplit(c.blob, useAI, useTeed);
+    const r = await spreadSplit(c.blob, useAI, useTeed, c.rot || 0); // 6.1.4：照目前轉向找
     if (useTeed) aiReleaseSoon();
     if (cropCtx !== c) return;
     if (!r.ok) { toast('找不到書溝，保留原框'); return; }

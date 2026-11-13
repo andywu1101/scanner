@@ -647,6 +647,10 @@ function spreadQuad(cv, msg) {
     if (r && r.corners && r.area > 0.25) q = orderCorners(r.corners.map((p) => [p[0] * w, p[1] * h]));
   }
   if (!q) return { fail: 'outer' };
+  const qImg = q;
+  // 6.1.4：照片裡的書是躺著的（Android 橫拿時畫面仍是直的，作者 Y31）：rot＝要順時針轉幾度才正，把四角換成「正著看」的左上、右上、右下、左下再找書溝
+  const rot = ((msg.rot || 0) % 360 + 360) % 360, sh = { 90: 3, 180: 2, 270: 1 }[rot] || 0;
+  if (sh) q = [0, 1, 2, 3].map((i) => q[(i + sh) % 4]);
   const src = new cv.Mat(h, w, cv.CV_8UC4); src.data.set(rgba);
   const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY); src.delete();
   if (!G0) { const b = new cv.Mat(); cv.GaussianBlur(gray, b, new cv.Size(5, 5), 0); G0 = b.data.slice(); b.delete(); }
@@ -694,17 +698,18 @@ function spreadQuad(cv, msg) {
   const gx = found ? [best.xt, best.xb] : [W / 2, W / 2];
   const Hi = homog(cv, dst, q);
   const gt = applyH(Hi, [gx[0], 0]), gb = applyH(Hi, [gx[1], H]);
-  const halves = [[q[0], gt, gb, q[3]], [gt, q[1], q[2], gb]];
+  const ordI = (pp) => { const sm = pp.map((p) => p[0] + p[1]), df = pp.map((p) => p[1] - p[0]), ix = (a, f) => a.indexOf(f(...a)); return [pp[ix(sm, Math.min)], pp[ix(df, Math.min)], pp[ix(sm, Math.max)], pp[ix(df, Math.max)]]; };
+  const halves = [[q[0], gt, gb, q[3]], [gt, q[1], q[2], gb]].map((hq) => (sh ? ordI(hq) : hq)); // 躺著的：換回照片的左上、右上、右下、左下
   const nz = (p) => [Math.min(1, Math.max(0, p[0] / w)), Math.min(1, Math.max(0, p[1] / h))];
   const pages = halves.map((hq) => {
     const cx = hq.reduce((a, p) => a + p[0], 0) / 4, cy = hq.reduce((a, p) => a + p[1], 0) / 4, inset = 0.006;
     const qq = hq.map((p) => [p[0] + (cx - p[0]) * inset * 2, p[1] + (cy - p[1]) * inset * 2]);
     let cq = qq, curve = null;
-    if (msg.mask) { try { const mc = maskCurve(G0, new Uint8Array(msg.mask), w, h, qq); if (mc) { cq = mc.corners; curve = mc.curve; } } catch (e) { /* 維持直線 */ } }
+    if (msg.mask && (sh === 0 || sh === 2)) { try { const mc = maskCurve(G0, new Uint8Array(msg.mask), w, h, qq); if (mc) { cq = mc.corners; curve = mc.curve; } } catch (e) { /* 維持直線 */ } } // 6.1.4：躺著的先不做彎曲
     return { corners: cq.map(nz), curve: curve ? curve.map((e) => e.map(nz)) : null };
   });
   const r3 = (v) => Math.round(v * 100) / 100;
-  return { pages, gutter: found, outer: q.map(nz), dbg: best ? { s: r3(best.s), dk: r3(best.dk), ln: r3(best.ln), ed: r3(best.ed), ik: r3(best.ik), x: [r3(best.xt / W), r3(best.xb / W)], teed: !!Tw } : null };
+  return { pages, gutter: found, gut: [nz(gt), nz(gb)], outer: qImg.map(nz), dbg: best ? { s: r3(best.s), dk: r3(best.dk), ln: r3(best.ln), ed: r3(best.ed), ik: r3(best.ik), x: [r3(best.xt / W), r3(best.xb / W)], teed: !!Tw } : null };
 }
 
 function maskCurve(G, mask, w, h, Q) {
