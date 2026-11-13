@@ -240,6 +240,10 @@ svg{display:block}
 #busy{position:fixed;inset:0;background:rgba(40,26,18,.5);display:none;place-items:center;z-index:30}
 #busy.show{display:grid}
 #busy .box{background:var(--surface);border-radius:16px;padding:22px 26px;display:flex;flex-direction:column;align-items:center;gap:14px;min-width:170px;color:var(--cocoa-d);font-weight:600;font-size:15px}
+#busyMsg{white-space:pre-line;text-align:center} /* 6.2 最佳化 AI 效能的進度條 */
+#busyBar{display:none;width:200px;height:6px;border-radius:3px;background:var(--surface2);overflow:hidden}
+#busyBar.on{display:block}
+#busyBar i{display:block;height:100%;width:0;background:var(--caramel);border-radius:3px;transition:width .4s ease}
 .spin{width:34px;height:34px;border-radius:50%;border:3.5px solid var(--surface2);border-top-color:var(--cocoa);animation:sp .8s linear infinite}
 .spin.sm{width:22px;height:22px;border-width:3px}
 @keyframes sp{to{transform:rotate(360deg)}}
@@ -1016,7 +1020,7 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
 <!-- 3.1 立即裁切：按確定後先看成品 -->
 <div id="capRes"><div class="cr-top">成品</div><div class="cr-stage"><div class="cr-pw"><canvas class="cr-base"></canvas><div class="cr-clip"><canvas class="cr-out"></canvas></div><div class="cf-band cr-band"></div></div><div class="cr-spin"><div class="spin"></div></div></div>
 <div class="cr-bar"><button class="bigbtn alt" id="crEdit">繼續編輯</button><button class="bigbtn" id="crOk">確定</button></div></div>
-<div id="busy"><div class="box"><div class="spin"></div><div id="busyMsg">處理中…</div></div></div>
+<div id="busy"><div class="box"><div class="spin"></div><div id="busyMsg">處理中…</div><div id="busyBar"><i></i></div></div></div>
 <div id="toast"></div>
 <input type="file" id="fileCamera" accept="image/*" capture="environment">
 <input type="file" id="fileGallery" accept="image/*" multiple>
