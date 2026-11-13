@@ -257,6 +257,12 @@ input[type=file]{display:none}
 #adjPanel{display:none;flex:none;background:var(--surface);padding:6px 14px calc(var(--sb) + 10px);border-top:1px solid var(--line)}
 #page.adjusting #adjPanel{display:block}
 #page.adjusting .modes,#page.adjusting .dock,#page.adjusting .navarrow,#page.adjusting #viewImg{display:none}
+/* 6.1.2 橫放兩頁並排：書背在正中間；選到的頁加外框（工具作用在這頁） */
+#viewDuo{position:absolute;inset:0;pointer-events:none}
+#viewDuo img{position:absolute;background:#fff;box-shadow:0 4px 22px rgba(58,40,30,.25);max-width:none;max-height:none}
+#viewDuo img.sel{outline:2.5px solid var(--caramel);outline-offset:3px}
+#page.adjusting #viewDuo{display:none!important}
+#duoSide{font-size:12.5px;padding:6px 10px;color:var(--cocoa);white-space:nowrap}
 .adjhead{display:flex;align-items:center;gap:6px}
 .adjhead b{flex:1;font-size:15.5px;color:var(--cocoa-d)}
 .adjhead .tbtn{color:var(--cocoa);padding:7px 10px;font-size:14px}
@@ -338,6 +344,14 @@ input[type=file]{display:none}
 #burstSpin.on{display:grid}
 #burstSpin .spin{border-color:rgba(255,255,255,.3);border-top-color:#fff}
 #burstCount{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:2}
+/* 6.0.1 雙頁：翻看左頁／右頁 */
+#burstStage{touch-action:pan-y}
+.bdots{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:2;display:flex;gap:2px;background:rgba(28,19,14,.6);border-radius:999px;padding:3px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.bdots button{padding:5px 14px;border-radius:999px;font-size:13px;font-weight:700;color:rgba(255,255,255,.75)}
+.bdots button.on{background:var(--cream);color:var(--cocoa)}
+#cropStep{position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:5;display:flex;gap:2px;background:rgba(28,19,14,.65);border-radius:999px;padding:3px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+#cropStep button{padding:6px 16px;border-radius:999px;font-size:13.5px;font-weight:700;color:rgba(255,255,255,.75)}
+#cropStep button.on{background:var(--cream);color:var(--cocoa)}
 #burst .controls{flex:none;padding:6px 20px calc(var(--sb) + 18px)}
 #burst .row{display:flex;align-items:center;justify-content:space-between;margin-top:12px}
 #burstNext{width:84px;height:84px;border-radius:50%;background:var(--cream);color:var(--cocoa);display:grid;place-items:center;box-shadow:0 6px 20px rgba(0,0,0,.35)}
@@ -346,7 +360,10 @@ input[type=file]{display:none}
 #burst .side{min-width:78px;display:flex;flex-direction:column;align-items:center;gap:4px;font-size:12.5px}
 #burst .side svg{width:26px;height:26px}
 #burst .side[disabled]{opacity:.35}
-#burst .opt{display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.07);border-radius:12px;padding:10px 14px;font-size:14.5px}
+#burst .opts{display:flex;gap:8px}
+#burst .opts .opt{flex:1;min-width:0}
+#burst .opts .opt:last-child{flex:none}
+#burst .opt{gap:10px;display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.07);border-radius:12px;padding:10px 14px;font-size:14.5px}
 
 /* ===== 封面（v1.8，比照音樂聽力練習 App） ===== */
 #cover{background:var(--bg)}
@@ -458,6 +475,10 @@ input[type=file]{display:none}
 .mseg{flex:1;display:flex;background:var(--surface2);border-radius:999px;padding:3px;gap:2px}
 .mseg button{flex:1;padding:7px 0;border-radius:999px;font-size:13.5px;font-weight:700;color:var(--cocoa);white-space:nowrap}
 .mseg button.on{background:var(--cocoa);color:var(--cream);box-shadow:0 2px 6px rgba(107,70,50,.25)}
+/* 6.0 雙頁開關：設定列右邊的小按鈕 */
+.spbtn{flex:none;display:flex;align-items:center;gap:4px;padding:7px 11px;border-radius:999px;background:var(--surface2);font-size:13.5px;font-weight:700;color:var(--cocoa);white-space:nowrap}
+.spbtn svg{width:17px;height:17px}
+.spbtn.on{background:var(--cocoa);color:var(--cream);box-shadow:0 2px 6px rgba(107,70,50,.25)}
 .home-donate button{font-size:13.5px;font-weight:700;color:#fff;background:var(--danger);padding:8px 18px;border-radius:999px;box-shadow:0 3px 10px rgba(180,83,63,.25)}
 .home-donate button:active{filter:brightness(1.08)}
 
@@ -563,6 +584,8 @@ details.log-old[open]>summary::after{transform:rotate(90deg)}
 #liveAi.show{display:inline-flex}
 #liveAi .spin.sm{width:11px;height:11px;border-width:2px;border-color:rgba(30,58,51,.25);border-top-color:#1E3A33}
 #live .ibtn.round.on .slash{display:none}
+#live .ibtn.round.spb.on{color:#FFC828} /* 6.1.3 雙頁開著：金色，跟雙頁的金框一致 */
+@media (max-width:379px){#live .top{gap:4px;padding-left:6px;padding-right:6px}#live .top .pill{padding-left:11px;padding-right:11px}#live .ibtn.round{width:34px;height:34px}} /* 6.1.3：多一顆按鈕，窄螢幕（約 360 寬）擠得下 */
 #cropModeBtn.later{background:#B86A22}
 #liveTip{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);z-index:4;background:rgba(20,14,10,.86);color:#fff;padding:12px 18px;border-radius:14px;font-size:14px;line-height:1.55;text-align:center;pointer-events:none;opacity:0;transition:opacity .25s;width:max-content;max-width:calc(100% - 32px)}
 #liveTip.show{opacity:1}
@@ -630,6 +653,57 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
   #live .bottom{flex-direction:column-reverse;justify-content:space-between;width:104px;padding:calc(var(--st) + 14px) calc(env(safe-area-inset-right,0px) + 14px) calc(var(--sb) + 14px) 14px}
   #live #liveDone{text-align:center}
 }
+/* 6.0.3 橫向編輯（作者：橫著編輯什麼都看不到）：手機橫放、高度很矮時，按鈕移到右邊一欄，照片用滿左邊的高度。直向不受影響 */
+@media (orientation:landscape) and (max-height:540px){
+  #crop .bar,#burst .bar,#page .bar{min-height:44px;padding:calc(var(--st) + 4px) calc(env(safe-area-inset-right,0px) + 12px) 4px calc(env(safe-area-inset-left,0px) + 12px)}
+  /* 裁切畫面：工具列直排在右邊 */
+  #crop.active{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto minmax(0,1fr)}
+  #crop .bar{grid-column:1/-1}
+  #crop #cropStage{grid-column:1;grid-row:2;margin-left:env(safe-area-inset-left,0px)}
+  #crop .tools{grid-column:2;grid-row:2;flex-direction:column;justify-content:space-evenly;padding:4px calc(env(safe-area-inset-right,0px) + 6px) calc(var(--sb) + 4px) 4px;overflow-y:auto}
+  #crop .tools .tool{flex:none;min-width:64px;font-size:11px;padding:3px 2px;gap:2px}
+  #crop .tools .tool svg{width:22px;height:22px}
+  /* 6.1.1：成品小窗依高度縮小（作者：橫向時太大，常擋到手指而變透明），一樣會躲到對角 */
+  #crop #pip{width:auto;max-width:34%;height:auto}
+  #crop #pip #pipCv{width:auto;height:min(46vh,190px);max-width:100%}
+  /* 單頁畫面：照片在左，右邊兩條直欄（模式＋調整、工具）（作者：右邊的東西也要直式，不要橫排佔寬度） */
+  #page.active{display:grid;grid-template-columns:minmax(0,1fr) auto auto;grid-template-rows:auto minmax(0,1fr);background:var(--surface)}
+  #page .bar{grid-column:1/-1}
+  #page #viewStage{grid-column:1;grid-row:2;background:var(--bg);margin-left:env(safe-area-inset-left,0px)}
+  #page .modes{grid-column:2;grid-row:2;flex-direction:column;flex-wrap:nowrap;justify-content:center;gap:7px;padding:6px 8px;border-left:1px solid var(--line)}
+  #page .modes .chip{padding:7px 4px;min-width:68px;text-align:center;font-size:13.5px;justify-content:center}
+  #page .dock{grid-column:3;grid-row:2;flex-direction:column;justify-content:space-evenly;padding:4px calc(env(safe-area-inset-right,0px) + 6px) calc(var(--sb) + 4px) 2px;border-top:0}
+  #page .dock .tool{min-width:58px;font-size:11px;padding:3px 2px;gap:2px}
+  #page .dock .tool svg{width:22px;height:22px}
+  /* 調整面板：直式項目清單＋直的拉桿；標題與「回到統一設定／完成」移到上方標題列 */
+  #page.adjusting.active{grid-template-columns:minmax(0,1fr) auto}
+  #page.adjusting #pageAi,#page.adjusting #pageDel{visibility:hidden}
+  #page.adjusting #adjPanel{grid-column:2;grid-row:2;display:grid;grid-template-columns:auto 64px;grid-template-rows:minmax(0,1fr);gap:6px;border-top:0;border-left:1px solid var(--line);padding:8px calc(env(safe-area-inset-right,0px) + 8px) calc(var(--sb) + 8px) 10px;min-height:0}
+  #page .adjhead{position:fixed;top:calc(var(--st) + 4px);right:calc(env(safe-area-inset-right,0px) + 12px);height:36px;z-index:6}
+  #page .adjhead b{flex:none;font-size:14px;margin-right:6px}
+  #page .adjtabs{flex-direction:column;overflow-x:visible;overflow-y:auto;padding:0;gap:6px;justify-content:center;min-height:0}
+  #page .adjtabs .atab{padding:7px 10px;text-align:center;font-size:13.5px}
+  #page .adjone{position:relative;padding:0;min-height:0}
+  #page .adjval{display:contents}
+  #page #adjHi,#page #adjLo{position:absolute;left:0;right:0;text-align:center;font-size:11.5px;min-width:0}
+  #page #adjHi{top:0}
+  #page #adjLo{bottom:26px}
+  #page #adjVal{position:absolute;left:-10px;right:-10px;bottom:0;font-size:12.5px;white-space:nowrap}
+  #page #adjRange{position:absolute;left:50%;top:calc(50% - 6px);width:var(--sl,200px);transform:translate(-50%,-50%) rotate(-90deg)}
+  #page .adjnote{display:none}
+  /* 高畫質連拍：成品在左，右邊一欄直排：重拍、快門（中間）、繼續編輯，下面兩個開關 */
+  #burst.active{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto minmax(0,1fr)}
+  #burst .bar{grid-column:1/-1}
+  #burst #burstStage{grid-column:1;grid-row:2;margin-left:env(safe-area-inset-left,0px)}
+  #burst .controls{grid-column:2;grid-row:2;display:flex;flex-direction:column;justify-content:center;gap:8px;width:188px;padding:4px calc(env(safe-area-inset-right,0px) + 10px) calc(var(--sb) + 6px) 4px}
+  #burst .row{order:1;flex-direction:column;gap:6px;margin-top:0}
+  #burst .row .side{min-width:0;font-size:12px}
+  #burst .row .side svg{width:22px;height:22px}
+  #burstNext{width:68px;height:68px}
+  #burst .row .side span{margin-top:2px!important;font-size:12px!important}
+  #burst .opts{order:2;flex-direction:column;gap:6px}
+  #burst .opts .opt,#burst .opts .opt:last-child{flex:none;padding:7px 10px;font-size:12.5px;white-space:nowrap;gap:6px}
+}
 </style>
 </head>
 <body>
@@ -674,7 +748,7 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
   <div id="a2Bar"><div class="a2hs-bar"><span>建議先加入主畫面，掃描才不會分散在瀏覽器和 App 兩邊。</span><button class="how" id="a2BarHow">怎麼做</button><button class="x" id="a2BarX" aria-label="暫時收起">×</button></div></div>
   <div class="scroll" id="homeScroll"><div id="homeBody"></div></div>
   <div class="home-donate"><button id="homeDonate">❤ 小額贊助</button></div>
-  <div class="home-modes"><div class="mseg" id="homeModes" role="group" aria-label="新頁面模式"></div></div><!-- 5.4 -->
+  <div class="home-modes"><div class="mseg" id="homeModes" role="group" aria-label="新頁面模式"></div><button class="spbtn" id="homeSpread" aria-pressed="false" aria-label="雙頁模式"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.5C10 5 7 4.5 3 5v13c4-.5 7 0 9 1.5 2-1.5 5-2 9-1.5V5c-4-.5-7 0-9 1.5z"/><path d="M12 6.5v13"/></svg>雙頁</button></div><!-- 5.4；6.0 雙頁 -->
   <nav class="actions">
     <button class="act" data-src="gallery"><span class="c"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="M21 15l-5-5L5 21"/></svg></span>相簿匯入</button>
     <button class="act main" data-src="live"><span class="c"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M7 12h10"/></svg></span>即時掃描</button>
@@ -696,6 +770,7 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
       <button class="ibtn round" id="torchBtn" style="display:none" aria-label="閃光燈"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M13.2 2.5 5.6 13.4h5.2l-1.3 8.1 7.9-11.2h-5.3z"/><g class="slash"><path d="M4 4l16 16" stroke="#000" stroke-opacity=".5" stroke-width="4.2" stroke-linecap="round"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></g></svg></button>
       <button class="ibtn round" id="aiBtn" aria-label="自動 AI 框選"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.2" fill="none" stroke="currentColor" stroke-width="1.8"/><text x="12" y="15.8" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-weight="800" font-size="10" fill="currentColor">AI</text><g class="slash"><path d="M4 4l16 16" stroke="#000" stroke-opacity=".5" stroke-width="4.2" stroke-linecap="round"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></g></svg></button>
       <button class="ibtn round" id="cdBtn" aria-label="倒數拍攝（3 秒）"><svg viewBox="0 0 24 24"><circle cx="12" cy="13.3" r="8.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10 2.6h4M12 2.6v2.4M18.4 6.2l1.4-1.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><text x="12" y="17" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-weight="800" font-size="9.5" fill="currentColor">3</text><g class="slash"><path d="M4 4l16 16" stroke="#000" stroke-opacity=".5" stroke-width="4.2" stroke-linecap="round"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></g></svg></button>
+      <button class="ibtn round spb" id="spreadBtn" aria-label="雙頁模式"><svg viewBox="0 0 24 24"><path d="M12 6.5C10 5 7 4.5 3 5v13c4-.5 7 0 9 1.5 2-1.5 5-2 9-1.5V5c-4-.5-7 0-9 1.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 6.5v13" stroke="currentColor" stroke-width="1.8"/><g class="slash"><path d="M4 4l16 16" stroke="#000" stroke-opacity=".5" stroke-width="4.2" stroke-linecap="round"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></g></svg></button><!-- 6.1.3 -->
       <span class="sp"></span>
       <button class="pill" id="cropModeBtn">立即裁切</button>
       <button class="pill" id="autoBtn">自動</button>
@@ -716,10 +791,11 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
 <section class="screen" id="crop">
   <header class="bar">
     <button class="tbtn" id="cropCancel">取消</button>
-    <h1 style="text-align:center;font-size:16px">調整掃描範圍</h1>
+    <h1 style="text-align:center;font-size:16px" id="cropTitle">調整掃描範圍</h1>
     <button class="tbtn solid" id="cropOk">確定</button>
   </header>
   <div id="cropStage">
+    <div class="cseg" id="cropStep" style="display:none"><button>左頁</button><button>右頁</button></div><!-- 6.0.1；6.0.2 可以點 -->
     <img id="cropImg" alt="">
     <svg id="cropSvg"></svg>
     <div id="pip"><canvas id="pipCv"></canvas><div class="pip-gl"></div><span class="pip-lb">成品預覽</span></div>
@@ -763,9 +839,10 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
     <div id="burstPw"><canvas class="cr-base"></canvas><div class="cr-clip"><canvas class="cr-out"></canvas></div><div class="cf-band cr-band"></div></div>
     <div class="cr-spin" id="burstSpin"><div class="spin"></div></div>
     <div class="pill" id="burstCount">尚未拍攝</div>
+    <div class="bdots" id="burstDots" style="display:none"><button>左頁</button><button>右頁</button></div><!-- 6.0.1 -->
   </div>
   <div class="controls">
-    <div class="opt"><span>每張先確認裁切</span><button class="tg" id="burstConfirm" aria-label="每張先確認裁切"></button></div>
+    <div class="opts"><div class="opt"><span>每張先確認裁切</span><button class="tg" id="burstConfirm" aria-label="每張先確認裁切"></button></div><div class="opt"><span>雙頁</span><button class="tg" id="burstSpread" aria-label="雙頁模式"></button></div></div>
     <div class="row">
       <button class="side" id="burstRetake"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 2v6h6"/><path d="M2.7 15.6A9 9 0 1 0 5 6.5L2.5 8"/></svg>重拍上一張</button>
       <div class="side"><button id="burstNext" aria-label="拍下一張"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></button><span style="margin-top:6px;font-size:13.5px">拍下一張</span></div>
@@ -801,11 +878,13 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
   <header class="bar">
     <button class="ibtn" id="pageBack" aria-label="返回"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
     <h1 id="pageTitle" style="text-align:center;font-size:16px"></h1>
+    <button class="tbtn" id="duoSide" style="display:none" aria-label="第一頁在左或右">第一頁在左</button><!-- 6.1.2 -->
     <button class="aibtn" id="pageAi" aria-label="AI 精修">✨ 精修</button>
     <button class="ibtn" id="pageDel" aria-label="刪除此頁"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></svg></button>
   </header>
   <div id="viewStage">
     <img id="viewImg" alt="" draggable="false">
+    <div id="viewDuo" style="display:none"><img id="duoL" alt="" draggable="false"><img id="duoR" alt="" draggable="false"></div><!-- 6.1.2 橫放兩頁 -->
     <button class="navarrow" id="prevBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
     <button class="navarrow" id="nextBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
     <div id="viewBusy"><div class="spin"></div></div>

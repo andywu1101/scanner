@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '5.4.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.1.3'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -28,7 +28,7 @@ const HAS_IC = 'ImageCapture' in window; // Android Chrome 有；新版 iPhone S
 
 /* ---------- 設定 ---------- */
 // 3.1：新使用者預設「稍後裁切」（立即裁切改成每張都進框選，連拍會變慢）；已經存過設定的老使用者維持原本的值。sound＝拍攝音效
-const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: false, autoAI: false, confirmCrop: true, upscale: 'auto', landscape: true, sound: true, countdown: true, v: 2 }; // 5.1.3：倒數拍攝預設開（手動關過的人維持關）；5.3.1：預設改回立即裁切（只影響新用戶，存過設定的人維持原本）
+const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: false, autoAI: false, confirmCrop: true, upscale: 'auto', landscape: true, sound: true, countdown: true, spread: false, v: 2 }; // 5.1.3：倒數拍攝預設開（手動關過的人維持關）；5.3.1：預設改回立即裁切（只影響新用戶，存過設定的人維持原本）
 const settings = (() => {
   let s = {};
   try { s = JSON.parse(localStorage.getItem('cocoscan-settings') || '{}'); } catch (_) {}
@@ -551,6 +551,7 @@ function askSheet(title, msg, okText, cancelText, danger) {
 $('#sheetWrap').addEventListener('click', (e) => { if (e.target.id === 'sheetWrap' && Date.now() - sheetOpenAt > 400) closeSheet(); });
 
 const ICON = {
+  book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.5C10 5 7 4.5 3 5v13c4-.5 7 0 9 1.5 2-1.5 5-2 9-1.5V5c-4-.5-7 0-9 1.5z"/><path d="M12 6.5v13"/></svg>', // 6.1.2
   ai: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.6L18.5 9l-4.7 1.6L12 15l-1.8-4.4L5.5 9l4.7-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>',
   live: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M7 12h10"/></svg>',
   camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>',
@@ -762,12 +763,12 @@ async function stableBlob(file) {
 /* ---------- 高畫質連拍 ---------- */
 const burst = { docId: null, fromDoc: false, onStack: false, count: 0, lastPageId: null, fresh: false, shownKey: null, tok: 0, sw: null, ar: 0 };
 function startBurst(docId) {
-  Object.assign(burst, { docId, fromDoc: !!docId, onStack: false, count: 0, lastPageId: null });
+  Object.assign(burst, { docId, fromDoc: !!docId, onStack: false, count: 0, lastPageId: null, lastIds: [] });
 }
-async function burstAdd(blob, corners, curve, rotation) {
+async function burstAdd(blob, corners, curve, rotation, needCrop) {
   if (!burst.docId) burst.docId = (await createDoc()).id;
-  const page = await addPage(burst.docId, blob, corners, curve, false, rotation || 0);
-  burst.count++; burst.lastPageId = page.id; burst.fresh = true;
+  const page = await addPage(burst.docId, blob, corners, curve, !!needCrop, rotation || 0);
+  burst.count++; burst.lastPageId = page.id; burst.lastIds = [page.id]; burst.viewId = null; burst.fresh = true;
   return page;
 }
 function toBurst() {
@@ -781,9 +782,11 @@ function toBurst() {
 async function renderBurst() {
   $('#burstCount').textContent = burst.count ? `已拍 ${burst.count} 張` : '尚未拍攝';
   $('#burstConfirm').classList.toggle('on', settings.confirmCrop);
+  $('#burstSpread').classList.toggle('on', !!settings.spread); // 6.0
   $('#burstRetake').disabled = $('#burstEdit').disabled = !burst.lastPageId;
+  burstDots();
   if (!burst.lastPageId) { burst.tok++; if (burst.sw) { burst.sw.stop(); burst.sw = null; } burst.shownKey = null; $('#burstPw').style.visibility = 'hidden'; $('#burstSpin').classList.remove('on'); return; }
-  const p = await DB.get('pages', burst.lastPageId);
+  const p = await DB.get('pages', burstViewId());
   if (!p) return;
   const key = p.id + procKey(p);
   if (key === burst.shownKey) { burstLayout(); return; } // 同一張、沒改過（例如框選畫面按取消回來）：不重播
@@ -799,18 +802,68 @@ function burstLayout() {
   const w = Math.max(1, Math.min(r.width - 2 * m, (r.height - 2 * m) * ar)), h = w / ar;
   Object.assign($('#burstPw').style, { left: (r.width - w) / 2 + 'px', top: (r.height - h) / 2 + 'px', width: w + 'px', height: h + 'px' });
 }
+// 6.0.3：頁面範圍（含彎曲點）的外框，留 2% 邊；佔照片 6 成以上就用整張（跟原本一樣）。回傳換算到這個範圍的四角／彎曲點
+function pageRegion(C, curve) {
+  const pts = C.concat(curve ? curve.flat() : []);
+  const m = 0.02, x0 = Math.max(0, Math.min(...pts.map((q) => q[0])) - m), y0 = Math.max(0, Math.min(...pts.map((q) => q[1])) - m);
+  const x1 = Math.min(1, Math.max(...pts.map((q) => q[0])) + m), y1 = Math.min(1, Math.max(...pts.map((q) => q[1])) + m);
+  if ((x1 - x0) * (y1 - y0) > 0.6) return { x0: 0, y0: 0, w: 1, h: 1, corners: C, curve: curve || null };
+  const w = x1 - x0, h = y1 - y0, f = (q) => [(q[0] - x0) / w, (q[1] - y0) / h];
+  return { x0, y0, w, h, corners: C.map(f), curve: curve ? curve.map((e) => e.map(f)) : null };
+}
+// 只畫出照片的一塊（整張照片畫上去、超出畫布的部分不畫：iPhone 只取局部時可能沒套用照片方向，整張畫才正確）
+function regionFrame(src, rg, maxSide) {
+  if (rg.w === 1 && rg.h === 1) return smallFrame(src, maxSide);
+  const [W, H] = sourceSize(src), rw = W * rg.w, rh = H * rg.h, s = Math.min(1, maxSide / Math.max(rw, rh));
+  const cw = Math.max(1, Math.round(rw * s)), ch = Math.max(1, Math.round(rh * s));
+  const c = canvasOf(cw, ch), ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, -rg.x0 * W * s, -rg.y0 * H * s, W * s, H * s);
+  const d = ctx.getImageData(0, 0, cw, ch); c.width = c.height = 0;
+  return d;
+}
+// 6.1.1：雙頁的兩頁成品先做好放著（翻到另一頁時立刻出現，跟著手指翻時墊在下面）；只留這一對
+burst.cache = new Map();
+const burstKey = (p) => p.id + procKey(p);
+function burstCacheKeep() { const pr = burstPair() || []; for (const k of [...burst.cache.keys()]) if (!pr.some((id) => k.startsWith(id))) { const c = burst.cache.get(k); c.width = c.height = 0; burst.cache.delete(k); } }
+function burstCacheSet(p, c) { for (const k of [...burst.cache.keys()]) if (k.startsWith(p.id)) { const o = burst.cache.get(k); if (o !== c) { o.width = o.height = 0; } burst.cache.delete(k); } burst.cache.set(burstKey(p), c); } // 同一頁只留最新的
+const copyCanvas = (src) => { const c = document.createElement('canvas'); c.width = src.width; c.height = src.height; c.getContext('2d').drawImage(src, 0, 0); return c; };
+async function burstPrerender() {
+  const pr = burstPair(); if (!pr) return;
+  for (const id of pr) {
+    const p = await DB.get('pages', id); if (!p || burst.cache.has(burstKey(p))) continue;
+    try {
+      await whenReady();
+      const { img, url } = await loadImg(p.original);
+      const rg = pageRegion(p.corners, p.curve), f = regionFrame(img, rg, 2000); URL.revokeObjectURL(url);
+      const r = await wcall('process', { buffer: f.data.buffer, width: f.width, height: f.height, corners: rg.corners, curve: rg.curve, upscale: 'off', rotation: p.rotation || 0, mode: p.mode, params: pageAdjOf(p) }, [f.data.buffer]);
+      if (!burstPair() || !burstPair().includes(id)) return;
+      const c = document.createElement('canvas'); drawTo(c, r); burstCacheSet(p, c);
+    } catch (e) { console.warn('預先處理', e); }
+  }
+}
 async function burstShow(p, anim) {
   const pw = $('#burstPw'), base = pw.querySelector('.cr-base'), outC = pw.querySelector('.cr-out');
   const clip = pw.querySelector('.cr-clip'), band = pw.querySelector('.cr-band'), spin = $('#burstSpin');
   const tok = ++burst.tok; if (burst.sw) { burst.sw.stop(); burst.sw = null; }
   const alive = () => tok === burst.tok;
+  burstCacheKeep();
+  const cached = !anim && burst.cache.get(burstKey(p));
+  if (cached) { // 6.1.1：做好的直接畫
+    outC.width = cached.width; outC.height = cached.height; outC.getContext('2d').drawImage(cached, 0, 0);
+    base.width = base.height = 1; burst.ar = cached.width / cached.height; burstLayout();
+    clip.style.clipPath = 'none'; clip.style.opacity = ''; band.style.display = 'none'; pw.style.visibility = 'visible'; spin.classList.remove('on');
+    return;
+  }
   pw.style.visibility = 'hidden'; bandInit(band); clip.style.opacity = ''; clip.style.transition = ''; spin.classList.add('on');
   pauseQueue(); // 先讓成品出來，背景的整頁處理稍後再跑
   try {
     await whenReady();
     const { img, url } = await loadImg(p.original);
-    const f0 = anim ? smallFrame(img, 900) : null, f1 = smallFrame(img, 2000); URL.revokeObjectURL(url);
-    const job = (f, mode, params) => wcall('process', { buffer: f.data.buffer, width: f.width, height: f.height, corners: p.corners, curve: p.curve || null, upscale: 'off', rotation: p.rotation || 0, mode, params }, [f.data.buffer]);
+    // 6.0.3：頁面只佔照片一部分（雙頁的一頁約一半）時，先只取這一頁的範圍再縮，成品才夠清楚（作者：雙頁的大圖不夠清晰）
+    const rg = pageRegion(p.corners, p.curve);
+    const f0 = anim ? regionFrame(img, rg, 900) : null, f1 = regionFrame(img, rg, 2000); URL.revokeObjectURL(url);
+    const job = (f, mode, params) => wcall('process', { buffer: f.data.buffer, width: f.width, height: f.height, corners: rg.corners, curve: rg.curve, upscale: 'off', rotation: p.rotation || 0, mode, params }, [f.data.buffer]);
     if (anim) {
       const r0 = await job(f0, 'original', fillAdj('original'));
       if (!alive()) return;
@@ -821,6 +874,7 @@ async function burstShow(p, anim) {
     const r = await job(f1, p.mode, pageAdjOf(p));
     if (!alive()) return;
     drawTo(outC, r); spin.classList.remove('on');
+    if (burstPair()) { burstCacheSet(p, copyCanvas(outC)); setTimeout(() => burstPrerender(), 300); } // 6.1.1
     if (!anim) {
       base.width = base.height = 1; burst.ar = r.width / r.height; burstLayout();
       clip.style.clipPath = 'none'; band.style.display = 'none'; pw.style.visibility = 'visible'; return;
@@ -838,10 +892,85 @@ async function burstShow(p, anim) {
   } finally { if (alive()) resumeQueue(); }
 }
 $('#burstNext').onclick = () => openCamera();
+/* 6.0.1：雙頁拍的那張可以翻看左頁／右頁（作者：只看得到一頁）。左右滑動或點下方「左頁・右頁」；預設顯示右頁（最後一頁）。
+   「繼續編輯」編輯目前看到的那一頁；「重拍上一張」照舊兩頁一起刪 */
+const burstPair = () => (burst.lastIds && burst.lastIds.length === 2 && burst.lastIds.includes(burst.lastPageId) ? burst.lastIds : null);
+const burstViewId = () => { const pr = burstPair(); return pr && burst.viewId && pr.includes(burst.viewId) ? burst.viewId : burst.lastPageId; };
+function burstDots() {
+  const el = $('#burstDots'), pr = burstPair();
+  el.style.display = pr ? '' : 'none';
+  if (!pr) return;
+  const cur = burstViewId();
+  el.querySelectorAll('button').forEach((b, i) => b.classList.toggle('on', pr[i] === cur));
+}
+function burstFlip(i) {
+  const pr = burstPair(); if (!pr || pr[i] === burstViewId()) return;
+  const pw = $('#burstPw'), snap = flipOn() ? snapCanvases(pw, [...pw.querySelectorAll('canvas')]) : null; // 6.1 翻書動畫
+  const dir = pr.indexOf(burstViewId()) < i ? 1 : -1;
+  burst.viewId = pr[i]; renderBurst();
+  if (snap) bookFlip($('#burstStage'), snap, dir);
+}
+$('#burstDots').querySelectorAll('button').forEach((b, i) => b.onclick = () => burstFlip(i));
+// 6.1.1：連拍畫面跟著手指翻（另一頁已經做好才跟手指；沒做好就放開時照原本的方式翻）
+burst.under = null;
+const burstUnderClean = () => { if (burst.under) { burst.under.remove(); burst.under = null; } burst.dragged = false; };
+flipDrag($('#burstStage'), {
+  ready: () => current === 'burst' && !!burstPair(),
+  canFlip: (d) => { const pr = burstPair(); if (!pr) return false; const i = pr.indexOf(burstViewId()) + d; return i >= 0 && i < 2; },
+  under: (d) => {
+    const pr = burstPair(), id = pr[pr.indexOf(burstViewId()) + d];
+    const k = [...burst.cache.keys()].find((x) => x.startsWith(id)), c = k && burst.cache.get(k); if (!c) return null;
+    const r = $('#burstStage').getBoundingClientRect(), m = 18, ar = c.width / c.height;
+    const w = Math.max(1, Math.min(r.width - 2 * m, (r.height - 2 * m) * ar)), h = w / ar;
+    const el = copyCanvas(c); Object.assign(el.style, { position: 'absolute', left: (r.width - w) / 2 + 'px', top: (r.height - h) / 2 + 'px', width: w + 'px', height: h + 'px', zIndex: 15, pointerEvents: 'none', background: '#fff' });
+    burstUnderClean(); $('#burstStage').appendChild(el); burst.under = el; burst.dragged = true;
+    return el;
+  },
+  snap: () => { const pw = $('#burstPw'); return snapCanvases(pw, [...pw.querySelectorAll('canvas')]); },
+  commit: (d) => {
+    const pr = burstPair(); burst.viewId = pr[pr.indexOf(burstViewId()) + d];
+    setTimeout(() => { burst.dragged = false; }, 0);
+    return renderBurst();
+  },
+  cleanup: burstUnderClean,
+});
+{
+  let sx = null, sy = 0;
+  const st = $('#burstStage');
+  st.addEventListener('pointerdown', (e) => { sx = e.clientX; sy = e.clientY; });
+  st.addEventListener('pointerup', (e) => {
+    if (sx === null) return;
+    const dx = e.clientX - sx, dy = e.clientY - sy; sx = null;
+    if (flipDrag.active || burst.dragged) return; // 6.1.1：跟著手指翻的已經處理了
+    const pr = burstPair(); if (!pr || Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    burstFlip(dx < 0 ? 1 : 0); // 往左滑看右頁、往右滑看左頁
+  });
+  st.addEventListener('pointercancel', () => { sx = null; });
+}
 // 3.1.6：繼續編輯上一張：回到框選畫面，確定後重新顯示成品（含動畫）
 $('#burstEdit').onclick = async () => {
   if (!burst.lastPageId) return;
-  const p = await DB.get('pages', burst.lastPageId); if (!p) return;
+  const p = await DB.get('pages', burstViewId()); if (!p) return; // 6.0.1：雙頁時編輯目前看到的那一頁
+  const pr = burstPair();
+  if (pr) { // 6.0.2：雙頁拍的那張回到兩頁都能調的裁切畫面，從目前看到的那頁開始
+    const pp = await Promise.all(pr.map((id) => DB.get('pages', id)));
+    if (pp.every(Boolean)) {
+      openCrop({
+        blob: p.original, rotation: p.rotation || 0,
+        spread: { pages: pp.map((q) => ({ corners: q.corners, curve: q.curve || null })), start: pr.indexOf(p.id), seen: [true, true] },
+        onSpread: async (list, rot) => {
+          sfxPrime();
+          for (let i = 0; i < 2; i++) {
+            const q = await DB.get('pages', pr[i]); if (!q) continue;
+            q.corners = list[i].c; q.curve = list[i].cv; q.rotation = rot; if (list[i].edited) q.cropUser = true; delete q.needCrop;
+            await DB.put('pages', q); enqueue(q.id);
+          }
+          burst.fresh = true; toBurst();
+        },
+      });
+      return;
+    }
+  }
   openCrop({
     blob: p.original, corners: p.corners, curve: p.curve || null, rotation: p.rotation || 0,
     onConfirm: async (c, cv, edited, rot) => {
@@ -853,18 +982,21 @@ $('#burstEdit').onclick = async () => {
   });
 };
 $('#burstConfirm').onclick = () => { settings.confirmCrop = !settings.confirmCrop; saveSettings(); renderBurst(); };
+$('#burstSpread').onclick = () => { setSpread(!settings.spread); renderBurst(); }; // 6.0：只影響之後拍的
 $('#burstRetake').onclick = async () => {
   openCamera();
   if (!burst.lastPageId) return;
   // 5.3：排隊；先刪頁面再改清單（反過來的話中途關掉，留下的頁會被當散頁找回來）
+  // 6.0：雙頁拍的那張拆成兩頁，一起刪
+  const ids = burst.lastIds && burst.lastIds.includes(burst.lastPageId) ? burst.lastIds.slice() : [burst.lastPageId];
   const doc = await docEdit(async () => {
-    await DB.del('pages', burst.lastPageId);
+    for (const id of ids) await DB.del('pages', id);
     const d = await DB.get('docs', burst.docId);
-    d.pageIds = d.pageIds.filter((id) => id !== burst.lastPageId);
+    d.pageIds = d.pageIds.filter((id) => !ids.includes(id));
     await DB.put('docs', d);
     return d;
   });
-  burst.count--; burst.lastPageId = doc.pageIds.length && burst.count ? doc.pageIds[doc.pageIds.length - 1] : null;
+  burst.count -= ids.length; burst.lastIds = []; burst.viewId = null; burst.lastPageId = doc.pageIds.length && burst.count ? doc.pageIds[doc.pageIds.length - 1] : null;
   renderBurst();
 };
 async function finishBurst() {
@@ -890,9 +1022,69 @@ async function aiCorners(blob) {
     return { corners: r.corners, curve: r.curve ? normCurve(r.corners, r.curve) : null, teed: teedNote(r) };
   } catch (e) { console.warn('auto AI', e); return { fail: 'error', msg: e && e.message ? e.message : String(e) }; }
 }
+/* ---------- 6.0 雙頁模式 ----------
+   攤開的書拍一張 → 左右兩頁（同一張原圖各存一份，左頁在前）。高畫質拍照、相簿匯入適用；即時掃描之後再做。
+   框選：自動 AI 框選開著用 AI 遮罩找整個攤開的範圍，否則用原本的偵測；書溝有 TEED 時一起用（AI 資料下載過就有）。
+   書溝找不到 → 從正中間切；整個範圍都找不到 → 整張照片從中間切。這兩種情況兩頁都標 ✂ 待裁切（作者選甲） */
+const HALF_L = [[0, 0], [0.5, 0], [0.5, 1], [0, 1]], HALF_R = [[0.5, 0], [1, 0], [1, 1], [0.5, 1]];
+async function spreadSplit(blob, useAI, useTeed) {
+  const { img, url } = await loadImg(blob);
+  try {
+    await whenReady();
+    const mask = useAI ? await aiMask(img) : null;
+    const teed = useAI || useTeed ? await teedMap(img) : null;
+    const f = smallFrame(img, 900);
+    const pl = { buffer: f.data.buffer, width: f.width, height: f.height }, tr = [f.data.buffer];
+    if (mask) { pl.mask = mask; tr.push(mask); }
+    if (teed) { pl.teed = teed; tr.push(teed.buffer); }
+    const r = await wcall('spreadQuad', pl, tr);
+    if (r && r.pages) {
+      if (teedMarkOn()) console.log('spread', r.dbg);
+      return { ok: !!r.gutter, pages: r.pages.map((p) => ({ corners: p.corners, curve: p.curve ? normCurve(p.corners, p.curve) : null })) };
+    }
+  } catch (e) { console.warn('spread', e); }
+  finally { URL.revokeObjectURL(url); }
+  return { ok: false, outer: false, pages: [{ corners: HALF_L.map((p) => p.slice()), curve: null }, { corners: HALF_R.map((p) => p.slice()), curve: null }] };
+}
+const spreadMiss = (sp) => (sp.outer === false ? '找不到書的範圍，已從中間分成兩頁，請自己裁切（✂）' : '找不到書溝，已從中間分成兩頁，請檢查裁切（✂）');
+async function spreadSave(blob, list) {
+  const ids = [];
+  for (const it of list) {
+    const pg = await burstAdd(blob, it.c, it.cv, it.rot, it.need);
+    if (it.edited) { pg.cropUser = true; await DB.put('pages', pg); }
+    ids.push(pg.id);
+  }
+  burst.lastIds = ids; // 重拍上一張＝這張照片拆出來的兩頁一起刪
+}
+async function spreadCamera(blob) {
+  const useAI = await aiAutoOn(), useTeed = useAI || (await aiCached());
+  busy(useAI ? 'AI 框選中…' : '尋找書溝…');
+  let sp;
+  try { sp = await spreadSplit(blob, useAI, useTeed); } finally { unbusy(); if (useTeed) aiReleaseSoon(); }
+  const need = !sp.ok, [L, R] = sp.pages;
+  if (need) toast(spreadMiss(sp));
+  if (!settings.confirmCrop) {
+    await spreadSave(blob, [{ c: L.corners, cv: L.curve, need }, { c: R.corners, cv: R.curve, need }]);
+    toBurst();
+    if (!need) toast(`已加入第 ${burst.count - 1}、${burst.count} 張`);
+    return;
+  }
+  // 每張先確認裁切：6.0.2 同一個裁切畫面調兩頁（點另一頁的框或上方「左頁｜右頁」換頁），兩頁都確定才存。取消＝這張不存，重拍＝重新拍
+  openCrop({
+    blob, retake: true, burst: true, spread: { pages: [L, R], start: 0 },
+    onSpread: async (list, rot) => { sfxPrime(); await spreadSave(blob, list.map((it) => Object.assign(it, { rot }))); toBurst(); },
+    onRetake: () => openCamera(),
+  });
+}
 $('#fileCamera').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
+  if (settings.spread) { // 6.0
+    let blob;
+    try { blob = await stableBlob(file); } catch (err) { toast(err.message); return; }
+    await spreadCamera(blob);
+    return;
+  }
   busy('偵測文件邊框…');
   let blob, corners, curve = null;
   try { blob = await stableBlob(file); corners = await detectBlob(blob); }
@@ -922,15 +1114,22 @@ $('#fileGallery').addEventListener('change', async (e) => {
   if (!files.length) return;
   let docId = cameraTarget;
   if (!docId) docId = (await createDoc()).id;
-  const useAI = await aiAutoOn();
-  let rejected = 0, aiErr = null, tdone = 0;
+  const useAI = await aiAutoOn(), spread = !!settings.spread, useTeed = spread && (useAI || (await aiCached())); // 6.0
+  let rejected = 0, aiErr = null, tdone = 0, smiss = 0, souter = 0;
   // 4.2.2：開著自動 AI 框選時，和 4.2.1 的批次框選一樣先暫停頁面處理、全部框完再處理（相簿照片解析度高，一邊框一邊處理容易閃退）
-  if (useAI) { busy(`AI 框選中 1 / ${files.length}`); await holdQueue(); aiBatchMark(true); }
+  const hold = useAI || useTeed;
+  if (hold) { busy(`${useAI ? 'AI 框選中' : '匯入中'} 1 / ${files.length}`); await holdQueue(); if (useAI) aiBatchMark(true); }
   try {
   for (let i = 0; i < files.length; i++) {
     busy(`${useAI ? 'AI 框選中' : '匯入中'} ${i + 1} / ${files.length}`);
     try {
       const blob = await stableBlob(files[i]);
+      if (spread) { // 6.0：一張拆成左右兩頁
+        const sp = await spreadSplit(blob, useAI, useTeed);
+        if (!sp.ok) { smiss++; if (sp.outer === false) souter++; }
+        for (const p of sp.pages) await addPage(docId, blob, p.corners, p.curve, !sp.ok);
+        continue;
+      }
       let c = await detectBlob(blob), cv = null;
       if (useAI) {
         const r = await aiCorners(blob);
@@ -939,9 +1138,10 @@ $('#fileGallery').addEventListener('change', async (e) => {
       await addPage(docId, blob, c, cv);
     } catch (err) { toast(err.message); }
   }
-  } finally { if (useAI) { aiBatchMark(false); releaseQueue(); aiReleaseSoon(); } }
+  } finally { if (hold) { if (useAI) aiBatchMark(false); releaseQueue(); aiReleaseSoon(); } }
   unbusy();
   openDoc(docId, current !== 'doc');
+  if (smiss) { toast(files.length === 1 ? spreadMiss({ outer: souter ? false : undefined }) : `${smiss} 張找不到書溝或書的範圍，已從中間分成兩頁（✂）`); return; }
   if (aiErr) toast('AI 框選失敗：' + aiErr);
   else if (rejected) toast((files.length === 1 ? 'AI 判斷不適合，保留原框' : `${rejected} 張 AI 判斷不適合，保留原框`) + teedCount(tdone));
   else if (teedCount(tdone)) toast(`AI 框選完成${teedCount(tdone)}`); // 5.0
@@ -971,6 +1171,8 @@ async function startLive(docId) {
     live.teedOK = ok;
     // 5.3：先暖機 TEED（載入模型＋跑一次小圖），第一次真的要用時（確認碰邊的框）才不會等太久
     if (ok && !live.teedWarm) { const b = new Uint8ClampedArray(64 * 48 * 4).fill(128).buffer; aiCall({ type: 'teed', buffer: b, width: 64, height: 48 }, [b]).then(() => { live.teedWarm = true; }).catch(() => {}); }
+    // 6.1：雙頁模式開著自動 AI 框選時，AI 遮罩也先暖機（找整本書時會用到）
+    if (ok && settings.spread && settings.autoAI && !live.maskWarm) { live.maskWarm = true; const b = new Uint8ClampedArray(320 * 320 * 4).fill(128).buffer; aiCall({ type: 'mask', buffer: b }, [b]).catch(() => {}); }
   }); // 4.3：有 TEED 才有即時後援
   aiErrShown = false; aiTag(aiPend ? 'AI ' + aiPend : '', !!aiPend);
   pauseQueue(); // 掃描期間暫停高解析度處理，讓抓邊保持流暢
@@ -992,13 +1194,15 @@ async function startLive(docId) {
     let camPerm = null;
     if (IS_IOS) { try { camPerm = (await navigator.permissions.query({ name: 'camera' })).state; } catch (_) {} }
     const camT0 = performance.now();
-    const stream = await navigator.mediaDevices.getUserMedia(camConstraints(useIC));
+    let stream = await camOpen(useIC);
     const camDt = performance.now() - camT0;
+    stream = await camToMain(stream, useIC); // 6.0.1：iPhone 換成主鏡頭
     // 2.1：同一次要詢問 AI 下載時不顯示相機提示（一次只出現一個要讀的東西，下次進來才輪到它）
     if (!aiAsk && IS_IOS && ((camPerm === 'prompt' && camDt > 500) || (camPerm === null && camDt > 1000))) showCamTip();
     if (!live.running) { stream.getTracks().forEach((t) => t.stop()); return; }
     live.stream = stream;
     live.track = stream.getVideoTracks()[0];
+    if (IS_IOS && teedMarkOn()) setTimeout(() => toast('鏡頭：' + (lensName() || '未知')), 1200); // 6.0.1 測試資訊開著時顯示用哪顆鏡頭
     const v = $('#video');
     v.srcObject = stream;
     await v.play().catch(() => {});
@@ -1076,21 +1280,46 @@ function setPhotoSettings() {
     live.photoSettings = { imageWidth: Math.floor(W.max * s), imageHeight: Math.floor(H.max * s) };
   }).catch(() => {});
 }
-function camConstraints(useIC) {
-  return {
-    audio: false,
-    video: useIC
-      ? { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } }
-      : { facingMode: { ideal: 'environment' }, width: { ideal: 4096 }, height: { ideal: 3072 } },
-  };
+function camConstraints(useIC, devId) {
+  const sz = useIC ? { width: { ideal: 1920 }, height: { ideal: 1440 } } : { width: { ideal: 4096 }, height: { ideal: 3072 } };
+  return { audio: false, video: Object.assign(devId ? { deviceId: { exact: devId } } : { facingMode: { ideal: 'environment' } }, sz) };
 }
+/* 6.0.1：iPhone 即時掃描只用主鏡頭（作者：拍攝時有時會跳一下，像在切換鏡頭；通常不會拍那麼近，主鏡頭畫質好得多）。
+   只要「後鏡頭」時 Safari 給的是會自動切換的組合相機（雙廣角／三鏡頭），靠近時會跳到超廣角（微距）。
+   網頁要先拿到相機權限才看得到鏡頭名稱：第一次照舊開，再找名稱是「後置相機」（Back Camera）的那顆換過去，記在 settings.camMain；
+   之後直接開它。打不開（例如換了 ID）就清掉、用原本的方式並重新找。Android 不動；高畫質拍照是系統相機，管不到 */
+const isMainLens = (l) => /後置|back/i.test(l) && !/超廣角|廣角|雙|三|望遠|ultra|wide|dual|triple|tele/i.test(l);
+async function camOpen(useIC) {
+  if (IS_IOS && settings.camMain) {
+    try { return await navigator.mediaDevices.getUserMedia(camConstraints(useIC, settings.camMain)); }
+    catch (e) { console.warn('main lens', e); settings.camMain = null; saveSettings(); }
+  }
+  return navigator.mediaDevices.getUserMedia(camConstraints(useIC));
+}
+async function camToMain(stream, useIC) {
+  if (!IS_IOS || settings.camMain) return stream;
+  try {
+    const cur = stream.getVideoTracks()[0], devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+    const main = devs.find((d) => isMainLens(d.label || ''));
+    if (!main) return stream;
+    const curId = cur && cur.getSettings ? cur.getSettings().deviceId : null;
+    if (curId === main.deviceId) { settings.camMain = main.deviceId; saveSettings(); return stream; }
+    stream.getTracks().forEach((t) => t.stop());
+    try {
+      const s2 = await navigator.mediaDevices.getUserMedia(camConstraints(useIC, main.deviceId));
+      settings.camMain = main.deviceId; saveSettings();
+      return s2;
+    } catch (e) { console.warn('main lens', e); return navigator.mediaDevices.getUserMedia(camConstraints(useIC)); }
+  } catch (e) { console.warn('lens list', e); return stream; }
+}
+const lensName = () => { try { return (live.track && live.track.label) || ''; } catch (_) { return ''; } };
 // 1.31：重新開一次相機（iPhone 下載 AI 資料後相機畫面會凍結）；已拍的頁與文件保留，失敗就結束掃描
 async function restartCamera() {
   if (!live.running) return;
   try {
     if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
     const useIC = HAS_IC && !IS_IOS;
-    const stream = await navigator.mediaDevices.getUserMedia(camConstraints(useIC));
+    const stream = await camOpen(useIC); // 6.0.1：iPhone 主鏡頭
     if (!live.running) { stream.getTracks().forEach((t) => t.stop()); return; }
     live.stream = stream; live.track = stream.getVideoTracks()[0];
     if (useIC) { try { live.ic = new ImageCapture(live.track); setPhotoSettings(); } catch (_) {} }
@@ -1255,6 +1484,50 @@ function susPending(now) {
   if (!live.teedOK || live.tCapped || now - live.susT0 > (live.teedWarm ? SUS_WAIT : SUS_WAIT + 3500)) { live.tChk = 'keep'; return false; } // TEED 還在暖機最多多等 3.5 秒
   return true;
 }
+/* ---------- 6.1 即時掃描的雙頁模式 ----------
+   作者影片 5 段分析：平整的書原本的偵測就大多框住整本；書溝深的書（9766）只框到一頁 → 直的框不算，交給 TEED（＋AI 遮罩）找整本；
+   書塞滿畫面（9768）框碰邊 → 照常不拍，提示拿遠一點。書溝用即時畫面＋TEED 就找得到（跟較高畫質一樣準）。
+   框上先畫中間虛線，鎖定後找一次書溝（spreadGutterTick，最快 0.8 秒一次）把線移過去；拍下時有書溝就直接拆兩頁 */
+function pageShaped(q) {
+  const v = $('#video'), ar = v && v.videoWidth && v.videoHeight ? v.videoWidth / v.videoHeight : 0.75;
+  const P = q.map((p) => [p[0] * ar, p[1]]), d = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+  return (d(P[0], P[1]) + d(P[3], P[2])) / 2 < ((d(P[0], P[3]) + d(P[1], P[2])) / 2) * 1.05;
+}
+const polyAreaN = (q) => Math.abs(q.reduce((a, p, i) => { const n = q[(i + 1) % q.length]; return a + p[0] * n[1] - n[0] * p[1]; }, 0)) / 2;
+const gutterFor = (q) => (live.gutter && q && maxDisp(live.gutter.q, q) < 0.06 ? live.gutter.g : null);
+function spreadGutterTick(v) {
+  const now = performance.now();
+  if (!live.lockQ || live.gutterBusy || live.teedBusy || now < (live.gutterNext || 0) || gutterFor(live.lockQ)) return;
+  live.gutterBusy = true;
+  const q = live.lockQ.map((p) => p.slice());
+  (async () => {
+    const f = smallFrame(v, 640), pl = { buffer: f.data.buffer, width: f.width, height: f.height, outer: q }, tr = [f.data.buffer];
+    if (live.teedOK) {
+      const [w, h] = sourceSize(v), sc = 640 / Math.max(w, h);
+      const W = Math.max(8, Math.floor((w * sc) / 8) * 8), H = Math.max(8, Math.floor((h * sc) / 8) * 8);
+      const c = canvasOf(W, H), x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(v, 0, 0, W, H);
+      const d = x.getImageData(0, 0, W, H);
+      const buf = await aiCall({ type: 'teed', buffer: d.data.buffer, width: W, height: H }, [d.data.buffer]);
+      pl.teed = { buffer: buf, width: W, height: H }; tr.push(buf);
+    }
+    const sq = await wcall('spreadQuad', pl, tr);
+    if (sq && sq.pages && sq.gutter) live.gutter = { q, g: [sq.pages[0].corners[1], sq.pages[0].corners[2]] };
+  })().catch((e) => console.warn('書溝', e)).finally(() => { live.gutterBusy = false; live.gutterNext = performance.now() + 800; });
+}
+// 鎖定的整本框＋書溝 → 左右兩頁（四角順序 左上、右上、右下、左下）
+function quadHalves(q, g) {
+  const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const [gt, gb] = g || [mid(q[0], q[1]), mid(q[3], q[2])];
+  return [[q[0], gt, gb, q[3]], [gt, q[1], q[2], gb]].map((h) => h.map((p) => p.slice()));
+}
+// 6.1.1：跟外框同色的虛線（作者：白色跟綠框不搭）；還沒找到書溝時淡一點，找到後跟外框一樣深
+function drawSpreadLine(ctx, R, q, a, color) {
+  const g = gutterFor(live.lockQ || q), mid = (p, r) => [(p[0] + r[0]) / 2, (p[1] + r[1]) / 2];
+  const [t, b] = g || [mid(q[0], q[1]), mid(q[3], q[2])];
+  ctx.save(); ctx.globalAlpha = a * (g ? 1 : 0.5); ctx.lineWidth = g ? 3 : 2.5; ctx.strokeStyle = color || '#A8D4A1'; ctx.lineCap = 'round';
+  ctx.setLineDash([9, 7]);
+  ctx.beginPath(); ctx.moveTo(R.x + t[0] * R.w, R.y + t[1] * R.h); ctx.lineTo(R.x + b[0] * R.w, R.y + b[1] * R.h); ctx.stroke(); ctx.restore();
+}
 function teedWanted(now) {
   if (!live.teedOK || !live.running || !settings.autoShutter || live.paused || live.capturing || live.cd) return false;
   if (live.armed) return live.lockQ ? live.lockSrc === 'teed' || susPending(now) : now - Math.max(live.idleT0 || now, live.seenT || 0) > TEED_AFTER;
@@ -1291,7 +1564,16 @@ async function teedLiveRun(v) {
   const sharp = sharpness(d), gt = grayThumb(d);
   const buf = await aiCall({ type: 'teed', buffer: d.data.buffer, width: W, height: H }, [d.data.buffer]);
   if (!teedWanted(performance.now())) return;
-  const r = await wcall('teedQuad', { buffer: buf, width: W, height: H }, [buf]);
+  let r;
+  if (settings.spread) { // 6.1 雙頁：TEED（＋自動 AI 框選開著時的 AI 遮罩）找整本書的外框與書溝（作者影片 9766：書溝很深、背景淺，原本的偵測只框到一頁）
+    const mask = settings.autoAI ? await aiMask(v).catch(() => null) : null;
+    if (!teedWanted(performance.now())) return;
+    const f2 = smallFrame(v, 640), pl = { buffer: f2.data.buffer, width: f2.width, height: f2.height, teed: { buffer: buf, width: W, height: H } }, tr = [f2.data.buffer, buf];
+    if (mask) { pl.mask = mask; tr.push(mask); }
+    const sq = await wcall('spreadQuad', pl, tr);
+    r = sq && sq.pages ? { corners: sq.outer, area: polyAreaN(sq.outer) } : null;
+    if (r && sq.gutter) live.gutter = { q: sq.outer, g: [sq.pages[0].corners[1], sq.pages[0].corners[2]] };
+  } else r = await wcall('teedQuad', { buffer: buf, width: W, height: H }, [buf]);
   if (!teedWanted(performance.now())) return; // 這段時間原本的偵測鎖到了、拍下了、或離開了
   onDetect(r, sig, full, sharp, gt, 'teed');
 }
@@ -1337,7 +1619,9 @@ function cdTick(v) {
     const lockedLong = live.lockQ && now - (live.idleT0 || now) > CD_STUCK && (live.edge || (live.progress || 0) < 0.3)
       && !(live.lockSrc === 'teed' && now - (live.tLockT || 0) < CD_STUCK); // 5.3：TEED 剛鎖到（或剛換成 TEED 的框）給它 3 秒自己拍完（TEED 一秒只有 1～2 格）
     // 5.1.4：從「這一頁開始找」或「上一次真正鎖穩（聚焦過半）」算 2 秒；一閃而過的鎖定（原本的偵測或 TEED）不延後倒數
-    const want = live.armed && (stuck || lockedLong || (!live.lockQ && now - Math.max(live.idleT0 || now, live.cdBase || 0) > CD_AFTER));
+    // 6.1 雙頁：有 TEED 時多等 2 秒才倒數，讓 TEED／AI 有機會先找到整本（作者影片 9766：倒數在 TEED 開始找之前就把畫面整張拍走）
+    const cdAfter = settings.spread && live.teedOK ? CD_AFTER + 2000 : CD_AFTER;
+    const want = live.armed && (stuck || lockedLong || (!live.lockQ && now - Math.max(live.idleT0 || now, live.cdBase || 0) > cdAfter));
     live.cdWait = want && !still; // 等使用者拿穩：提示「拿穩後開始倒數」
     if (!want || !still) return;
     live.cdWait = false; live.cdHist = [];
@@ -1372,8 +1656,9 @@ async function liveLoop() {
       const sharp = sharpness(d);
       const gt = grayThumb(d);
       const luma = meanLuma(d); // 要在 buffer 交給 worker 之前算
-      const r = await wcall('detect', { buffer: d.data.buffer, width: d.width, height: d.height, fast: true }, [d.data.buffer]);
+      const r = await wcall('detect', { buffer: d.data.buffer, width: d.width, height: d.height, fast: true, spread: !!settings.spread }, [d.data.buffer]); // 6.1 雙頁：要整本
       onDetect(r, sig, full, sharp, gt);
+      if (settings.spread) spreadGutterTick(v); // 6.1：鎖到整本時找書溝
       darkCheck(luma);
     } catch (e) { console.warn(e); }
     live.detecting = false;
@@ -1421,6 +1706,7 @@ function onDetect(r, sig, full, sharp, gt, src) {
   if (src === 'det' && teedOwns()) return; // 4.3：TEED 鎖定的頁、或 TEED 負責判斷換頁時，原本的偵測不參與
   const tq = src === 'teed'; // 4.3：TEED 一秒只有 1～2 格，累積的格數門檻較低
   const now = performance.now();
+  if (settings.spread && r && src === 'det' && pageShaped(r.corners)) r = null; // 6.1 雙頁：框到的是直的（單頁或譜表區塊）不算，等 TEED／AI 找整本
   const ok = r && r.area > 0.1 && quadPlausible(r.corners); // 5.0.2：不像一張紙的框當作沒找到
   const qs = ok ? quadSig(gt, r.corners) : null;
   // 4.2：自動拍攝時框選鎖不到 4 秒，提示可以直接按快門（快門鈕呼吸）；鎖到或拍下就收起，每一頁都會再提示
@@ -1448,6 +1734,8 @@ function onDetect(r, sig, full, sharp, gt, src) {
   // 5.3：TEED 來確認可疑的框（原本的偵測鎖到、碰到畫面邊緣）
   if (tq && live.lockQ && live.lockSrc === 'det') {
     if (!susPending(now)) return;
+    // 6.1 雙頁：TEED 找到的整本跟原本的框幾乎一樣 → 原本的框沒問題，繼續用它（一秒很多格，比交給 TEED 快拍下；作者影片從約 4.8 秒提早）
+    if (settings.spread && ok && maxDisp(r.corners, live.lockQ) < 0.04) { live.sus = false; live.tChk = 'keep'; return; }
     if (ok && !edgeTouch(r.corners)) { // 改用 TEED 的框，這一頁交給 TEED
       const q = r.corners;
       Object.assign(live, { lockQ: q, acc: [q], cand: [], tCand: [], lockSrc: 'teed', tLockT: now, tT0: null, anchorQ: q, stableSince: now, best: null, outliers: 0, miss: 0, sus: false, tChk: 'teed', prevQs: null, lastQs: null });
@@ -1510,7 +1798,7 @@ function onDetect(r, sig, full, sharp, gt, src) {
   if (live.edge) { if (!live.edgeT0) live.edgeT0 = now; } else live.edgeT0 = 0; // 5.1.2：卡在「拉遠一點」多久
   if (live.edge) {
     live.stableSince = now; live.progress = 0; live.best = null;
-    setRing(0); setHint(live.cd ? CD_HINT : live.cdWait ? CD_WAIT : live.tipOn ? waitTip() : '請稍微拉遠一點'); return;
+    setRing(0); setHint(live.cd ? CD_HINT : live.cdWait ? CD_WAIT : live.tipOn ? waitTip() : settings.spread ? '拿遠一點，讓整本書都在畫面裡' : '請稍微拉遠一點'); return;
   }
 
   // 記錄倒數期間最清楚的一格
@@ -1600,22 +1888,24 @@ function drawOverlay() {
     ctx.globalAlpha = live.fade;
     ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))); ctx.closePath();
     // 綠色隨倒數逐漸變濃
-    const gold = settings.teedMark && live.lockSrc === 'teed' && !live.edge; // 5.0：TEED 協助標記開著時，TEED 找到的框用金色
-    ctx.fillStyle = live.edge ? 'rgba(242,196,141,.18)' : gold ? `rgba(255,200,40,${0.12 + 0.3 * pr})` : `rgba(143,179,138,${0.12 + 0.3 * pr})`;
+    // 6.1.3：雙頁模式用金色框（作者：跟單頁的綠框有區別）；TEED 協助標記（測試用，5.0 原本是金色）改成淡藍色
+    const tmark = settings.teedMark && live.lockSrc === 'teed' && !live.edge, gold = !!settings.spread && !live.edge;
+    ctx.fillStyle = live.edge ? 'rgba(242,196,141,.18)' : tmark ? `rgba(126,200,242,${0.12 + 0.3 * pr})` : gold ? `rgba(255,200,40,${0.12 + 0.3 * pr})` : `rgba(143,179,138,${0.12 + 0.3 * pr})`;
     ctx.fill();
     ctx.lineWidth = 3 + pr; ctx.lineJoin = 'round';
-    ctx.strokeStyle = live.edge ? '#F2C48D' : gold ? '#FFC828' : '#A8D4A1';
+    ctx.strokeStyle = live.edge ? '#F2C48D' : tmark ? '#7EC8F2' : gold ? '#FFC828' : '#A8D4A1';
     ctx.stroke();
     ctx.fillStyle = '#fff';
     pts.forEach((p) => { ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, 7); ctx.fill(); });
     ctx.globalAlpha = 1;
+    if (settings.spread) drawSpreadLine(ctx, R, live.shown, live.fade, ctx.strokeStyle); // 6.1：書溝線（還沒找到時畫中間虛線）
     // 5.1 聚焦：框的中央一個圓環跟著穩定進度填滿，填滿就拍（拍攝動畫關閉時不畫）
-    if (settings.autoShutter && live.armed && !live.edge && pr > 0 && animOn()) centerRing(ctx, [pts.reduce((a, p) => a + p[0], 0) / 4, pts.reduce((a, p) => a + p[1], 0) / 4], pr, null, gold ? '#FFC828' : '#7ED67E', live.fade);
+    if (settings.autoShutter && live.armed && !live.edge && pr > 0 && animOn()) centerRing(ctx, [pts.reduce((a, p) => a + p[0], 0) / 4, pts.reduce((a, p) => a + p[1], 0) / 4], pr, null, tmark ? '#7EC8F2' : gold ? '#FFC828' : '#7ED67E', live.fade);
   }
   // 5.1 倒數拍攝：畫面中央的圓環，中間顯示 5～1
   if (live.cd && live.cdT0 != null && !live.capturing) {
     const el = performance.now() - live.cdT0;
-    centerRing(ctx, [R.x + R.w / 2, R.y + R.h / 2], Math.min(1, el / CD_LEN), Math.max(1, Math.ceil((CD_LEN - el) / 1000)), '#7ED67E', 1);
+    centerRing(ctx, [R.x + R.w / 2, R.y + R.h / 2], Math.min(1, el / CD_LEN), Math.max(1, Math.ceil((CD_LEN - el) / 1000)), settings.spread ? '#FFC828' : '#7ED67E', 1);
   }
   requestAnimationFrame(drawOverlay);
 }
@@ -1656,6 +1946,7 @@ async function capture(sig, full, quadAt, userPress) {
   const steady = !manualMode && !!live.lockQ && !live.edge;
   const needUser = !!userPress && !steady;
   const quad = needUser ? null : quadAt || live.lockQ;
+  const spGut = settings.spread && quad ? gutterFor(quad) : null; // 6.1：拍下那一刻的書溝（之後 live.gutter 可能被換掉）
   // 4.3：TEED 在找或已鎖定時拍下，換頁由 TEED 判斷（原本的偵測在白色背景會誤以為紙拿開，同一頁被重拍）
   live.capSrc = live.teedOK && (live.lockSrc === 'teed' || live.tT0 != null || live.tCapped) ? 'teed' : 'det';
   const capQsOk = live.capSrc === 'det' || live.lockSrc === 'teed'; // 不是 TEED 鎖定的框：內容指紋留給拍完後 TEED 的第一格補
@@ -1668,7 +1959,7 @@ async function capture(sig, full, quadAt, userPress) {
   const fxOn = animOn(), now2crop = !settings.cropLater;
   const fxFrame = fxOn ? fxGrab(full || v) : null;
   let fx = null;
-  const startFx = () => { if (fxFrame) fx = playCapFx(fxFrame, quad || FULL, now2crop ? (settings.autoAI ? 'ai' : 'crop') : false); };
+  const startFx = () => { if (fxFrame) fx = playCapFx(fxFrame, quad || FULL, now2crop ? (settings.autoAI ? 'ai' : 'crop') : false, settings.spread ? { g: spGut } : null); };
   // 3.1.4：稍後裁切有動畫時，存照片（12 MP 轉 JPEG）、精算四角、存資料庫這些重活等紙飛進縮圖後才做。
   // 作者錄影：動畫在掃描光那段一頓一頓、飛進縮圖幾乎跳過——這些工作在主畫面執行，把動畫卡住。
   // 等待期間按「完成」或切到背景：先把動畫收掉，等這張存好再結束（finishLive）
@@ -1718,6 +2009,7 @@ async function capture(sig, full, quadAt, userPress) {
       }
     } else { flash(); sfxPlay('shutter'); if (fxOn) startFx(); else shotFx('ok'); setHint('已拍好，請換下一頁', true); live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = capQsOk ? live.lastQs : null; await deferSave(); }
     let corners = quad ? quad.map((p) => p.slice()) : FULL.map((p) => p.slice());
+    if (settings.spread) { await liveSpreadSave({ blob, quad, gut: spGut, needUser, capRot, thumbFrame, fx, now2crop, endDefer, defT0, fromPhoto }); return; } // 6.1 雙頁
     // 用較高解析度重新精算四個角（只在結果相近時採用，避免抓錯）
     try {
       let r = null, sameAspect = true;
@@ -1899,6 +2191,78 @@ $('#camTipGo').onclick = () => { $('#camTip').classList.remove('show'); camPermH
 $('#camTipX').onclick = () => { clearTimeout(camTipT); $('#camTip').classList.remove('show'); };
 
 /* 1.19 立即裁切：拍完直接進裁切畫面；相機不關，只暫停找框，回來就能接著拍 */
+/* 6.1 即時掃描雙頁：拍下的照片存成左右兩頁（同一張原圖各一份，左頁在前）
+   - 鎖定的框有找到書溝（而且照片跟畫面同比例）：直接用框＋書溝拆，不用等
+   - 否則用照片找（spreadSplit：自動 AI 框選開著用 AI，有 TEED 用 TEED）；都找不到 → 從中間切、兩頁標 ✂
+   - 立即裁切：自動 AI 框選開著先用 AI 拆好，再進兩頁一起調的裁切畫面；稍後裁切：自動 AI 框選開著，按「完成」後兩頁一起用 AI 重拆 */
+async function liveSpreadSave(o) {
+  const { blob, quad, gut, needUser, capRot, thumbFrame, fx, now2crop, endDefer, defT0, fromPhoto } = o;
+  let pages = null, ok = false, g = quad ? gut : null;
+  if (g && fromPhoto) { // Android 另外拍的照片：跟預覽畫面同比例，鎖定的框才對得上
+    try { const v = $('#video'), { img, url } = await loadImg(blob); const same = Math.abs(img.naturalWidth / img.naturalHeight - v.videoWidth / v.videoHeight) < 0.02; URL.revokeObjectURL(url); if (!same) g = null; } catch (_) { g = null; }
+  }
+  const useAI = !!settings.autoAI && (await aiCached());
+  if (g && !(now2crop && useAI)) { pages = quadHalves(quad, g).map((c) => ({ corners: c, curve: null })); ok = true; }
+  else {
+    if (!fx) busy(useAI ? 'AI 框選中…' : '尋找書溝…');
+    try {
+      const sp = await spreadSplit(blob, useAI, useAI || !!live.teedOK);
+      if (sp.ok || !quad || fromPhoto) { pages = sp.pages; ok = sp.ok; }
+    } catch (e) { console.warn('雙頁', e); }
+    finally { if (!fx) unbusy(); if (useAI) aiReleaseNow(); }
+    if (!pages) pages = quadHalves(quad, g).map((c) => ({ corners: c, curve: null }));
+  }
+  const need = !!needUser || !ok;
+  if (!live.docId) live.docId = (await createDoc()).id;
+  const pL = await addPage(live.docId, blob, pages[0].corners, pages[0].curve, need, capRot);
+  const pR = await addPage(live.docId, blob, pages[1].corners, pages[1].curve, need, capRot);
+  live.count += 2; live.lastIds = [pL.id, pR.id];
+  endDefer();
+  const th = $('#liveThumb');
+  const showCount = (n) => { th.style.visibility = 'visible'; th.querySelector('span').textContent = n; bumpThumb(); };
+  if (fx && !now2crop) { const n = live.count; fx.landed.then(() => { if (live.count >= n) showCount(live.count); }); } else showCount(live.count);
+  live.lastPageId = pR.id;
+  if (!live.thumbUrl) th.querySelector('img').src = blobUrl('live:last', blob, pR.id);
+  if (thumbFrame && !fromPhoto) setLiveThumb(thumbFrame, pages[1].corners, pages[1].curve, pR.id, capRot); else refreshLiveThumb(pR.id);
+  updResChip();
+  live.lastCapT = defT0 || Date.now(); live.miss = 0; live.best = null; live.idleT0 = performance.now();
+  live.gutter = null;
+  if (!quad) { live.armed = true; resetLock(); }
+  if (!ok && !now2crop) toast('找不到書溝，已從中間分成兩頁（✂）');
+  if (now2crop) {
+    live.paused = true; camPause();
+    if (fx) { fx.release(); await fx.ready; }
+    live.capturing = false; openLiveSpreadCrop([pL, pR], blob, pages);
+    if (fx) { const f = fx; setTimeout(() => f.stop(), 80); }
+    return;
+  }
+  if (settings.autoAI) live.aiLater.push([pL.id, pR.id]); // 按「完成」後兩頁一起用 AI 重拆
+  live.capturing = false;
+}
+function openLiveSpreadCrop(pp, blob, pages, replace) {
+  live.paused = true; freeFullCanvases(); camPause();
+  openCrop({
+    blob, rotation: pp[0].rotation || 0, retake: true, liveCrop: true, replace,
+    spread: { pages: pages.map((p) => ({ corners: p.corners, curve: p.curve || null })), start: 0 },
+    onSpread: async (list, rot) => {
+      const ids = pp.map((p) => p.id), out = [];
+      for (let i = 0; i < 2; i++) {
+        const p = await DB.get('pages', ids[i]); if (!p) continue;
+        p.corners = list[i].c; p.curve = list[i].cv; p.rotation = rot; delete p.needCrop;
+        if (list[i].edited) p.cropUser = true;
+        await DB.put('pages', p); out.push(p);
+      }
+      if (out.length < 2) { history.back(); return; }
+      const act = await showCapResult(ids); // 成品：左頁 → 翻到右頁
+      if (act === 'edit') { openLiveSpreadCrop(out, blob, out.map((p) => ({ corners: p.corners, curve: p.curve })), true); return; }
+      if (act === 'ok') { capRes.flying = true; history.back(); try { await capResFly(); } finally { capRes.flying = false; } }
+      if (live.lastPageId === ids[1]) refreshLiveThumb(ids[1]);
+      ids.forEach((id) => enqueue(id));
+    },
+    onRetake: async () => { await removeLivePage(pp[1].id); await removeLivePage(pp[0].id); },
+    onCancel: () => {},
+  });
+}
 function openLiveCrop(page, blob, corners, curve, replace) {
   live.paused = true;
   freeFullCanvases(); // 4.2.3
@@ -1963,6 +2327,7 @@ function updateLiveBtns() {
   $('#aiBtn').classList.toggle('on', !!settings.autoAI);
   $('#cdBtn').classList.toggle('on', !!settings.countdown); $('#cdBtn').style.display = settings.autoShutter ? '' : 'none'; // 5.1：手動拍攝時隱藏，開關狀態不變
   $('#autoBtn').classList.toggle('on', settings.autoShutter);
+  $('#spreadBtn').classList.toggle('on', !!settings.spread); // 6.1.3
   $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
   $('#cropModeBtn').textContent = settings.cropLater ? '稍後裁切' : '立即裁切';
   $('#cropModeBtn').classList.toggle('later', !!settings.cropLater);
@@ -1983,6 +2348,14 @@ $('#cropModeBtn').onclick = () => {
   else liveTip('立即裁切', '每拍一張就進入裁切畫面<br>完成後自動回到拍攝'); // 5.3.1：不用再按確定
 };
 $('#liveClose').onclick = () => finishLive();
+// 6.1.3：拍攝中也能切換雙頁（作者：框選方式不一樣，拍到一半不用跳出去切）。立即生效：清掉目前的框、倒數、書溝；已拍的頁不變；主畫面、連拍的開關同步
+$('#spreadBtn').onclick = () => {
+  sfxPrime();
+  settings.spread = !settings.spread; saveSettings(); paintHomeModes();
+  cdStop(); resetLock(); live.gutter = null; live.best = null; live.sus = false; live.tChk = null; live.miss = 0;
+  updateLiveBtns();
+  liveTip(settings.spread ? '雙頁模式' : '單頁模式', settings.spread ? '框整本書（金色框），拍下後<br>自動拆成左右兩頁' : '已改回單頁模式（綠色框）');
+};
 $('#cdBtn').onclick = () => {
   sfxPrime();
   settings.countdown = !settings.countdown; saveSettings(); cdStop(); updateLiveBtns();
@@ -2110,6 +2483,18 @@ async function aiRunLater(ids) {
   try {
     for (let i = 0; i < ids.length; i++) {
       busy(`AI 框選中 ${i + 1} / ${ids.length}`);
+      if (Array.isArray(ids[i])) { // 6.1 雙頁拍的那張：兩頁一起用 AI 重拆（找不到書溝就保留原框）
+        const pp = await Promise.all(ids[i].map((id) => DB.get('pages', id)));
+        if (pp.some((p) => !p || isBroken(p))) continue;
+        try {
+          const sp = await spreadSplit(pp[0].original, true, true);
+          if (sp.ok) {
+            for (let j = 0; j < 2; j++) { const p = pp[j]; if (p.cropUser) continue; p.corners = sp.pages[j].corners; p.curve = sp.pages[j].curve; delete p.needCrop; await DB.put('pages', p); enqueue(p.id); }
+            done++;
+          }
+        } catch (e) { if (!firstErr) firstErr = e.message; }
+        continue;
+      }
       const p = await DB.get('pages', ids[i]); if (!p || isBroken(p)) continue;
       const r = await aiFixPage(p.id, p.original, p.corners, false);
       if (r && r.corners) { done++; if (r.teed) tdone++; }
@@ -2284,7 +2669,7 @@ function bandAtPct(band, p, fade) { band.style.display = 'block'; band.style.tra
 const capFx = { cur: null };
 // frame：拍下那一格；quad：0～1 四角（相對那一格）；stay：立即裁切（掃完停住、掃描光循環，release() 後 ready 才完成）
 // 回傳 { landed（飛進縮圖）, ready（立即裁切可以進框選了）, release(), stop() }
-function playCapFx(frame, quad, stay) {
+function playCapFx(frame, quad, stay, sp) {
   if (capFx.cur) capFx.cur.stop();
   const root = $('#capFx'), dim = root.querySelector('.cf-dim'), pw = root.querySelector('.cf-pw');
   const paper = root.querySelector('.cf-paper'), scan = root.querySelector('.cf-scan'), clip = root.querySelector('.cf-clip'), band = root.querySelector('.cf-band');
@@ -2319,6 +2704,7 @@ function playCapFx(frame, quad, stay) {
   };
   function stop() {
     cancelAnimationFrame(raf); clearTimeout(raf); root.classList.remove('on'); band.style.display = 'none'; band.classList.remove('wait');
+    if (sp && sp.cards) { fxCardsDone(sp.cards); sp.cards = null; } pw.style.opacity = 1; // 6.1.1
     paper.width = paper.height = scan.width = scan.height = 1; // 3.1.1：釋放大張畫布（iPhone 圖層記憶體吃緊時相機畫面會被畫小）
     if (capFx.cur === h) capFx.cur = null;
     if (!landedDone) { landedDone = true; resolveLand(); }
@@ -2348,6 +2734,14 @@ function playCapFx(frame, quad, stay) {
       if (!dinged) { dinged = true; band.classList.remove('wait'); sfxPlay('ding'); }
       if (stay) { band.style.display = 'none'; resolveReady(); return; } // 停在攤平的畫面，等進框選畫面後再 stop()
       band.style.display = 'none';
+      if (sp) { // 6.1.1 雙頁：拆成左右兩張、錯開疊在一起（左頁在前），一起飛進縮圖（作者：讓使用者知道兩頁都進去了）
+        if (!sp.cards) sp.cards = fxCards(pw, rx, ry, rw, rh, quad, sp.g);
+        const tb = $('#liveThumb').getBoundingClientRect(), u = clamp01((t - T.s1) / (T.y1 - T.s1 + 0.25));
+        fxCardsAt(sp.cards, tb, u);
+        dim.style.opacity = 0.82 * (1 - easeIn3(clamp01((u - 0.4) / 0.6)));
+        if (u >= 1) { fxCardsDone(sp.cards); stop(); return; }
+        raf = requestAnimationFrame(frameFn); return;
+      }
       const f = easeIn3(clamp01((t - T.s1) / (T.y1 - T.s1)));
       const tb = $('#liveThumb').getBoundingClientRect(), sc = 1 + (tb.width / rw - 1) * f;
       pw.style.transformOrigin = `${rx}px ${ry}px`;
@@ -2361,6 +2755,37 @@ function playCapFx(frame, quad, stay) {
   raf = requestAnimationFrame(frameFn);
   return h;
 }
+/* 6.1.1 雙頁的拍攝動畫：攤平的整本照書溝切成左右兩張（各一份畫面副本，用 clip 只露出自己那半），
+   前 4 成時間右頁滑到左頁右下方疊好，後 6 成兩張一起縮小飛進縮圖（左頁在前，作者決定） */
+function fxCards(pw, rx, ry, rw, rh, quad, g) {
+  let t = 0.5;
+  if (g) { const d = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]); t = Math.max(0.3, Math.min(0.7, d(quad[0], g[0]) / (d(quad[0], quad[1]) || 1))); }
+  const gx = rx + rw * t, rects = [{ x: rx, y: ry, w: gx - rx, h: rh }, { x: gx, y: ry, w: rx + rw - gx, h: rh }];
+  const cards = rects.map((r, i) => {
+    const el = pw.cloneNode(true), src = pw.querySelectorAll('canvas'), dst = el.querySelectorAll('canvas');
+    dst.forEach((c, j) => { c.width = src[j].width; c.height = src[j].height; c.getContext('2d').drawImage(src[j], 0, 0); });
+    const wrap = document.createElement('div');
+    Object.assign(wrap.style, { position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: i === 0 ? 3 : 2, clipPath: `inset(${r.y}px ${innerWidth - r.x - r.w}px ${innerHeight - r.y - r.h}px ${r.x}px)`, transformOrigin: `${r.x}px ${r.y}px`, filter: 'drop-shadow(0 4px 10px rgba(0,0,0,.35))' });
+    wrap.appendChild(el); pw.parentNode.appendChild(wrap);
+    return { wrap, r };
+  });
+  pw.style.opacity = 0;
+  return cards;
+}
+function fxCardsAt(cards, tb, u) {
+  const k1 = easeIO(clamp01(u / 0.4)), k2 = easeIn3(clamp01((u - 0.4) / 0.6));
+  const L = cards[0].r;
+  cards.forEach(({ wrap, r }, i) => {
+    // 疊好的位置：右頁在左頁右下方（錯開左頁寬的 12%、高的 6%）
+    const sx = i ? L.x + L.w * 0.12 : r.x, sy = i ? L.y + L.h * 0.06 : r.y;
+    const s1 = i ? (L.h / r.h) : 1; // 右頁縮成跟左頁一樣高
+    const x1 = r.x + (sx - r.x) * k1, y1 = r.y + (sy - r.y) * k1, sc1 = 1 + (s1 - 1) * k1;
+    const st = tb.height / (L.h * 1.06), tx = tb.left + (i ? L.w * 0.12 * st : 0), ty = tb.top + (i ? L.h * 0.06 * st : 0);
+    const x = x1 + (tx - x1) * k2, y = y1 + (ty - y1) * k2, sc = sc1 + ((i ? st * s1 : st) - sc1) * k2;
+    wrap.style.transform = `translate(${x - r.x}px,${y - r.y}px) scale(${sc})`;
+  });
+}
+function fxCardsDone(cards) { cards.forEach(({ wrap }) => { wrap.querySelectorAll('canvas').forEach((c) => { c.width = c.height = 0; }); wrap.remove(); }); }
 // 縮圖跳一下
 function bumpThumb() { const tb = $('#liveThumb'); tb.classList.remove('bump'); void tb.offsetWidth; tb.classList.add('bump'); }
 
@@ -2376,6 +2801,8 @@ function capResLayout(ar) {
    拿掉「繼續編輯」「確定」；有動畫：掃描光刷完停 0.4 秒，飛進左下角縮圖；沒開動畫：成品出現停 1 秒直接收掉；點一下立刻回到拍攝 */
 const CAPRES_HOLD = 400, CAPRES_HOLD_STILL = 1000;
 function showCapResult(pageId) {
+  const ids = Array.isArray(pageId) ? pageId : [pageId]; // 6.1 雙頁：左頁 → 翻書翻到右頁
+  pageId = ids[0]; capRes.left = null;
   const el = $('#capRes'), pw = el.querySelector('.cr-pw'), base = el.querySelector('.cr-base'), outC = el.querySelector('.cr-out');
   const clip = el.querySelector('.cr-clip'), band = el.querySelector('.cr-band'), spin = el.querySelector('.cr-spin');
   const anim = animOn();
@@ -2405,24 +2832,143 @@ function showCapResult(pageId) {
       const r = await job(f1, p.mode, pageAdjOf(p));
       if (done) return;
       drawTo(outC, r); spin.classList.remove('on');
-      if (!anim) { clip.style.clipPath = 'none'; band.style.display = 'none'; autoOk(CAPRES_HOLD_STILL); return; }
+      if (!anim) { clip.style.clipPath = 'none'; band.style.display = 'none'; if (ids[1]) { await new Promise((r) => setTimeout(r, 600)); if (done) return; await capResNext(ids[1], () => done); if (done) return; } autoOk(CAPRES_HOLD_STILL); return; }
       // 4.0：已掃過的部分淡入成品，剩下的跟著掃描光刷出來
       clip.style.clipPath = `inset(0 0 ${(1 - sw.p) * 100}% 0)`; clip.style.opacity = 0; clip.style.transition = 'opacity .2s';
       requestAnimationFrame(() => { clip.style.opacity = 1; });
       await sw.done();
       if (done) return;
       band.style.display = 'none'; clip.style.clipPath = 'none'; clip.style.transition = '';
+      if (ids[1]) { await capResNext(ids[1], () => done); if (done) return; }
       autoOk(CAPRES_HOLD);
     } catch (e) { console.warn('capRes', e); if (sw) sw.stop(); spin.classList.remove('on'); clip.style.clipPath = 'none'; clip.style.opacity = ''; band.style.display = 'none'; autoOk(CAPRES_HOLD_STILL); }
   })();
   return result;
 }
+// 6.1：成品畫面的第二頁（雙頁的右頁）：先處理好，再把左頁翻過去露出右頁
+async function capResNext(pid, isDone) {
+  const el = $('#capRes'), pw = el.querySelector('.cr-pw'), base = el.querySelector('.cr-base'), outC = el.querySelector('.cr-out');
+  const p = await DB.get('pages', pid); if (!p || isDone()) return;
+  const { img, url } = await loadImg(p.original);
+  const rg = pageRegion(p.corners, p.curve), f1 = regionFrame(img, rg, 2000); URL.revokeObjectURL(url);
+  const r = await wcall('process', { buffer: f1.data.buffer, width: f1.width, height: f1.height, corners: rg.corners, curve: rg.curve, upscale: 'off', rotation: p.rotation || 0, mode: p.mode, params: pageAdjOf(p) }, [f1.data.buffer]);
+  if (isDone()) return;
+  const snap = snapCanvases(pw, [base, outC]); // 左頁的樣子
+  capRes.left = { canvas: copyCanvas(snap.canvas), ar: snap.rect.width / snap.rect.height }; // 6.1.1：收回縮圖時兩頁疊著一起飛
+  drawTo(base, r); drawTo(outC, r); capResLayout(r.width / r.height);
+  await bookFlip(el.querySelector('.cr-stage'), snap, 1);
+}
+/* ---------- 6.1 翻書動畫（作者選乙；試看頁四種裡的「翻書」） ----------
+   把目前的頁拍成快照蓋在上面，沿書背翻過去（往下一頁：繞左邊往左翻；往上一頁：繞右邊往右翻），下面已經換成新的頁。
+   只動 transform，手機的顯示晶片處理，不耗效能；拍攝動畫關閉或系統「減少動態效果」時不翻 */
+const flipOn = () => animOn() && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+function snapCanvases(el, list) {
+  const r = el.getBoundingClientRect(), dpr = Math.min(2, window.devicePixelRatio || 1);
+  const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(r.width * dpr)); c.height = Math.max(1, Math.round(r.height * dpr));
+  const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+  for (const s of list) { try { if (s && (s.width > 1 || s.naturalWidth)) x.drawImage(s, 0, 0, c.width, c.height); } catch (_) {} }
+  return { canvas: c, rect: r };
+}
+// 6.1.1：翻頁的紙（作者：iPhone 17 上太快、幾乎看不到）——0.7 秒慢起慢停；翻過一半後顯示紙的背面，整段都看得到。
+// flipSheet 可以跟著手指（set(進度 0～1)），放開時 finish(翻完／彈回)
+function flipSheet(host, snap, dir, backImg) {
+  const hr = host.getBoundingClientRect(), r = snap.rect;
+  const wrap = document.createElement('div');
+  Object.assign(wrap.style, { position: 'absolute', left: r.left - hr.left + 'px', top: r.top - hr.top + 'px', width: r.width + 'px', height: r.height + 'px', zIndex: 20, pointerEvents: 'none', perspective: Math.max(1400, r.width * 3.2) + 'px' });
+  const pg = document.createElement('div');
+  Object.assign(pg.style, { position: 'absolute', inset: 0, transformOrigin: dir > 0 ? '0% 50%' : '100% 50%', transformStyle: 'preserve-3d', webkitTransformStyle: 'preserve-3d' });
+  const face = (back) => { const f = document.createElement('div'); Object.assign(f.style, { position: 'absolute', inset: 0, backfaceVisibility: 'hidden', webkitBackfaceVisibility: 'hidden', boxShadow: '0 6px 20px rgba(0,0,0,.3)', overflow: 'hidden' }); if (back) { f.style.transform = 'rotateY(180deg)'; f.style.background = `linear-gradient(to ${dir > 0 ? 'right' : 'left'}, #E9E1D4, #F7F2EA 40%, #FBF8F3)`; } return f; };
+  const front = face(false), back = face(true);
+  snap.canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%';
+  const sh = document.createElement('div');
+  Object.assign(sh.style, { position: 'absolute', inset: 0, opacity: 0, background: `linear-gradient(to ${dir > 0 ? 'left' : 'right'}, rgba(0,0,0,.45), rgba(0,0,0,0) 70%)` });
+  const shB = document.createElement('div');
+  Object.assign(shB.style, { position: 'absolute', inset: 0, opacity: 0, background: `linear-gradient(to ${dir > 0 ? 'right' : 'left'}, rgba(0,0,0,.3), rgba(0,0,0,0) 60%)` });
+  if (backImg) { back.style.background = '#fff'; const bi = new Image(); bi.src = backImg.src; bi.style.cssText = 'position:absolute;inset:0;width:100%;height:100%'; back.appendChild(bi); } // 6.1.2 兩頁並排：背面是下一組的左頁（或上一組的右頁）
+  front.append(snap.canvas, sh); back.appendChild(shB); pg.append(front, back); wrap.appendChild(pg);
+  if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+  host.appendChild(wrap);
+  let cur = 0;
+  const apply = (p) => {
+    cur = Math.max(0, Math.min(1, p));
+    pg.style.transform = `rotateY(${(dir > 0 ? -180 : 180) * cur}deg)`;
+    sh.style.opacity = Math.min(1, cur * 2); shB.style.opacity = Math.max(0, 1 - (cur - 0.5) * 2);
+  };
+  apply(0);
+  const done = () => { wrap.remove(); snap.canvas.width = snap.canvas.height = 0; };
+  return {
+    set(p) { pg.style.transition = sh.style.transition = shB.style.transition = 'none'; apply(p); },
+    finish(complete, dur) {
+      const to = complete ? 1 : 0, ms = dur || Math.max(180, 700 * Math.abs(to - cur));
+      const tr = `${ms}ms cubic-bezier(.45,.05,.35,1)`;
+      pg.style.transition = `transform ${tr}`; sh.style.transition = shB.style.transition = `opacity ${tr}`;
+      return new Promise((res) => { requestAnimationFrame(() => requestAnimationFrame(() => apply(to))); setTimeout(() => { done(); res(); }, ms + 40); });
+    },
+  };
+}
+function bookFlip(host, snap, dir) {
+  if (!flipOn() || !snap || !host) return Promise.resolve();
+  return flipSheet(host, snap, dir).finish(true, 700);
+}
+/* 6.1.1：跟著手指翻頁（作者要求）。水平拖動 > 12 px 開始：目前的頁拍成快照跟著手指翻，下面先放「要翻到的那頁」（under）；
+   放開時拖超過 3 成或快速甩一下就翻完，否則彈回。opts：canFlip(dir) 那個方向有沒有頁、under(dir) 回傳要墊在下面的元素（沒準備好回傳 null＝不跟手指，放開照原本的方式翻）、
+   snap() 目前的頁、commit(dir) 真的換頁、cleanup() 收掉墊底 */
+function flipDrag(host, o) {
+  let st = null, drag = null, n = 0;
+  const reset = () => { st = null; };
+  host.addEventListener('pointerdown', (e) => { n++; st = n === 1 && flipOn() && o.ready() ? { x: e.clientX, y: e.clientY, t: performance.now() } : null; if (n > 1 && drag) { const d = drag; drag = null; d.ctl.finish(d.rev).then(() => o.cleanup()); } });
+  host.addEventListener('pointermove', (e) => {
+    if (!st) return;
+    const dx = e.clientX - st.x, dy = e.clientY - st.y;
+    if (!drag) {
+      if (Math.abs(dx) < 12 || Math.abs(dx) < Math.abs(dy) * 1.5) { if (Math.abs(dy) > 16) st = null; return; }
+      const dir = dx < 0 ? 1 : -1;
+      if (!o.canFlip(dir)) { st = null; return; }
+      const parts = o.parts ? o.parts(dir) : null; if (o.parts && !parts) { st = null; return; }
+      const under = o.under(dir, parts); if (!under) { st = null; return; }
+      const snap = o.snap(dir, parts); if (!snap) { o.cleanup(); st = null; return; }
+      const rev = !!(parts && parts.rev); // 6.1.2：上一頁從左邊翻回來蓋上（轉軸在左、進度倒過來）
+      drag = { dir, rev, ctl: flipSheet(host, snap, rev ? -dir : dir, parts && parts.back), w: snap.rect.width || host.clientWidth };
+      flipDrag.active = true;
+    }
+    const p = (drag.dir > 0 ? -dx : dx) / (drag.w * 0.9);
+    drag.ctl.set(drag.rev ? 1 - p : p); drag.p = p; drag.lastX = e.clientX; drag.lastT = performance.now();
+  });
+  const end = (e) => {
+    n = Math.max(0, n - 1);
+    if (!drag) { reset(); return; }
+    const d = drag; drag = null;
+    const dt = Math.max(1, performance.now() - st.t), v = Math.abs((e.clientX - st.x) / dt); reset();
+    const complete = (d.p || 0) > 0.3 || (v > 0.6 && (d.p || 0) > 0.05);
+    const pr = complete ? o.commit(d.dir) : null; // 換頁跟翻頁同時進行；墊底等翻完、新頁也好了才拿掉
+    d.ctl.finish(d.rev ? !complete : complete).then(async () => { if (pr) { try { await pr; } catch (_) {} } o.cleanup(); });
+    setTimeout(() => { flipDrag.active = false; }, 0);
+  };
+  host.addEventListener('pointerup', end);
+  host.addEventListener('pointercancel', (e) => { n = Math.max(0, n - 1); if (drag) { const d = drag; drag = null; d.ctl.finish(d.rev).then(() => o.cleanup()); flipDrag.active = false; } reset(); });
+}
+flipDrag.active = false;
 // 「確定」：回到拍攝畫面（底色變透明），成品縮小飛進縮圖
 async function capResFly() {
   const el = $('#capRes'), pw = el.querySelector('.cr-pw');
   el.style.background = 'transparent'; el.querySelector('.cr-top').style.visibility = 'hidden'; el.querySelector('.cr-bar').style.visibility = 'hidden';
   el.querySelector('.cr-band').style.display = 'none'; el.querySelector('.cr-clip').style.clipPath = 'none';
-  if (animOn()) {
+  if (animOn() && capRes.left) { // 6.1.1 雙頁：左頁（前）＋右頁（右下）錯開疊好，一起飛進縮圖
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const a = pw.getBoundingClientRect(), tb = $('#liveThumb').getBoundingClientRect();
+    const lw = a.height * capRes.left.ar, lc = capRes.left.canvas;
+    Object.assign(lc.style, { position: 'fixed', left: a.left + 'px', top: a.top + 'px', width: lw + 'px', height: a.height + 'px', zIndex: 60, transformOrigin: '0 0', boxShadow: '0 4px 14px rgba(0,0,0,.4)', transition: 'transform .22s ease' });
+    document.body.appendChild(lc);
+    pw.style.transformOrigin = '0 0'; pw.style.transition = 'transform .22s ease';
+    pw.style.transform = `translate(${lw * 0.12}px,${a.height * 0.06}px)`;
+    await new Promise((r) => setTimeout(r, 240));
+    const st = tb.height / (a.height * 1.06), ease = 'transform .3s cubic-bezier(.5,0,.9,.6)';
+    lc.style.transition = pw.style.transition = ease;
+    lc.style.transform = `translate(${tb.left - a.left}px,${tb.top - a.top}px) scale(${st})`;
+    pw.style.transform = `translate(${tb.left - a.left + lw * 0.12 * st}px,${tb.top - a.top + a.height * 0.06 * st}px) scale(${st})`;
+    await new Promise((r) => setTimeout(r, 320));
+    lc.remove(); lc.width = lc.height = 0; capRes.left = null;
+  } else if (animOn()) {
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))); // 等拍攝畫面排好版，縮圖位置才對
     const a = pw.getBoundingClientRect(), tb = $('#liveThumb').getBoundingClientRect();
     pw.style.transformOrigin = '0 0'; pw.style.transition = 'transform .3s cubic-bezier(.5,0,.9,.6)';
@@ -2554,6 +3100,7 @@ function cropUrls(c) { if (c.url) URL.revokeObjectURL(c.url); if (c.viewUrl) URL
 function cropFree(c) { cropUrls(c); if (c.loupeSrc) c.loupeSrc.width = c.loupeSrc.height = 0; }
 async function openCrop(opts) {
   if (cropCtx) cropFree(cropCtx);
+  if (opts.spread) { const p0 = opts.spread.pages[opts.spread.start || 0]; opts = Object.assign({}, opts, { corners: p0.corners, curve: p0.curve }); } // 6.0.2 雙頁
   const { img, url } = await loadImg(opts.blob);
   const rot = ((opts.rotation || 0) % 360 + 360) % 360;
   const curve0 = opts.curve ? normCurve(opts.corners, opts.curve) : null;
@@ -2567,10 +3114,25 @@ async function openCrop(opts) {
   const nat = rot === 90 || rot === 270 ? [img.naturalHeight, img.naturalWidth] : [img.naturalWidth, img.naturalHeight];
   cropCtx = Object.assign({}, opts, { url, rot, nat, loupeSrc: rotCanvas(lc, rot), corners: v.corners, curve: v.curve, curveMode: false, o0: opts.corners.map((p) => p.slice()), ocv0: JSON.stringify(curve0 && !curveIsStraight(opts.corners, curve0) ? curve0 : null), drag: null, pipKey: 'crop:' + Date.now() });
   const c = cropCtx;
+  if (opts.spread) { // 6.0.2：兩頁都換成畫面座標（跟著轉向），各自記住打開時的範圍（判斷有沒有改過）
+    const S = opts.spread;
+    c.spread = {
+      active: S.start || 0, seen: S.seen ? S.seen.slice() : [false, false],
+      pages: S.pages.map((p) => {
+        const k = p.curve ? normCurve(p.corners, p.curve) : null, v = rotQuad(p.corners, k, rot);
+        return { corners: v.corners, curve: v.curve, o0: p.corners.map((x) => x.slice()), ocv0: JSON.stringify(k && !curveIsStraight(p.corners, k) ? k : null) };
+      }),
+    };
+    c.spread.seen[c.spread.active] = true;
+  }
   pipInit(c);
   await setCropView(c);
   if (cropCtx !== c) return;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
+  $('#cropTitle').textContent = opts.title || '調整掃描範圍'; // 6.0：雙頁依序裁左頁、右頁
+  $('#cropOk').textContent = opts.okText || '確定';
+  $('#cropStep').style.display = opts.spread ? '' : 'none';
+  if (c.spread) cropSpreadUi();
   $('#cropCancel').textContent = opts.liveCrop ? '稍後裁切' : '取消';
   updateCurveBtn();
   if (opts.replace) { history.replaceState({ s: 'crop', doc: state.docId, i: state.pageIndex }, ''); show('crop'); } else go('crop'); // 3.1 成品畫面按「繼續編輯」：不多疊一層返回紀錄
@@ -2583,6 +3145,7 @@ $('#cropRot').onclick = async () => {
   try {
     const v = rotQuad(c.corners, c.curve, 90);
     c.rot = (c.rot + 90) % 360; c.corners = v.corners; c.curve = v.curve;
+    if (c.spread) { const o = c.spread.pages[1 - c.spread.active], w2 = rotQuad(o.corners, o.curve, 90); o.corners = w2.corners; o.curve = w2.curve; } // 6.0.2：兩頁一起轉
     c.loupeSrc = rotCanvas(c.loupeSrc, 90); c.nat = [c.nat[1], c.nat[0]];
     c.pipKey = 'crop:' + Date.now(); pipInit(c);
     await setCropView(c);
@@ -2694,6 +3257,18 @@ function drawCrop() {
   html += `<rect x="0" y="0" width="${w}" height="${h}" fill="rgba(28,19,14,.55)" mask="url(#m)"/>`;
   html += `<polygon points="${poly}" fill="none" stroke="#F2C48D" stroke-width="2.5" stroke-linejoin="round"/>`;
   $('#cropSvg').innerHTML = html;
+  // 6.0.1 雙頁：另一頁的範圍（原始照片座標，跟著目前的轉向）畫虛線框並標示，只是提示、不能拖
+  const sp = cropCtx.spread;
+  if (sp) {
+    const O = sp.pages[1 - sp.active].corners.map((p) => [p[0] * w, p[1] * h]);
+    sp.label = `點這裡編輯${sp.active ? '左' : '右'}頁`;
+    const ox = O.reduce((a, p) => a + p[0], 0) / 4, oy = O.reduce((a, p) => a + p[1], 0) / 4;
+    const tw = sp.label.length * 15 + 24;
+    html = `<polygon points="${O.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')}" fill="rgba(28,19,14,.25)" stroke="rgba(255,255,255,.55)" stroke-width="1.5" stroke-dasharray="6 5" stroke-linejoin="round"/>`
+      + `<rect x="${ox - tw / 2}" y="${oy - 17}" width="${tw}" height="34" rx="17" fill="rgba(28,19,14,.72)"/>`
+      + `<text x="${ox}" y="${oy + 5.5}" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">${sp.label}</text>`;
+    $('#cropSvg').insertAdjacentHTML('beforeend', html);
+  }
   // 控制點另外畫在最上層（1.12）：預覽小視窗蓋到時也看得到、拖得到
   html = '';
   if (cropCtx.curveMode && curve) {
@@ -2944,7 +3519,27 @@ function drawCrop() {
     Object.assign(L.style, { display: 'block', left: left + 'px', top: top + 'px', right: '' });
   }
 })();
-window.addEventListener('resize', () => { if (current === 'crop') layoutCrop(); if (current === 'burst') burstLayout(); if (current === 'page') { if (adj.open) { fitAdj(); scheduleRegion(); } else fitView(); } });
+const relayout = () => {
+  if (current === 'crop') layoutCrop(); if (current === 'burst') burstLayout();
+  if (current === 'page') {
+    if (adj.open) { fitAdj(); scheduleRegion(); return; }
+    const r = $('#viewStage').getBoundingClientRect(); if (!(r.width > r.height * 1.25)) duo.solo = false; // 轉回直向：取消「只看一頁」
+    if (duoWanted() !== duo.on) renderPage(); else if (duo.on) duoLayout(); else fitView(); // 6.1.2：轉向時切換兩頁／一頁
+  }
+};
+window.addEventListener('resize', relayout);
+/* 6.0.3：iPhone 轉向時 resize 常比畫面真正轉好還早，拿到的還是舊的高度（作者：橫著編輯，照片下半部被工具列切掉）。
+   改成直接看裁切區、單頁、連拍畫面的實際大小，變了就重新排版；轉向後再補排一次 */
+if (window.ResizeObserver) {
+  const seen = new Map();
+  const ro = new ResizeObserver((es) => {
+    let ch = false;
+    for (const e of es) { const r = e.contentRect, k = Math.round(r.width) + 'x' + Math.round(r.height); if (seen.get(e.target) !== k) { seen.set(e.target, k); ch = true; } }
+    if (ch) requestAnimationFrame(relayout);
+  });
+  ['#cropStage', '#viewStage', '#burstStage'].forEach((q) => ro.observe($(q)));
+}
+window.addEventListener('orientationchange', () => { setTimeout(relayout, 350); setTimeout(relayout, 800); });
 $('#cropFull').onclick = () => {
   cropCtx.corners = FULL.map((p) => p.slice());
   cropCtx.curve = cropCtx.curveMode ? straightCurve(cropCtx.corners) : null;
@@ -2952,6 +3547,7 @@ $('#cropFull').onclick = () => {
 };
 $('#cropAuto').onclick = async () => {
   const c = cropCtx; if (!c) return;
+  if (c.spread) { await cropSpreadRedo(c, false); return; } // 6.0.2 雙頁：重新找整本書
   busy('偵測中…');
   try {
     const r = await detectOn($('#cropImg'));
@@ -2981,6 +3577,7 @@ $('#cropCurve').onclick = async () => {
 };
 $('#cropOk').onclick = async () => {
   const c = cropCtx; if (!c) return;
+  if (c.spread) { await cropSpreadOk(c); return; } // 6.0.2
   const q = c.corners;
   const area = Math.abs([0, 1, 2, 3].reduce((a, i) => { const j = (i + 1) % 4; return a + q[i][0] * q[j][1] - q[j][0] * q[i][1]; }, 0)) / 2;
   if (area < 0.01) { toast('範圍太小了'); return; }
@@ -2995,6 +3592,81 @@ $('#cropOk').onclick = async () => {
   const edited = !nearSame(o.corners, c.o0) || JSON.stringify(cv) !== c.ocv0;
   await c.onConfirm(o.corners, cv, edited, c.rot);
 };
+/* ---------- 6.0.2 雙頁裁切：同一個畫面調兩頁 ----------
+   作者：點另一頁的框就換頁比較直覺，兩頁像是整合在一起。一次編輯一頁（有控制點），另一頁是虛線框＋「點這裡編輯…」，
+   點虛線框裡（輕點、沒有移動；跟目前這頁重疊的地方算目前這頁）或上方「左頁｜右頁」換頁，調整都保留。
+   右上角：另一頁還沒看過時是「下一頁」（換過去），兩頁都看過是「確定」（兩頁一起存）。向右轉兩頁一起轉；
+   AI 框選／自動偵測＝重新找整本書，兩頁一起更新（找不到書溝保留原框）；全頁、直線／曲線、成品只作用在目前這頁 */
+const polyHas = (P, x, y) => { let inside = false; for (let i = 0, j = P.length - 1; i < P.length; j = i++) { const [xi, yi] = P[i], [xj, yj] = P[j]; if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside; } return inside; };
+function cropSpreadUi() {
+  const c = cropCtx, sp = c && c.spread; if (!sp) return;
+  $('#cropTitle').textContent = sp.active ? '調整右頁範圍' : '調整左頁範圍';
+  $('#cropStep').querySelectorAll('button').forEach((b, i) => b.classList.toggle('on', i === sp.active));
+  $('#cropOk').textContent = sp.seen[0] && sp.seen[1] ? '確定' : '下一頁';
+}
+function cropSwitch(i) {
+  const c = cropCtx, sp = c && c.spread;
+  if (!sp || i === sp.active || c.drag || c.rotating) return;
+  sp.pages[sp.active] = { corners: c.corners, curve: c.curve, o0: c.o0, ocv0: c.ocv0 };
+  const q = sp.pages[i]; sp.active = i; sp.seen[i] = true;
+  c.corners = q.corners.map((p) => p.slice()); c.curve = q.curve ? q.curve.map((e) => e.map((p) => p.slice())) : null; c.o0 = q.o0; c.ocv0 = q.ocv0;
+  if (c.curveMode && !c.curve) c.curve = straightCurve(c.corners);
+  cropSpreadUi(); drawCrop();
+}
+async function cropSpreadOk(c) {
+  const sp = c.spread;
+  if (!sp.seen[1 - sp.active]) { cropSwitch(1 - sp.active); return; }
+  if (c.rotating) return;
+  sp.pages[sp.active] = { corners: c.corners, curve: c.curve, o0: c.o0, ocv0: c.ocv0 };
+  const area = (q) => Math.abs([0, 1, 2, 3].reduce((a, i) => { const j = (i + 1) % 4; return a + q[i][0] * q[j][1] - q[j][0] * q[i][1]; }, 0)) / 2;
+  const bad = sp.pages.findIndex((pg) => area(pg.corners) < 0.01);
+  if (bad >= 0) { cropSwitch(bad); toast('範圍太小了'); return; }
+  cropCtx = null; cropFree(c); pipClose();
+  const list = sp.pages.map((pg) => {
+    const o = rotQuad(pg.corners, pg.curve, 360 - c.rot);
+    const cv = o.curve && !curveIsStraight(o.corners, o.curve) ? o.curve : null;
+    return { c: o.corners, cv, edited: !nearSame(o.corners, pg.o0) || JSON.stringify(cv) !== pg.ocv0 };
+  });
+  await c.onSpread(list, c.rot);
+}
+async function cropSpreadRedo(c, useAI) {
+  busy(useAI ? 'AI 框選中…' : '偵測中…');
+  try {
+    const useTeed = useAI || (await aiCached());
+    const r = await spreadSplit(c.blob, useAI, useTeed);
+    if (useTeed) aiReleaseSoon();
+    if (cropCtx !== c) return;
+    if (!r.ok) { toast('找不到書溝，保留原框'); return; }
+    const sp = c.spread;
+    r.pages.forEach((p, i) => {
+      const v = rotQuad(p.corners, p.curve, c.rot);
+      if (i === sp.active) { c.corners = v.corners; c.curve = v.curve || (c.curveMode ? straightCurve(v.corners) : null); }
+      else { sp.pages[i].corners = v.corners; sp.pages[i].curve = v.curve; }
+    });
+    drawCrop();
+    toast(useAI ? '已用 AI 重新框選左右兩頁' : '已重新偵測左右兩頁');
+  } catch (e) { console.warn(e); toast('框選失敗：' + e.message); }
+  finally { unbusy(); }
+}
+$('#cropStep').querySelectorAll('button').forEach((b, i) => b.onclick = () => cropSwitch(i));
+{ // 輕點另一頁的框＝換頁（拖控制點、雙指縮放、平移都不算）
+  const st = $('#cropStage'); let tap = null, n = 0;
+  st.addEventListener('pointerdown', (e) => {
+    n++;
+    const c = cropCtx;
+    tap = n === 1 && c && c.spread && !c.drag && !e.target.closest('#pip, #pipFull, #cropStep') ? { x: e.clientX, y: e.clientY, t: Date.now() } : null;
+  });
+  st.addEventListener('pointermove', (e) => { if (tap && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) > 8) tap = null; });
+  st.addEventListener('pointerup', (e) => {
+    n = Math.max(0, n - 1);
+    const t = tap, c = cropCtx; tap = null;
+    if (!t || !c || !c.spread || c.drag || Date.now() - t.t > 500) return;
+    const b = st.getBoundingClientRect(), r = c.rect, u = (e.clientX - b.left - r.x) / r.w, v = (e.clientY - b.top - r.y) / r.h;
+    const sp = c.spread;
+    if (polyHas(sp.pages[1 - sp.active].corners, u, v) && !polyHas(cropOutline(c.corners, c.curve), u, v)) cropSwitch(1 - sp.active);
+  });
+  st.addEventListener('pointercancel', () => { n = Math.max(0, n - 1); tap = null; });
+}
 $('#cropCancel').onclick = () => history.back();
 $('#cropRetake').onclick = () => { const c = cropCtx; cropCtx = null; if (c) cropFree(c); pipClose(); if (c && c.onRetake) c.onRetake(); history.back(); };
 $('#cropPrev').onclick = () => ($('#pipFull').classList.contains('show') ? pipFullClose() : pipFullOpen()); // 3.1：再按一次回到框選
@@ -3144,6 +3816,7 @@ function updateDocSelUI(total) {
   document.querySelectorAll('#pageGrid .pg:not(.add)').forEach((el) => el.classList.toggle('sel', docSel.ids.has(el.dataset.id)));
 }
 async function renderDoc() {
+  viewPreDrop(); // 6.1.1：單頁畫面預先讀的前後頁放掉
   dropViewUrls(''); // 5.2：回到文件畫面，單頁檢視的大圖網址放掉
   const { doc, pages } = await getDocPages(state.docId);
   if (!doc) return;
@@ -3299,17 +3972,19 @@ function renameDoc() {
     i.focus(); // 在點擊的同一個動作裡聚焦，iPhone 才會跳出鍵盤
   });
 }
-$('#docMore').onclick = () => openSheet(`<h3>文件</h3>
+$('#docMore').onclick = async () => { const dd = await DB.get('docs', state.docId); const fr = dd && dd.spreadFirst === 'R'; openSheet(`<h3>文件</h3>
   <button class="srow" data-a="rename">${ICON.edit}<span>重新命名</span></button>
+  <button class="srow" data-a="side">${ICON.book}<span>橫放兩頁：第一頁在${fr ? '右' : '左'}<span class="sub">點一下改成第一頁在${fr ? '左' : '右'}</span></span></button>
   <button class="srow danger" data-a="del">${ICON.trash}<span>刪除整份文件</span></button>`, (s) => {
   s.querySelector('[data-a=rename]').onclick = () => { closeSheet(); renameDoc(); };
+  s.querySelector('[data-a=side]').onclick = () => { closeSheet(); setSpreadFirst(fr ? 'L' : 'R'); }; // 6.1.2
   s.querySelector('[data-a=del]').onclick = async () => {
     closeSheet();
     if (!(await askSheet('確定要刪除這份文件與所有頁面？', '', '刪除', '取消', true))) return;
     await deleteDocs([state.docId]);
     history.back();
   };
-});
+}); };
 $('#docMode').onclick = () => openSheet(`<h3>統一調整</h3><div class="note" style="margin:4px 4px 10px">選一個模式套用到全部頁面，接著可以調整這份文件統一的數值</div>${MODES.map((m) => `<button class="srow" data-m="${m.id}"><span>${m.name}<span class="sub">${modeDesc(m.id)}</span></span></button>`).join('')}`, (s) => {
   s.querySelectorAll('.srow').forEach((b) => b.onclick = async () => {
     closeSheet();
@@ -3350,14 +4025,18 @@ async function renderPage(keepZoom) {
   const p = await DB.get('pages', ids[state.pageIndex]);
   if (!p) { history.back(); return; }
   const pages = ids;
-  viewPage = p;
+  viewPage = p; viewIds = ids;
+  { const d = await DB.get('docs', state.docId); duo.first = (d && d.spreadFirst) || 'L'; } // 6.1.2
+  setTimeout(() => { if (current === 'page') viewPreload().catch(() => {}); }, 300); // 6.1.1
   $('#pageTitle').textContent = `第 ${state.pageIndex + 1} / ${pages.length} 頁`;
   $('#prevBtn').style.visibility = state.pageIndex > 0 ? 'visible' : 'hidden';
   $('#nextBtn').style.visibility = state.pageIndex < pages.length - 1 ? 'visible' : 'hidden';
   const img = $('#viewImg');
   const src = p.processed || p.original;
   const url = blobUrl('v:' + p.id, src, verOf(p, 'processed'));
-  if (img.getAttribute('src') !== url) {
+  duoShow(duoWanted()); // 6.1.2：橫放兩頁並排
+  if (duo.on) await duoRender(ids, p);
+  else if (img.getAttribute('src') !== url) {
     img.onload = () => {
       const nat = img.naturalWidth + 'x' + img.naturalHeight, ar = img.naturalWidth / img.naturalHeight;
       // 4.1.2：比例幾乎一樣（精修開關前後只差一兩個像素）就保留放大的位置，方便比較
@@ -3408,7 +4087,32 @@ function applyZoom(gesturing) {
   const pts = new Map();
   let g = null, lastTap = 0, swipeStart = null, holdT = null, holdStart = null;
   const pos = (e) => { const r = stage.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  // 6.1.2 兩頁並排：點一頁＝選它；雙擊或雙指＝只看那一頁；快速滑動＝翻頁（跟著手指翻的由 flipDrag 處理）
+  let dT = null, dLast = { t: 0, i: -1 }, dN = 0;
+  const duoHit = (e) => { for (const el of [$('#duoL'), $('#duoR')]) { if (el.style.display === 'none') continue; const r = el.getBoundingClientRect(); if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) return +el.dataset.i; } return -1; };
+  const duoSolo = (i) => { if (i < 0) return; duo.solo = true; state.pageIndex = i; zoom.s = 1; renderPage(); };
   stage.addEventListener('pointerdown', (e) => {
+    if (!duo.on) return;
+    if (e.target.closest('.navarrow')) return;
+    dN++;
+    if (dN === 2) { const i = state.pageIndex; dT = null; duoSolo(i); return; }
+    dT = { x: e.clientX, y: e.clientY };
+  }, true);
+  stage.addEventListener('pointerup', (e) => {
+    if (!duo.on) { dN = 0; return; }
+    dN = Math.max(0, dN - 1);
+    const t = dT; dT = null; if (!t || flipDrag.active || viewFlip.dragged) return;
+    const dx = e.clientX - t.x, dy = e.clientY - t.y;
+    if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) { step(dx < 0 ? 1 : -1); return; }
+    if (Math.hypot(dx, dy) > 8) return;
+    const i = duoHit(e), now = Date.now();
+    if (i >= 0 && dLast.i === i && now - dLast.t < 320) { dLast = { t: 0, i: -1 }; duoSolo(i); return; }
+    dLast = { t: now, i };
+    if (i >= 0 && i !== state.pageIndex) { state.pageIndex = i; history.replaceState({ s: 'page', doc: state.docId, i }, ''); renderPage(true); }
+  }, true);
+  stage.addEventListener('pointercancel', () => { dN = 0; dT = null; }, true);
+  stage.addEventListener('pointerdown', (e) => {
+    if (duo.on) return; // 6.1.2
     if (e.target.closest('.navarrow')) return;
     stage.setPointerCapture(e.pointerId);
     pts.set(e.pointerId, pos(e));
@@ -3420,6 +4124,7 @@ function applyZoom(gesturing) {
       else if (plainReady(viewPage)) { holdStart = p; holdT = setTimeout(plainShow, 320); } // 4.1.2：按住看精修前
       if (now - lastTap < 300) { // 雙擊縮放
         const b = zoom.base;
+        if (zoom.s <= 1 && duo.solo && !adj.open) { duo.solo = false; lastTap = 0; renderPage(); return; } // 6.1.2：只看一頁時雙擊回到兩頁
         if (zoom.s > 1) { zoom.s = 1; } else {
           const ns = 3;
           zoom.x = (p[0] - b.x) - ((p[0] - b.x - zoom.x) / zoom.s) * ns;
@@ -3460,7 +4165,7 @@ function applyZoom(gesturing) {
   const up = (e) => {
     const p = pts.get(e.pointerId);
     pts.delete(e.pointerId);
-    if (swipeStart && p && pts.size === 0 && !adj.open) {
+    if (swipeStart && p && pts.size === 0 && !adj.open && !flipDrag.active && !viewFlip.dragged) { // 6.1.1：跟著手指翻的已經處理了
       const dx = pos(e)[0] - swipeStart[0], dy = pos(e)[1] - swipeStart[1];
       if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
     }
@@ -3489,10 +4194,182 @@ function plainHide() {
   const p = viewPage; $('#cmpTag').style.display = 'none';
   if (p) { const img = $('#viewImg'); img.onload = null; img.src = blobUrl('v:' + p.id, p.processed || p.original, verOf(p, 'processed')); }
 }
-function step(d) { state.pageIndex += d; zoom.s = 1; renderPage(); history.replaceState({ s: 'page', doc: state.docId, i: state.pageIndex }, ''); }
+/* ---------- 6.1.2 單頁畫面：橫放一次顯示兩頁（作者：橫著看時跟樂譜一樣的左右頁）＋翻書動畫 ----------
+   兩頁並排：單頁畫面、畫面比例夠寬（寬 > 高 ×1.25）、沒開調整面板、沒有「只看一頁」時。
+   左右怎麼排看文件的 spreadFirst：'L'（預設，1｜2、3｜4）或 'R'（第一頁單獨在右：　｜1、2｜3）；文件「⋯」選單與兩頁時標題列的按鈕切換。
+   state.pageIndex＝選到的那頁（工具都作用在這頁，加外框；預設右頁）。點一頁＝選它；雙擊或雙指＝只看那一頁（可以放大），雙擊（沒放大時）或返回鍵回到兩頁。
+   翻頁像真的翻書：往後翻＝右頁沿書背往左翻（背面是下一組的左頁），往回翻＝左頁往右翻（背面是上一組的右頁）。
+   直向一頁：往後翻＝這頁沿左邊翻走；往回翻＝上一頁從左邊翻回來蓋上（作者：像真的書）。到頭／到尾不翻，輕輕偏一下彈回 */
+const viewFlip = { pre: new Map(), under: null, dragged: false };
+const duo = { on: false, solo: false, first: 'L', ids: [], s: 0 };
+let viewIds = [];
+const duoWanted = () => { if (current !== 'page' || adj.open || duo.solo) return false; const r = $('#viewStage').getBoundingClientRect(); return r.width > r.height * 1.25 && viewIds.length > 1; };
+const duoSpreadOf = (i) => (duo.first === 'R' ? Math.floor((i + 1) / 2) : Math.floor(i / 2));
+const duoPair = (s) => { const L = duo.first === 'R' ? 2 * s - 1 : 2 * s; return [L, L + 1].map((i) => (i >= 0 && i < viewIds.length ? i : -1)); };
+const duoHas = (s) => s >= 0 && duoPair(s).some((i) => i >= 0);
+async function viewPreload() {
+  const { ids } = await docPageIds(state.docId);
+  let want;
+  if (duo.on) { const s = duoSpreadOf(state.pageIndex); want = [...duoPair(s - 1), ...duoPair(s + 1)].filter((i) => i >= 0).map((i) => ids[i]); }
+  else want = [ids[state.pageIndex - 1], ids[state.pageIndex + 1]].filter(Boolean);
+  for (const [id, v] of viewFlip.pre) if (!want.includes(id)) { URL.revokeObjectURL(v.url); viewFlip.pre.delete(id); }
+  for (const id of want) {
+    if (viewFlip.pre.has(id)) continue;
+    const p = await DB.get('pages', id); if (!p || current !== 'page') continue;
+    const b = p.processed || p.original; if (!b) continue;
+    const url = URL.createObjectURL(b), im = new Image(); im.src = url;
+    try { await im.decode(); } catch (_) { URL.revokeObjectURL(url); continue; }
+    viewFlip.pre.set(id, { url, im, w: im.naturalWidth, h: im.naturalHeight });
+  }
+}
+function viewPreDrop() { for (const v of viewFlip.pre.values()) URL.revokeObjectURL(v.url); viewFlip.pre.clear(); }
+function viewUnderClean() { if (viewFlip.under) { viewFlip.under.remove(); viewFlip.under = null; } }
+// 一張圖畫成指定位置大小的快照（翻頁的紙用）
+function snapImg(im, rect) {
+  const dpr = Math.min(2, window.devicePixelRatio || 1), c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(rect.width * dpr)); c.height = Math.max(1, Math.round(rect.height * dpr));
+  const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+  try { x.drawImage(im, 0, 0, c.width, c.height); } catch (_) {}
+  return { canvas: c, rect };
+}
+// 單頁的位置（跟 fitView 一樣）
+function fitRect(w, h) {
+  const st = $('#viewStage').getBoundingClientRect(), pad = 14, sc = Math.min((st.width - pad * 2) / w, (st.height - pad * 2) / h);
+  const W = w * sc, H = h * sc;
+  return { left: st.left + (st.width - W) / 2, top: st.top + (st.height - H) / 2, width: W, height: H };
+}
+// 兩頁的位置：書背在正中間，兩頁同高
+function duoRects(arL, arR) {
+  const st = $('#viewStage').getBoundingClientRect(), pad = 14, half = st.width / 2 - pad;
+  const a = arL || arR || 0.71, b = arR || arL || 0.71;
+  const H = Math.min(st.height - pad * 2, half / a, half / b), cx = st.left + st.width / 2, top = st.top + (st.height - H) / 2;
+  return [{ left: cx - H * a, top, width: H * a, height: H }, { left: cx, top, width: H * b, height: H }];
+}
+const imgAr = (el) => (el && el.naturalWidth ? el.naturalWidth / el.naturalHeight : 0);
+function duoLayout() {
+  const L = $('#duoL'), R = $('#duoR'), st = $('#viewStage').getBoundingClientRect();
+  const [rl, rr] = duoRects(imgAr(L.style.display !== 'none' ? L : null), imgAr(R.style.display !== 'none' ? R : null));
+  for (const [el, r] of [[L, rl], [R, rr]]) Object.assign(el.style, { left: r.left - st.left + 'px', top: r.top - st.top + 'px', width: r.width + 'px', height: r.height + 'px' });
+}
+// 兩頁並排的畫面（renderPage 呼叫；p＝選到的那頁）
+async function duoRender(ids, p) {
+  duo.ids = ids; duo.s = duoSpreadOf(state.pageIndex);
+  const [iL, iR] = duoPair(duo.s), L = $('#duoL'), R = $('#duoR');
+  const pp = await Promise.all([iL, iR].map((i) => (i >= 0 ? (i === state.pageIndex ? p : DB.get('pages', ids[i])) : null)));
+  const keep = pp.filter(Boolean).map((q) => q.id);
+  for (const [k, v] of urlCache) if ((k.startsWith('v:') || k.startsWith('plain:')) && !keep.includes(k.slice(k.indexOf(':') + 1))) { URL.revokeObjectURL(v.url); urlCache.delete(k); }
+  const loads = [[L, pp[0]], [R, pp[1]]].map(([el, q]) => new Promise((res) => {
+    el.classList.toggle('sel', !!q && q.id === p.id);
+    if (!q) { el.style.display = 'none'; el.removeAttribute('src'); res(); return; }
+    el.style.display = ''; el.dataset.i = ids.indexOf(q.id);
+    const url = blobUrl('v:' + q.id, q.processed || q.original, verOf(q, 'processed'));
+    if (el.getAttribute('src') === url && el.complete) { res(); return; }
+    el.onload = el.onerror = () => res(); el.src = url;
+  }));
+  ensureFresh(pp.filter(Boolean));
+  await Promise.all(loads);
+  duoLayout();
+  const nums = [iL, iR].filter((i) => i >= 0).map((i) => i + 1);
+  $('#pageTitle').textContent = `第 ${nums.join('–')} / ${ids.length} 頁`;
+  $('#prevBtn').style.visibility = duoHas(duo.s - 1) ? 'visible' : 'hidden';
+  $('#nextBtn').style.visibility = duoHas(duo.s + 1) ? 'visible' : 'hidden';
+}
+function duoShow(on) {
+  duo.on = on;
+  $('#page').classList.toggle('duo', on);
+  $('#viewDuo').style.display = on ? '' : 'none';
+  $('#viewImg').style.visibility = on ? 'hidden' : '';
+  $('#duoSide').style.display = on ? '' : 'none';
+  $('#duoSide').textContent = duo.first === 'R' ? '第一頁在右' : '第一頁在左';
+}
+// 到頭／到尾：輕輕偏一下再彈回
+function viewBounce(d) {
+  const el = duo.on ? $('#viewDuo') : $('#viewImg');
+  if (!flipOn()) return;
+  el.animate([{ translate: '0 0' }, { translate: `${-d * 22}px 0` }, { translate: '0 0' }], { duration: 320, easing: 'cubic-bezier(.3,.7,.4,1)' });
+}
+// 翻頁需要的東西：dir＝1 往後、-1 往回；回傳 { snap 翻的那張, back 背面圖, rev 是否「從左邊翻回來蓋上」, under 墊底元素 } 或 null（還沒讀好）
+function viewFlipParts(dir) {
+  const st = $('#viewStage');
+  if (duo.on) {
+    const s = duo.s + dir; if (!duoHas(s)) return null;
+    const [nL, nR] = duoPair(s).map((i) => (i >= 0 ? viewFlip.pre.get(viewIds[i]) : null));
+    const need = duoPair(s).map((i, k) => (i >= 0 ? (k ? nR : nL) : true)); if (need.some((x) => !x)) return null;
+    const curL = $('#duoL'), curR = $('#duoR');
+    const fl = dir > 0 ? curR : curL; // 翻的那張
+    if (fl.style.display === 'none' || !fl.naturalWidth) {
+      // 這一邊是空的（第一組左邊或最後一組右邊）：用一張白紙翻
+      const r = (dir > 0 ? duoRects(imgAr(curL), 0)[1] : duoRects(0, imgAr(curR))[0]);
+      const c = document.createElement('canvas'); c.width = 8; c.height = 8; c.getContext('2d').fillStyle = '#FBF8F3'; c.getContext('2d').fillRect(0, 0, 8, 8);
+      var snap = { canvas: c, rect: r };
+    } else snap = snapCanvases(fl, [fl]);
+    const backP = dir > 0 ? nL : nR, back = backP && backP !== true ? backP.im : null;
+    // 墊底：往後翻＝左邊先留著目前的左頁、右邊放下一組的右頁；往回翻＝左邊放上一組的左頁、右邊留著目前的右頁
+    const under = document.createElement('div'); Object.assign(under.style, { position: 'absolute', inset: 0, zIndex: 15, pointerEvents: 'none' });
+    const sr = st.getBoundingClientRect(), [rl, rr] = duoRects(nL && nL !== true ? nL.w / nL.h : 0, nR && nR !== true ? nR.w / nR.h : 0);
+    const put = (src, r, isImg) => { if (!src) return; const el = isImg ? new Image() : src; if (isImg) el.src = src; Object.assign(el.style, { position: 'absolute', left: r.left - sr.left + 'px', top: r.top - sr.top + 'px', width: r.width + 'px', height: r.height + 'px', background: '#fff', boxShadow: '0 4px 22px rgba(58,40,30,.25)' }); under.appendChild(el); };
+    if (dir > 0) { if (curL.style.display !== 'none' && curL.naturalWidth) put(snapCanvases(curL, [curL]).canvas, curL.getBoundingClientRect(), false); if (nR && nR !== true) put(nR.url, rr, true); }
+    else { if (nL && nL !== true) put(nL.url, rl, true); if (curR.style.display !== 'none' && curR.naturalWidth) put(snapCanvases(curR, [curR]).canvas, curR.getBoundingClientRect(), false); }
+    return { snap, back, rev: false, under };
+  }
+  const i = state.pageIndex + dir; if (i < 0 || i >= viewIds.length) return null;
+  const v = viewFlip.pre.get(viewIds[i]); if (!v) return null;
+  const img = $('#viewImg'); if (!img.naturalWidth) return null;
+  if (dir > 0) { // 往後：這頁翻走，下面是下一頁
+    const under = new Image(); under.src = v.url; const r = fitRect(v.w, v.h), sr = st.getBoundingClientRect();
+    Object.assign(under.style, { position: 'absolute', left: r.left - sr.left + 'px', top: r.top - sr.top + 'px', width: r.width + 'px', height: r.height + 'px', zIndex: 15, background: '#fff', boxShadow: '0 4px 22px rgba(58,40,30,.25)', pointerEvents: 'none' });
+    return { snap: snapCanvases(img, [img]), back: null, rev: false, under };
+  }
+  // 往回：上一頁從左邊翻回來蓋住這頁（墊底留著目前這頁的快照，蓋好才拿掉）
+  const cur = snapCanvases(img, [img]), sr = st.getBoundingClientRect(), under = cur.canvas;
+  Object.assign(under.style, { position: 'absolute', left: cur.rect.left - sr.left + 'px', top: cur.rect.top - sr.top + 'px', width: cur.rect.width + 'px', height: cur.rect.height + 'px', zIndex: 15, background: '#fff', boxShadow: '0 4px 22px rgba(58,40,30,.25)', pointerEvents: 'none' });
+  return { snap: snapImg(v.im, fitRect(v.w, v.h)), back: null, rev: true, under };
+}
+function viewCommit(dir) {
+  if (duo.on) { const [iL, iR] = duoPair(duo.s + dir); state.pageIndex = iR >= 0 ? iR : iL; }
+  else state.pageIndex += dir;
+  zoom.s = 1; history.replaceState({ s: 'page', doc: state.docId, i: state.pageIndex }, '');
+  return renderPage().then(() => new Promise((r) => { const img = duo.on ? $('#duoR') : $('#viewImg'); if (img.complete) setTimeout(r, 40); else { img.addEventListener('load', () => setTimeout(r, 40), { once: true }); setTimeout(r, 1500); } }));
+}
+flipDrag($('#viewStage'), {
+  ready: () => current === 'page' && !adj.open && zoom.s === 1,
+  canFlip: (d) => {
+    const ok = duo.on ? duoHas(duo.s + d) : state.pageIndex + d >= 0 && state.pageIndex + d < viewIds.length;
+    if (!ok) { viewBounce(d); viewFlip.dragged = true; setTimeout(() => { viewFlip.dragged = false; }, 400); }
+    return ok;
+  },
+  parts: (d) => viewFlipParts(d),
+  under: (d, parts) => { viewUnderClean(); $('#viewStage').appendChild(parts.under); viewFlip.under = parts.under; viewFlip.dragged = true; return parts.under; },
+  snap: (d, parts) => parts.snap,
+  commit: (d) => { setTimeout(() => { viewFlip.dragged = false; }, 0); return viewCommit(d); },
+  cleanup: () => { viewUnderClean(); viewFlip.dragged = false; },
+});
+function step(d) {
+  // 按箭頭、快速滑動：自動翻（6.1.2 到頭／到尾彈回，作者：到底了還能翻、翻完還是同一頁）
+  const ok = duo.on ? duoHas(duo.s + d) : state.pageIndex + d >= 0 && state.pageIndex + d < viewIds.length;
+  if (!ok) { viewBounce(d); return; }
+  const parts = flipOn() && !adj.open ? viewFlipParts(d) : null;
+  if (!parts) { // 前後頁還沒讀好、或不播動畫：直接換（往後翻還是可以用目前這頁翻走）
+    if (flipOn() && !adj.open && !duo.on && d > 0) { const img = $('#viewImg'); if (img.naturalWidth) { const snap = snapCanvases(img, [img]); viewCommit(d); bookFlip($('#viewStage'), snap, 1); return; } }
+    viewCommit(d); return;
+  }
+  viewUnderClean(); $('#viewStage').appendChild(parts.under); viewFlip.under = parts.under;
+  const sheet = flipSheet($('#viewStage'), parts.snap, parts.rev ? -d : d, parts.back);
+  if (parts.rev) sheet.set(1);
+  const pr = viewCommit(d), u = parts.under;
+  sheet.finish(!parts.rev, 700).then(async () => { try { await pr; } catch (_) {} if (viewFlip.under === u) viewUnderClean(); });
+}
 $('#prevBtn').onclick = () => (adj.open && adj.scope === 'doc' ? adjSwitch(-1) : step(-1));
 $('#nextBtn').onclick = () => (adj.open && adj.scope === 'doc' ? adjSwitch(1) : step(1));
-$('#pageBack').onclick = () => history.back();
+$('#pageBack').onclick = () => { if (duo.solo && !adj.open) { const r = $('#viewStage').getBoundingClientRect(); if (r.width > r.height * 1.25) { duo.solo = false; renderPage(); return; } } history.back(); }; // 6.1.2：只看一頁時先回到兩頁
+// 6.1.2：兩頁並排的第一頁在左／右（每份文件各自記住）
+async function setSpreadFirst(v) {
+  const d = await DB.get('docs', state.docId); if (!d) return;
+  d.spreadFirst = v; await DB.put('docs', d); duo.first = v;
+  toast(v === 'R' ? '橫放兩頁時，第一頁放在右邊' : '橫放兩頁時，第一頁放在左邊');
+  if (current === 'page') renderPage(true);
+}
+$('#duoSide').onclick = () => setSpreadFirst(duo.first === 'R' ? 'L' : 'R');
 async function updatePage(patch) {
   const p = await DB.get('pages', viewPage.id);
   pushHist(p);
@@ -3600,6 +4477,8 @@ async function adjSwitch(d) {
   adjPrepare(pj);
 }
 function fitAdj() {
+  // 6.0.3：橫向時拉桿是直的（轉 90 度），長度跟著右邊那欄的高度
+  const one = $('#adjPanel .adjone'); if (one) { const hh = one.getBoundingClientRect().height; one.style.setProperty('--sl', Math.max(120, hh - 64) + 'px'); }
   if (!adj.pw) return;
   const st = $('#viewStage').getBoundingClientRect();
   const pad = 10;
@@ -4459,12 +5338,15 @@ async function aiUpgrade() {
   return true;
 }
 // 一張圖 → { corners } 或 { reject }
-async function aiFrame(img) {
-  await whenReady();
+async function aiMask(img) {
   const c = canvasOf(320, 320), x = c.getContext('2d', { willReadFrequently: true });
   x.drawImage(img, 0, 0, 320, 320);
   const d = x.getImageData(0, 0, 320, 320);
-  const mask = await aiCall({ type: 'mask', buffer: d.data.buffer }, [d.data.buffer]);
+  return aiCall({ type: 'mask', buffer: d.data.buffer }, [d.data.buffer]);
+}
+async function aiFrame(img) {
+  await whenReady();
+  const mask = await aiMask(img);
   const teed = await teedMap(img); // 4.2：沒有 TEED 資料或出錯時是 null，只用 AI
   const f = smallFrame(img, 900);
   const pl = { buffer: f.data.buffer, width: f.width, height: f.height, mask }, tr = [f.data.buffer, mask];
@@ -4517,6 +5399,7 @@ function aiRejectMsg(r) {
 $('#cropAI').onclick = async () => {
   const c = cropCtx; if (!c) return;
   if (!(await aiEnsure())) return;
+  if (c.spread) { if (cropCtx === c) await cropSpreadRedo(c, true); return; } // 6.0.2 雙頁：AI 重新找整本書
   busy('AI 框選中…');
   try {
     const r = await aiFrame($('#cropImg'));
@@ -4831,6 +5714,13 @@ const CHANGELOG = [
     { t: '主畫面可以直接選擇黑白、灰階、彩色、原圖', since: '5.4' },
     { t: '最近掃描可以直接刪除文件', since: '5.4' },
   ] },
+  // 6.0：雙頁模式（新功能＝大版本）
+  { v: 'v6', items: [
+    { t: '新增雙頁模式：攤開的書拍一張，自動拆成左右兩頁', since: '6.0' },
+    { t: '即時掃描也支援雙頁模式', since: '6.1' },
+    { t: '翻頁加上翻書動畫', since: '6.1' },
+    { t: '手機橫放時可一次顯示兩頁，並可設定左頁及右頁顯示', since: '6.1.2' },
+  ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
 const verNum = (v) => v.split('.').map(Number);
@@ -4888,8 +5778,15 @@ function paintHomeModes() {
     el.innerHTML = MODES.map((m) => `<button data-m="${m.id}">${m.name}</button>`).join('');
     el.querySelectorAll('button').forEach((b) => b.onclick = () => { settings.mode = b.dataset.m; saveSettings(); paintHomeModes(); });
     el.dataset.ok = '1';
+    $('#homeSpread').onclick = () => setSpread(!settings.spread); // 6.0
   }
   el.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.m === settings.mode));
+  const sb = $('#homeSpread'); sb.classList.toggle('on', !!settings.spread); sb.setAttribute('aria-pressed', settings.spread ? 'true' : 'false');
+}
+// 6.0 雙頁模式開關（主畫面、高畫質連拍畫面共用，記住上次的選擇）
+function setSpread(on) {
+  settings.spread = !!on; saveSettings(); paintHomeModes();
+  toast(on ? '雙頁模式：攤開的書拍一張，自動拆成左右兩頁' : '已改回單頁模式');
 }
 paintHomeModes();
 function hasNewLog() { const seen = logSeen() || '0'; return seen !== APP_VER && CHANGELOG.some((g) => g.items.some((it) => it.since && verGt(it.since, seen))); }
