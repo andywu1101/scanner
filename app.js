@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.2.4'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.2.5'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -5434,7 +5434,8 @@ async function aiOptimize() {
   aiOptRunning = true;
   try { localStorage.setItem(AI_OPT_KEY, String(Date.now())); } catch (_) {} // 6.2.3：最佳化途中閃退的記號
   const hc = navigator.hardwareConcurrency || 4, hasTeed = await aiHas([TEED_FILE]);
-  const list = [1, 2, 4].filter((n) => n === 1 || n <= hc), gpuTry = !!navigator.gpu && aiGpuOk();
+  // 6.2.5：iPhone／iPad 不測 4 條（作者 iOS 27 iPhone 17 最佳化偶爾崩潰回封面；4 條最吃記憶體，TEED 1／2／4 條 210／192／198 毫秒幾乎沒差，框選 GPU 222 最快）
+  const list = (AI_IOS_DEV ? [1, 2] : [1, 2, 4]).filter((n) => n === 1 || n <= hc), gpuTry = !!navigator.gpu && aiGpuOk();
   const per = hasTeed ? 2 : 1, total = list.length * per + (gpuTry ? 1 : 0);
   let done = 0, w = null;
   const step = () => busyProg(`最佳化 AI 效能中…（${Math.min(total, done + 1)}／${total}）\n請不要離開這個畫面`, done / total);
@@ -5445,7 +5446,7 @@ async function aiOptimize() {
     for (let k = 1; k <= 2; k++) {
       const d0 = done;
       try {
-        await napMs(k === 1 ? 500 : 1000);
+        await napMs(1000); // 6.2.5：換 Worker 前等 1 秒（原本 0.5 秒；作者提議，讓手機有時間收回記憶體）
         w = optWorker(n);
         const r0 = await w.post({ type: 'init', engine: 'new', ep: 'wasm', threads: n });
         if (n > 1 && r0.threads !== n) { w.end(); w = null; return 'noiso'; } // 這個 Worker 沒有隔離：多條測不了
@@ -5466,7 +5467,7 @@ async function aiOptimize() {
     for (const n of list) { const r = await cfg(n); if (r === 'noiso') { done = list.length * per; break; } }
     if (gpuTry) { // GPU 最後測、自己一個 Worker；用不了（null）或出錯都當作沒有 GPU
       aiGpuMark(1); // 6.2.2：閃退保護
-      try { await napMs(500); w = optWorker(1); await w.post({ type: 'init', engine: 'new', ep: 'webgpu', threads: 1 }); step(); R.gpu = await w.post({ type: 'optRun', model: 'u2', ep: 'webgpu' }); }
+      try { await napMs(1000); w = optWorker(1); await w.post({ type: 'init', engine: 'new', ep: 'webgpu', threads: 1 }); step(); R.gpu = await w.post({ type: 'optRun', model: 'u2', ep: 'webgpu' }); }
       catch (e) { R.gpu = null; errs.push('GPU：' + err(e)); }
       aiGpuMark(-1);
       if (w) { w.end(); w = null; } done++;
