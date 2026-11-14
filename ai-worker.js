@@ -42,7 +42,10 @@ const getSess = once(() => getSess0()), srGet = once(() => srGet0()), teedGet = 
 function mkSess(model, want) {
   return serial(async () => {
     for (let k = 0; ; k++) {
-      try { return await ort.InferenceSession.create(model, { executionProviders: [want], graphOptimizationLevel: 'all' }); }
+      // 6.2.6：多條時關掉執行緒「空轉等工作」（ORT 預設會空轉一陣子佔著 CPU；作者 Y31 開 2 條後即時框選變少、AI 也沒感覺變快）
+      const o = { executionProviders: [want], graphOptimizationLevel: 'all' };
+      if (threads > 1) o.extra = { session: { intra_op: { allow_spinning: '0' }, inter_op: { allow_spinning: '0' } } };
+      try { return await ort.InferenceSession.create(model, o); }
       catch (err) { if (k >= 4 || !/being created|initWasm/i.test(String(err && err.message))) throw err; await new Promise((r) => setTimeout(r, 300 * (k + 1))); }
     }
   });
