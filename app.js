@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.2.7'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.2.8'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -1027,13 +1027,19 @@ async function aiCorners(blob) {
    框選：自動 AI 框選開著用 AI 遮罩找整個攤開的範圍，否則用原本的偵測；書溝有 TEED 時一起用（AI 資料下載過就有）。
    書溝找不到 → 從正中間切；整個範圍都找不到 → 整張照片從中間切。這兩種情況兩頁都標 ✂ 待裁切（作者選甲） */
 const HALF_L = [[0, 0], [0.5, 0], [0.5, 1], [0, 1]], HALF_R = [[0.5, 0], [1, 0], [1, 1], [0.5, 1]];
-async function spreadSplit(blob, useAI, useTeed, rot) {
+async function spreadSplit(blob, useAI, useTeed, rot, mark) {
+  const st = (s) => { if (mark) stageMark(s); }; // 6.2.8 足跡（即時掃描的雙頁）
+  st('雙頁：解開照片');
   const { img, url } = await loadImg(blob);
   try {
     await whenReady();
+    st('雙頁：AI 框選');
     const mask = useAI ? await aiMask(img) : null;
+    st('雙頁：TEED');
     const teed = useAI || useTeed ? await teedMap(img) : null;
     const f = smallFrame(img, 900);
+    try { URL.revokeObjectURL(url); img.removeAttribute('src'); } catch (_) {} // 6.2.8：縮小的圖都做好了，整張大圖馬上放掉，不等找書溝做完
+    st('雙頁：找書溝');
     const pl = { buffer: f.data.buffer, width: f.width, height: f.height, rot: rot || 0 }, tr = [f.data.buffer]; // 6.1.4 rot：書在照片裡要轉幾度才正
     if (mask) { pl.mask = mask; tr.push(mask); }
     if (teed) { pl.teed = teed; tr.push(teed.buffer); }
@@ -2231,6 +2237,7 @@ $('#camTipX').onclick = () => { clearTimeout(camTipT); $('#camTip').classList.re
    - 立即裁切：自動 AI 框選開著先用 AI 拆好，再進兩頁一起調的裁切畫面；稍後裁切：自動 AI 框選開著，按「完成」後兩頁一起用 AI 重拆 */
 async function liveSpreadSave(o) {
   const { blob, quad, gut, needUser, capRot, thumbFrame, fx, now2crop, endDefer, defT0, fromPhoto } = o;
+  stageMark('雙頁：拍下'); // 6.2.8
   if (now2crop) { live.paused = true; camPause(); } // 6.1.4：跟單頁一樣一拍下就先暫停相機（作者 Y31：掃描光條那段還看得到鏡頭在動）
   let pages = null, ok = false, g = quad ? gut : null;
   if (g && fromPhoto) { // Android 另外拍的照片：跟預覽畫面同比例，鎖定的框才對得上
@@ -2241,13 +2248,14 @@ async function liveSpreadSave(o) {
   else {
     if (!fx) busy(useAI ? 'AI 框選中…' : '尋找書溝…');
     try {
-      const sp = await spreadSplit(blob, useAI, useAI || !!live.teedOK, capRot); // 6.1.4
+      const sp = await spreadSplit(blob, useAI, useAI || !!live.teedOK, capRot, true); // 6.1.4；6.2.8 記足跡
       if (sp.ok || !quad || fromPhoto) { pages = sp.pages; ok = sp.ok; }
     } catch (e) { console.warn('雙頁', e); }
     finally { if (!fx) unbusy(); if (useAI) aiReleaseNow(); }
     if (!pages) pages = quadHalves(quad, g, capRot).map((c) => ({ corners: c, curve: null }));
   }
   const need = !!needUser || !ok;
+  stageMark('雙頁：存檔');
   if (!live.docId) live.docId = (await createDoc()).id;
   const pL = await addPage(live.docId, blob, pages[0].corners, pages[0].curve, need, capRot);
   const pR = await addPage(live.docId, blob, pages[1].corners, pages[1].curve, need, capRot);
@@ -2262,6 +2270,7 @@ async function liveSpreadSave(o) {
   updResChip();
   live.lastCapT = defT0 || Date.now(); live.miss = 0; live.best = null; live.idleT0 = performance.now();
   live.gutter = null;
+  if (!now2crop) stageClear(); // 6.2.8：稍後裁切這張就做完了
   if (!quad) { live.armed = true; resetLock(); }
   if (!ok && !now2crop) toast('找不到書溝，已從中間分成兩頁（✂）');
   if (now2crop) {
@@ -2275,6 +2284,7 @@ async function liveSpreadSave(o) {
   live.capturing = false;
 }
 function openLiveSpreadCrop(pp, blob, pages, replace) {
+  stageMark('雙頁：開裁切畫面'); // 6.2.8
   live.paused = true; freeFullCanvases(); camPause();
   openCrop({
     blob, rotation: pp[0].rotation || 0, retake: true, liveCrop: true, replace,
@@ -2288,6 +2298,7 @@ function openLiveSpreadCrop(pp, blob, pages, replace) {
         await DB.put('pages', p); out.push(p);
       }
       if (out.length < 2) { history.back(); return; }
+      stageMark('雙頁：成品畫面'); // 6.2.8
       const act = await showCapResult(ids); // 成品：左頁 → 翻到右頁
       if (act === 'edit') { openLiveSpreadCrop(out, blob, out.map((p) => ({ corners: p.corners, curve: p.curve })), true); return; }
       if (act === 'ok') { capRes.flying = true; history.back(); try { await capResFly(); } finally { capRes.flying = false; } }
@@ -2341,6 +2352,7 @@ async function removeLivePage(pageId) {
   if (last) { live.lastPageId = last.id; th.querySelector('img').src = blobUrl('live:last', last.original, last.id); refreshLiveThumb(last.id); }
 }
 function liveResume() {
+  stageClear(); // 6.2.8
   live.paused = false; live.idleT0 = live.seenT = performance.now(); live.tT0 = null; live.tCapped = false; // 4.1.7；4.3
   if (!live.track || live.track.readyState === 'ended') { finishLive(); return; } // 中途被切到背景，相機已經關了
   camResume(); // 3.1.5：相機恢復送畫面
@@ -2552,6 +2564,7 @@ $('#torchBtn').onclick = async () => {
   catch (_) { toast('無法開啟閃光燈'); }
 };
 function finishLive() {
+  stageClear(); // 6.2.8
   // 3.1.4：最後一張還在等動畫結束才存：收掉動畫、等它存好再結束
   if (live.deferring && live.deferDone) {
     if (capFx.cur) capFx.cur.stop();
@@ -5325,6 +5338,17 @@ function aiBatchMark(on) {
   try { if (on) localStorage.setItem(AI_BATCH_KEY, String(Date.now())); else localStorage.removeItem(AI_BATCH_KEY); } catch (_) {}
   if (!on && aiEPNow === 'webgpu' && settings.aiCrashN) { settings.aiCrashN = 0; saveSettings(); } // 5.1.7：GPU 順利做完一批，閃退次數歸零
 }
+/* 6.2.8 足跡紀錄：作者 iPhone 17（iOS 27）雙頁＋即時掃描＋立即裁切，拍第一張時偶爾閃退回封面，沒有跳「AI 處理中斷」（GPU 沒在跑）。
+   推測是同時解開好幾份整張照片（拆頁、裁切畫面、拍攝動畫疊卡、成品預先做好另一頁）。雙頁流程每一步開始時記下（STAGE_KEY），
+   回到拍攝或結束即時掃描就清掉；下次打開還在＝在那一步閃退，記進隱藏區 AI 紀錄。不改任何行為 */
+const STAGE_KEY = 'cocoscan-stage';
+function stageMark(s) { try { localStorage.setItem(STAGE_KEY, JSON.stringify({ s, t: Date.now() })); } catch (_) {} }
+function stageClear() { try { localStorage.removeItem(STAGE_KEY); } catch (_) {} }
+function stageCheck() {
+  let v = null; try { v = localStorage.getItem(STAGE_KEY); localStorage.removeItem(STAGE_KEY); } catch (_) {}
+  if (!v) return;
+  try { const o = JSON.parse(v); aiNote(`上次在「${o.s}」這一步中斷（閃退或 App 被關掉）`); } catch (_) {}
+}
 function aiCrashCheck() {
   let was = null, gpu = null;
   try { was = localStorage.getItem(AI_BATCH_KEY); localStorage.removeItem(AI_BATCH_KEY); gpu = localStorage.getItem(AI_GPU_KEY); localStorage.removeItem(AI_GPU_KEY); } catch (_) {}
@@ -5364,6 +5388,7 @@ function aiCrashTell(t) {
   }, 1500);
 }
 aiCrashCheck();
+stageCheck(); // 6.2.8
 function aiPost(payload, transfer) {
   aiLastUse = performance.now();
   const t = payload.type;
